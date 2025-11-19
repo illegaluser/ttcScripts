@@ -1,0 +1,112 @@
+# --- docker-compose.yml (통합 DevOps + LLM 버전) ---
+version: '3.8'
+
+services:
+  # 1. AnythingLLM (기존 서비스 - 변경 없음)
+  anything-llm:
+    image: mintplexlabs/anythingllm
+    container_name: anything-llm
+    ports:
+      - "3001:3001"
+    volumes:
+      - anything_data:/app/server/storage 
+    environment:
+      - STORAGE_DIR=/app/server/storage 
+    networks:
+      - local_dev_net # 모든 컨테이너가 소통할 네트워크
+    restart: always
+
+  # 2. GitLab (Community Edition)
+  gitlab:
+    image: 'gitlab/gitlab-ce:latest'
+    container_name: gitlab
+    restart: always
+    hostname: 'gitlab.local' # 내부에서 사용할 호스트명
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8929' # GitLab에 접속할 주소
+        # (옵션) 리소스 절약을 위해 일부 서비스 비활성화
+        # monitoring['grafana']['enable'] = false
+        # monitoring['prometheus']['enable'] = false
+        # gitlab_pages['enable'] = false
+        # gitlab_rails['registry_enabled'] = false
+    ports:
+      - "8929:8929" # Mac/Windows의 8929 포트로 접속 (80이 아님)
+      - "8922:22"   # SSH용 포트 (필요시)
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+    networks:
+      - local_dev_net
+
+  # 3. SonarQube (LTS 버전)
+  sonarqube:
+    image: sonarqube:lts-community
+    container_name: sonarqube
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_JDBC_URL=jdbc:postgresql://sonarqube-db:5432/sonar
+      - SONAR_JDBC_USERNAME=sonar
+      - SONAR_JDBC_PASSWORD=sonar
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    networks:
+      - local_dev_net
+    depends_on:
+      - sonarqube-db # 반드시 DB가 먼저 실행된 후 실행
+
+  # 4. SonarQube용 PostgreSQL DB
+  sonarqube-db:
+    image: postgres:15
+    container_name: sonarqube-db
+    environment:
+      - POSTGRES_USER=sonar
+      - POSTGRES_PASSWORD=sonar
+      - POSTGRES_DB=sonar
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - local_dev_net
+    # ports: # DB 포트는 외부로 노출할 필요 없음
+    #   - "5432:5432" 
+
+  # 5. Jenkins (LTS 버전)
+  jenkins:
+    image: 'jenkins/jenkins:lts-jdk17'
+    container_name: jenkins
+    ports:
+      - "8080:8080" # Jenkins 접속 포트
+      - "50000:50000" # 에이전트 연결용
+    volumes:
+      - jenkins_data:/var/jenkins_home
+    networks:
+      - local_dev_net
+    restart: always
+
+# 모든 컨테이너가 소통할 공용 네트워크
+networks:
+  local_dev_net:
+    driver: bridge
+
+# 모든 서비스의 데이터를 영구 보존할 볼륨 목록
+volumes:
+  # (중요) 기존 데이터가 저장된 볼륨 (삭제되지 않음)
+  anything_data: {} 
+  
+  # (신규) GitLab 데이터
+  gitlab_config: {}
+  gitlab_logs: {}
+  gitlab_data: {}
+
+  # (신규) SonarQube 데이터
+  sonarqube_data: {}
+  sonarqube_extensions: {}
+  sonarqube_logs: {}
+  postgres_data: {} # SonarQube의 DB 데이터
+
+  # (신규) Jenkins 데이터
+  jenkins_data: {}
