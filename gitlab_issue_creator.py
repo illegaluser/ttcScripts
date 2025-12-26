@@ -8,6 +8,7 @@ gitlab_issue_creator.py
 - llm_analysis.jsonl을 읽어 GitLab Issue를 생성한다.
 - Dedup(중복 방지): 기본은 sonar_issue_key 검색으로 이미 등록된 이슈가 있으면 skip한다.
 - Sonar 링크 클릭 문제 해결: description_markdown 내 URL을 등록 직전에 치환한다.
+ - Jenkins 파이프라인(Job #5)에서 LLM 분석 결과를 실제 GitLab 이슈로 옮기는 단계에 사용된다.
 
 입력(JSONL 각 줄).
 {
@@ -35,6 +36,11 @@ from urllib.error import HTTPError, URLError
 
 
 def _http_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
+    """
+    GET 요청을 보내 JSON으로 파싱해 반환한다.
+    - GitLab issues 검색 등에서 재사용한다.
+    - 실패 시 예외를 그대로 던져 상위에서 처리한다.
+    """
     req = Request(url, headers=headers, method="GET")
     with urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", errors="replace")
@@ -42,6 +48,11 @@ def _http_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
 
 
 def _http_post_form(url: str, headers: dict, form: dict, timeout: int = 60):
+    """
+    x-www-form-urlencoded POST 요청을 보낸다.
+    - GitLab Issue 생성 API가 폼 인코딩을 기대하므로 이 형식을 사용한다.
+    - 상태 코드와 응답 본문을 호출자에게 돌려준다.
+    """
     data = urlencode(form, doseq=True).encode("utf-8")
     h = dict(headers or {})
     h["Content-Type"] = "application/x-www-form-urlencoded"
@@ -53,11 +64,19 @@ def _http_post_form(url: str, headers: dict, form: dict, timeout: int = 60):
 
 
 def _project_path_to_api_segment(project: str) -> str:
-    # "root/dscore-ttc-sample" -> "root%2Fdscore-ttc-sample"
+    """
+    GitLab 프로젝트 경로를 API 경로에 쓸 수 있게 URL 인코딩한다.
+    - 예: "root/dscore-ttc-sample" -> "root%2Fdscore-ttc-sample"
+    """
     return quote(project, safe="")
 
 
 def _replace_sonar_url(text: str, sonar_host_url: str, sonar_public_url: str) -> str:
+    """
+    SonarQube 내부 주소가 이슈 본문에 그대로 들어가면 브라우저에서 클릭이 안 되므로
+    외부에서 접근 가능한 주소로 치환한다.
+    - 인자로 받은 host/public을 우선 적용하고, 기본값으로 sonarqube:9000 -> localhost:9000을 치환한다.
+    """
     if not text:
         return text
 
@@ -75,7 +94,11 @@ def _replace_sonar_url(text: str, sonar_host_url: str, sonar_public_url: str) ->
 
 
 def _find_existing_by_sonar_key(gitlab_host_url: str, headers: dict, project: str, sonar_issue_key: str) -> bool:
-    # 아주 단순하게: issues 검색으로 sonar_issue_key가 이미 존재하면 skip
+    """
+    간단한 중복 체크. sonar_issue_key 문자열이 이미 등록된 이슈 제목/본문 등에 있으면 True.
+    - GitLab Issues 검색 API를 사용한다.
+    - 오류가 나면 False를 반환해 흐름을 막지 않는다.
+    """
     if not sonar_issue_key:
         return False
 
@@ -93,6 +116,16 @@ def _find_existing_by_sonar_key(gitlab_host_url: str, headers: dict, project: st
 
 
 def main() -> int:
+    """
+    CLI 엔트리포인트.
+    - 입력: llm_analysis.jsonl (LLM 분석 결과)
+    - 출력: gitlab_issues_created.json (생성/건너뜀/실패 요약)
+    - 흐름(초보자용):
+      1) JSONL을 읽어 LLM이 제안한 제목/본문/라벨을 가져온다.
+      2) Sonar 내부 URL을 외부에서 클릭 가능한 주소로 바꾼다.
+      3) sonar_issue_key로 이미 등록된 이슈가 있으면 건너뛴다.
+      4) GitLab Issue API로 새 이슈를 생성하고 결과를 기록한다.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--gitlab-host-url", required=True, help="ex) http://gitlab:8929")
     ap.add_argument("--gitlab-token", required=True, help="GitLab PAT")
@@ -138,14 +171,17 @@ def main() -> int:
             continue
 
         # (1) URL 치환: 등록 직전에만 한다.
+        # - 내부 주소로 남으면 브라우저에서 열리지 않을 수 있어 외부용 주소로 교체한다.
         desc = _replace_sonar_url(desc, args.sonar_host_url, args.sonar_public_url)
 
         # (2) Dedup: sonar_issue_key로 검색해서 있으면 skip
+        # - 같은 Sonar 이슈가 두 번 등록되지 않게 방지한다.
         if _find_existing_by_sonar_key(gitlab_host_url, headers, project, sonar_issue_key):
             skipped.append({"sonar_issue_key": sonar_issue_key, "title": title, "reason": "dedup(search)"})
             continue
 
         # (3) GitLab Issue 생성
+        # - labels는 콤마로 이어붙인 문자열로 전달하는 것이 호환성이 가장 높다.
         proj_seg = _project_path_to_api_segment(project)
         endpoint = f"{gitlab_host_url}/api/v4/projects/{proj_seg}/issues"
 
