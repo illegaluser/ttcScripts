@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# 목적: readme.md Stage 3(Quality-Issue-Workflow)에서 Sonar 이슈를 Dify Workflow로 보내 LLM 분석 결과(제목/설명/라벨)를 생성한다.
-# 원칙:
-# - sonar_issue_json 등 7개 입력 키 이름을 Dify 워크플로 정의와 동일하게 유지한다.
-# - HTTP 200이라도 run_status를 확인하고, 실패/성공/부분 실패를 로그에 남긴다.
-# - kb_query/코드 스니펫/룰 정보를 함께 전달해 LLM이 충분한 컨텍스트를 갖도록 한다.
-# 기대결과: sonar_issues.json → llm_analysis.jsonl로 변환되어, 다음 단계(gitlab_issue_creator.py)에서 바로 GitLab 이슈 생성에 활용된다.
-
 """
 dify_sonar_issue_analyzer.py
 
-목적.
+목적
 - sonar_issue_exporter.py가 만든 sonar_issues.json을 읽는다.
 - 이슈 1건씩 Dify Workflow(/v1/workflows/run)에 입력으로 전달한다.
 - Dify End(Output)에서 내려온 outputs를 llm_analysis.jsonl로 저장한다.
@@ -23,8 +16,7 @@ dify_sonar_issue_analyzer.py
    Dify Workflow에 전달하는 “LLM 분석” 역할을 담당한다.
  - SonarQube → LLM → GitLab 이슈 등록의 중간 다리이며,
    실패/부분 성공을 정확히 기록해 재시도나 트러블슈팅을 돕는다.
-
-중요.
+중요
 - Dify Workflow Start inputs 변수명은 아래 7개를 "그대로" 사용한다.
   sonar_issue_json, sonar_rule_json, code_snippet, sonar_issue_url,
   sonar_issue_key, sonar_project_key, kb_query
@@ -64,7 +56,7 @@ def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60):
 
 def _safe_json_dumps(obj) -> str:
     """
-    JSON 직렬화를 실패 없이 수행하기 위한 헬퍼.
+    JSON 직렬화를 실패 없이 수행하기 위한 헬퍼
     - ensure_ascii=False로 한글이 깨지지 않도록 하고,
     - separators를 설정해 불필요한 공백 없이 짧은 문자열을 만든다.
     - Dify inputs에 그대로 실리므로 크기를 줄이는 데도 의미가 있다.
@@ -101,7 +93,7 @@ def build_kb_query(issue_record: dict) -> str:
 def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, user: str,
                       response_mode: str, timeout: int):
     """
-    Dify Workflow 실행을 감싸는 함수.
+    Dify Workflow 실행을 감싸는 함수
     - /workflows/run 엔드포인트에 inputs를 그대로 던진다.
     - HTTP 200이라도 run_status가 실패일 수 있으므로 status와 run_status 둘 다 검사한다.
     - outputs가 없거나 형식이 이상하면 호출 측에서 처리할 수 있게 False를 반환한다.
@@ -155,7 +147,7 @@ def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, us
 
 def main() -> int:
     """
-    CLI 엔트리포인트.
+    CLI 엔트리포인트
     - 입력: sonar_issue_exporter.py가 생성한 sonar_issues.json
     - 출력: LLM 분석 결과를 행 단위로 쌓은 llm_analysis.jsonl
     - 흐름(초보자용):
