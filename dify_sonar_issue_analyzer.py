@@ -8,6 +8,8 @@ dify_sonar_issue_analyzer.py
 - sonar_issue_exporter.py가 만든 sonar_issues.json을 읽는다.
 - 이슈 1건씩 Dify Workflow(/v1/workflows/run)에 입력으로 전달한다.
 - Dify End(Output)에서 내려온 outputs를 llm_analysis.jsonl로 저장한다.
+ - Jenkins 파이프라인(Job #5)에서 SonarQube 이슈를 LLM이 해석해
+   제목/설명/라벨을 만드는 단계에 사용된다.
 
 중요.
 - Dify Workflow Start inputs 변수명은 아래 7개를 "그대로" 사용한다.
@@ -28,6 +30,11 @@ from urllib.error import HTTPError, URLError
 
 
 def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60):
+    """
+    간단한 HTTP POST 헬퍼.
+    - payload를 JSON으로 직렬화해 보내고, 응답 상태 코드와 본문 텍스트를 돌려준다.
+    - 호출자가 결과를 그대로 확인할 수 있게 예외를 숨기지 않는다.
+    """
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     h = dict(headers or {})
     h["Content-Type"] = "application/json"
@@ -43,6 +50,11 @@ def _safe_json_dumps(obj) -> str:
 
 
 def build_kb_query(issue_record: dict) -> str:
+    """
+    LLM이 참고할 추가 검색어(kb_query)를 만든다.
+    - Sonar 이슈 메시지 + 룰 키 + 심각도를 합쳐 간단한 문구로 만든다.
+    - 너무 길면 200자에서 잘라 Dify 입력 크기를 제한한다.
+    """
     msg = ""
     try:
         msg = (issue_record.get("issue_search_item") or {}).get("message") or ""
@@ -60,6 +72,12 @@ def build_kb_query(issue_record: dict) -> str:
 
 def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, user: str,
                       response_mode: str, timeout: int):
+    """
+    Dify Workflow 실행을 감싸는 함수.
+    - /workflows/run 엔드포인트에 inputs를 그대로 던진다.
+    - HTTP 200이라도 run_status가 실패일 수 있으므로 status와 run_status 둘 다 검사한다.
+    - outputs가 없거나 형식이 이상하면 호출 측에서 처리할 수 있게 False를 반환한다.
+    """
     if not isinstance(dify_api_base, str):
         raise TypeError(f"dify_api_base must be str, got {type(dify_api_base)}")
 
@@ -101,6 +119,15 @@ def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, us
 
 
 def main() -> int:
+    """
+    CLI 엔트리포인트.
+    - 입력: sonar_issue_exporter.py가 생성한 sonar_issues.json
+    - 출력: LLM 분석 결과를 행 단위로 쌓은 llm_analysis.jsonl
+    - 흐름(초보자용):
+      1) JSON을 읽어 이슈 목록을 가져온다.
+      2) 각 이슈를 Dify Workflow에 보내 제목/설명/라벨을 받아온다.
+      3) 결과를 한 줄 한 줄 파일에 기록한다. 실패한 건 로그만 남긴다.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--dify-api-base", required=True, help="ex) http://api:5001/v1")
     ap.add_argument("--dify-api-key", required=True, help="Dify API Key (Workflow App)")
@@ -135,6 +162,7 @@ def main() -> int:
             sonar_project_key = rec.get("sonar_project_key") or ""
             sonar_issue_url = rec.get("sonar_issue_url") or ""
 
+            # Dify에 그대로 넘길 JSON 문자열 준비 (워크플로 입력 스키마와 동일한 키 사용)
             sonar_issue_json = _safe_json_dumps({
                 "sonar_project_key": sonar_project_key,
                 "sonar_issue_key": sonar_issue_key,
@@ -148,6 +176,7 @@ def main() -> int:
             code_snippet = rec.get("code_snippet") or ""
             kb_query = build_kb_query(rec)
 
+            # Dify Workflow Start에서 기대하는 입력 키 이름과 맞춰서 전달한다.
             inputs = {
                 "sonar_issue_json": sonar_issue_json,
                 "sonar_rule_json": sonar_rule_json,
@@ -169,12 +198,13 @@ def main() -> int:
                 )
             except Exception as e:
                 failed += 1
+                # 예기치 못한 예외는 바로 실패로 카운트하고 다음 이슈로 진행
                 print(f"[DIFY][FAIL][unexpected] issue={sonar_issue_key} err={e}", file=sys.stderr)
                 continue
 
             if not ok:
                 failed += 1
-                # 핵심: status/ run_id를 반드시 찍어서 “LLM 실패 vs 매핑”을 구분
+                # 핵심: http_status / run_status / run_id를 찍어야 문제가 어디서 났는지 파악 가능
                 print(f"[DIFY][FAIL][http={http_status}] issue={sonar_issue_key} status={run_status} run_id={run_id}", file=sys.stderr)
                 if args.print_first_errors and printed < args.print_first_errors:
                     print(f"[DIFY][FAIL][body] {body}", file=sys.stderr)
@@ -216,6 +246,7 @@ def main() -> int:
                 "outputs": outputs,
                 "generated_at": int(time.time()),
             }
+            # 한 줄 JSON으로 파일에 쌓는다. (나중에 파이프라인에서 jq 등으로 쉽게 읽기 위함)
             out_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
             analyzed += 1
 
