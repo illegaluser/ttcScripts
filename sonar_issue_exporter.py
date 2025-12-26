@@ -8,6 +8,9 @@ sonar_issue_exporter.py
 - SonarQube 특정 프로젝트에서 지정 severities/statuses 이슈를 수집한다.
 - 이슈 1건당 가능한 한 많은 원본 정보를 함께 저장한다.
 - code_snippet을 가능한 범위에서 채운다(없으면 빈 문자열).
+ - Jenkins 파이프라인(Job #5: DSCORE-Quality-Issue-Workflow) 1단계에서 사용하며,
+   생성된 sonar_issues.json이 이후 LLM(Dify Workflow) 입력으로 전달되어
+   정적 분석 결과를 해석하고 해결 방안을 제시할 때 사전 컨텍스트로 활용된다.
 
 중요 원칙.
 - API 호출은 --sonar-host-url 만 사용한다. (절대 /sonarqube 같은 prefix를 임의로 붙이지 않는다)
@@ -28,6 +31,11 @@ from urllib.error import HTTPError, URLError
 
 
 def _http_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
+    """
+    HTTP GET 후 JSON 디코딩. 실패 시 예외를 그대로 던져 상위에서 처리한다.
+    - urlopen은 context manager로 열어 응답 본문을 읽고 UTF-8로 디코드한다.
+    - Sonar API 호출에 공통 사용된다.
+    """
     req = Request(url, headers=headers, method="GET")
     with urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", errors="replace")
@@ -35,6 +43,10 @@ def _http_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
 
 
 def _safe_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
+    """
+    JSON 요청의 안전 래퍼. 오류를 삼키고 에러 메시지와 URL을 포함한 dict를 반환한다.
+    - 일부 보강 호출(rule/show, issue_snippets 등) 실패가 전체 흐름을 막지 않도록 한다.
+    """
     try:
         return _http_get_json(url, headers=headers, timeout=timeout)
     except Exception as e:
@@ -42,12 +54,18 @@ def _safe_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
 
 
 def _http_get_text(url: str, headers: dict, timeout: int = 60) -> str:
+    """
+    HTTP GET 후 텍스트 그대로 반환. JSON 파싱이 필요 없는 raw API(sources/raw)용.
+    """
     req = Request(url, headers=headers, method="GET")
     with urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
 def _safe_get_text(url: str, headers: dict, timeout: int = 60) -> str:
+    """
+    텍스트 요청의 안전 래퍼. 실패 시 빈 문자열을 반환해 스니펫 생성이 중단되지 않게 한다.
+    """
     try:
         return _http_get_text(url, headers=headers, timeout=timeout)
     except Exception:
@@ -55,24 +73,45 @@ def _safe_get_text(url: str, headers: dict, timeout: int = 60) -> str:
 
 
 def _build_basic_auth(token: str) -> str:
+    """
+    SonarQube 토큰을 Basic Auth 헤더 문자열로 만든다. (username=token, password 공백)
+    """
     raw = f"{token}:".encode("utf-8")
     b64 = base64.b64encode(raw).decode("ascii")
     return f"Basic {b64}"
 
 
 def _api_url(sonar_host_url: str, api_path: str, params: dict) -> str:
+    """
+    API 호출용 URL을 생성한다.
+    - sonar_host_url은 API 베이스 (컨테이너 내부 접근용)
+    - api_path는 /api/issues/search 같은 상대 경로
+    - params는 쿼리스트링으로 직렬화한다.
+    - 예: _api_url("http://sonarqube:9000", "/api/issues/search", {"p":1})
+    """
     base = sonar_host_url.rstrip("/") + "/"
     qs = urlencode(params, doseq=True)
     return urljoin(base, api_path.lstrip("/")) + ("?" + qs if qs else "")
 
 
 def _ui_issue_url(sonar_ui_base: str, project_key: str, issue_key: str) -> str:
+    """
+    브라우저에서 바로 열 수 있는 이슈 UI 링크를 만든다.
+    - API URL과 분리된 공개 URL(프록시/도메인 고려)을 사용한다.
+    - Jenkins 로그에서 클릭하면 SonarQube 화면으로 이동하도록 구성한다.
+    """
     base = sonar_ui_base.rstrip("/") + "/"
     return f"{base}project/issues?id={project_key}&issues={issue_key}&open={issue_key}"
 
 
 def _extract_snippet_from_issue_snippets(snippet_json: dict) -> str:
-    # Sonar 버전별로 구조가 다를 수 있으니 최대한 보수적으로 파싱한다.
+    """
+    /api/sources/issue_snippets 응답에서 코드 블록을 추출한다.
+    - SonarQube 버전에 따라 구조가 다를 수 있으므로 존재 여부를 보수적으로 검사한다.
+    - line/text가 있으면 "  42 | code" 형식으로 가공한다.
+    - 실패 시 빈 문자열을 반환해 raw fallback으로 넘어가게 한다.
+    - 이 단계가 실패해도 프로그램은 계속 진행한다(스니펫 없이도 LLM 분석은 가능).
+    """
     if not isinstance(snippet_json, dict):
         return ""
     sources = snippet_json.get("sources")
@@ -104,7 +143,13 @@ def _try_get_snippet_via_raw(
     start_line: int,
     end_line: int
 ) -> str:
-    # sources/raw는 key(=파일 컴포넌트 키) + from/to로 라인을 가져올 수 있다.
+    """
+    /api/sources/raw로 특정 라인 범위의 코드를 가져온다. (issue_snippets 실패 시 사용)
+    - component_key: 파일 단위 컴포넌트 키
+    - start_line/end_line: 검색된 textRange를 사용한다.
+    - 성공 시 라인 번호를 붙여 반환한다.
+    - SonarQube가 제공하는 "원시 코드" 엔드포인트라 가장 마지막 안전망 역할을 한다.
+    """
     if not component_key or start_line <= 0 or end_line <= 0:
         return ""
     params = {"key": component_key, "from": str(start_line), "to": str(end_line)}
@@ -122,6 +167,21 @@ def _try_get_snippet_via_raw(
 
 
 def main() -> int:
+    """
+    CLI 엔트리포인트.
+    - 입력 인자: Sonar API URL/공개 URL/토큰/프로젝트 키/필터(Severity, Status, Type)/페이지 사이즈/출력 경로
+    - 동작 흐름:
+      (A) issues/search를 페이징 호출해 필터 조건에 맞는 모든 이슈를 수집한다.
+          * additionalFields=_all을 먼저 시도하고, 미지원 시 fallback하여 재시도한다.
+      (B) 각 이슈에 대해 rule/show, issues/show, issue_snippets를 호출해 세부 정보를 보강한다.
+          * 스니펫이 없으면 sources/raw로 textRange 구간을 재시도해 최대한 코드 문맥을 확보한다.
+      (C) UI 링크를 생성하고 수집한 모든 데이터를 JSON으로 직렬화해 파일로 저장한다.
+    - 반환: 성공 시 0, 네트워크/예상치 못한 오류 시 2
+    초보자용 요약:
+    1) SonarQube에서 "이슈 목록"을 다 가져온다.
+    2) 각 이슈에 대해 "룰 설명"과 "코드 조각"을 추가로 받아온다.
+    3) 보기 편하게 JSON 파일 하나로 묶어 저장한다.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--sonar-host-url", required=True, help="컨테이너 기준 SonarQube URL (API 호출용)")
     ap.add_argument("--sonar-public-url", default="", help="브라우저 클릭용 SonarQube URL (UI 링크 생성용, optional)")
@@ -147,6 +207,8 @@ def main() -> int:
     }
 
     # (A) issues/search 전량 수집 (페이징)
+    # - additionalFields=_all을 지원하는 버전이면 더 많은 필드를 한 번에 수집한다.
+    # - HTTPError(예: 파라미터 미지원) 발생 시 추가 필드를 빼고 재시도한다.
     issues = []
     p = 1
     ps = args.ps
@@ -193,6 +255,8 @@ def main() -> int:
         p += 1
 
     # (B) rule/show, issues/show, snippet 보강
+    # - rule/show 결과는 rules_cache에 저장해 중복 호출을 줄인다.
+    # - issue_snippets → sources/raw 순으로 코드 스니펫을 최대한 확보한다.
     rules_cache = {}
     enriched = []
 
