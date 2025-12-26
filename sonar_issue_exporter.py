@@ -8,9 +8,13 @@ sonar_issue_exporter.py
 - SonarQube 특정 프로젝트에서 지정 severities/statuses 이슈를 수집한다.
 - 이슈 1건당 가능한 한 많은 원본 정보를 함께 저장한다.
 - code_snippet을 가능한 범위에서 채운다(없으면 빈 문자열).
- - Jenkins 파이프라인(Job #5: DSCORE-Quality-Issue-Workflow) 1단계에서 사용하며,
-   생성된 sonar_issues.json이 이후 LLM(Dify Workflow) 입력으로 전달되어
-   정적 분석 결과를 해석하고 해결 방안을 제시할 때 사전 컨텍스트로 활용된다.
+- Jenkins 파이프라인(Job #5: DSCORE-Quality-Issue-Workflow) 1단계에서 사용하며,
+  생성된 sonar_issues.json이 이후 LLM(Dify Workflow) 입력으로 전달되어
+  정적 분석 결과를 해석하고 해결 방안을 제시할 때 사전 컨텍스트로 활용된다.
+ - readme.md Stage 2 “Export SonarQube Issues” 스크립트이며,
+   Stage 3(LLM 분석)·Stage 4(GitLab 이슈 생성)으로 이어지는 출발점이다.
+ - API 호출 전용 URL(--sonar-host-url)과 UI 링크용 URL(--sonar-public-url)을
+   명확히 분리해 내부/외부 주소 혼동으로 인한 실패를 막는다.
 
 중요 원칙.
 - API 호출은 --sonar-host-url 만 사용한다. (절대 /sonarqube 같은 prefix를 임의로 붙이지 않는다)
@@ -35,6 +39,7 @@ def _http_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
     HTTP GET 후 JSON 디코딩. 실패 시 예외를 그대로 던져 상위에서 처리한다.
     - urlopen은 context manager로 열어 응답 본문을 읽고 UTF-8로 디코드한다.
     - Sonar API 호출에 공통 사용된다.
+    - readme.md의 Jenkins 스크립트에서 호출하는 모든 Sonar API가 이 헬퍼를 거친다.
     """
     req = Request(url, headers=headers, method="GET")
     with urlopen(req, timeout=timeout) as resp:
@@ -46,6 +51,7 @@ def _safe_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
     """
     JSON 요청의 안전 래퍼. 오류를 삼키고 에러 메시지와 URL을 포함한 dict를 반환한다.
     - 일부 보강 호출(rule/show, issue_snippets 등) 실패가 전체 흐름을 막지 않도록 한다.
+    - Sonar API 버전 차이나 일시적 네트워크 오류가 있어도 수집을 이어가기 위함이다.
     """
     try:
         return _http_get_json(url, headers=headers, timeout=timeout)
@@ -56,6 +62,7 @@ def _safe_get_json(url: str, headers: dict, timeout: int = 60) -> dict:
 def _http_get_text(url: str, headers: dict, timeout: int = 60) -> str:
     """
     HTTP GET 후 텍스트 그대로 반환. JSON 파싱이 필요 없는 raw API(sources/raw)용.
+    - 코드 스니펫 fallback에 사용한다.
     """
     req = Request(url, headers=headers, method="GET")
     with urlopen(req, timeout=timeout) as resp:
@@ -75,6 +82,7 @@ def _safe_get_text(url: str, headers: dict, timeout: int = 60) -> str:
 def _build_basic_auth(token: str) -> str:
     """
     SonarQube 토큰을 Basic Auth 헤더 문자열로 만든다. (username=token, password 공백)
+    - Jenkins Credential에 저장된 token을 가져와 바로 넣는 형태(readme.md Stage 2와 동일).
     """
     raw = f"{token}:".encode("utf-8")
     b64 = base64.b64encode(raw).decode("ascii")
@@ -88,6 +96,7 @@ def _api_url(sonar_host_url: str, api_path: str, params: dict) -> str:
     - api_path는 /api/issues/search 같은 상대 경로
     - params는 쿼리스트링으로 직렬화한다.
     - 예: _api_url("http://sonarqube:9000", "/api/issues/search", {"p":1})
+    - readme.md의 Jenkins 예시처럼 /sonarqube prefix를 임의로 붙이지 않도록 주의한다.
     """
     base = sonar_host_url.rstrip("/") + "/"
     qs = urlencode(params, doseq=True)
@@ -99,6 +108,7 @@ def _ui_issue_url(sonar_ui_base: str, project_key: str, issue_key: str) -> str:
     브라우저에서 바로 열 수 있는 이슈 UI 링크를 만든다.
     - API URL과 분리된 공개 URL(프록시/도메인 고려)을 사용한다.
     - Jenkins 로그에서 클릭하면 SonarQube 화면으로 이동하도록 구성한다.
+    - readme.md의 “공개 URL” 설정을 따라 내부/외부 주소를 분리해둔다.
     """
     base = sonar_ui_base.rstrip("/") + "/"
     return f"{base}project/issues?id={project_key}&issues={issue_key}&open={issue_key}"
@@ -111,6 +121,7 @@ def _extract_snippet_from_issue_snippets(snippet_json: dict) -> str:
     - line/text가 있으면 "  42 | code" 형식으로 가공한다.
     - 실패 시 빈 문자열을 반환해 raw fallback으로 넘어가게 한다.
     - 이 단계가 실패해도 프로그램은 계속 진행한다(스니펫 없이도 LLM 분석은 가능).
+    - readme.md Stage 2에서 “가능한 코드 스니펫 확보”를 위해 우선 시도하는 방법이다.
     """
     if not isinstance(snippet_json, dict):
         return ""
@@ -149,6 +160,7 @@ def _try_get_snippet_via_raw(
     - start_line/end_line: 검색된 textRange를 사용한다.
     - 성공 시 라인 번호를 붙여 반환한다.
     - SonarQube가 제공하는 "원시 코드" 엔드포인트라 가장 마지막 안전망 역할을 한다.
+    - readme.md에서 언급된 “fallback으로 raw 사용”을 구현한 부분이다.
     """
     if not component_key or start_line <= 0 or end_line <= 0:
         return ""
@@ -181,6 +193,8 @@ def main() -> int:
     1) SonarQube에서 "이슈 목록"을 다 가져온다.
     2) 각 이슈에 대해 "룰 설명"과 "코드 조각"을 추가로 받아온다.
     3) 보기 편하게 JSON 파일 하나로 묶어 저장한다.
+    - readme.md Stage 2 Jenkins 단계와 동일한 인자 구성을 유지한다.
+    - 출력 sonar_issues.json은 Stage 3(LLM 분석)의 입력이므로, 최대한 많은 메타데이터를 담는다.
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--sonar-host-url", required=True, help="컨테이너 기준 SonarQube URL (API 호출용)")
@@ -209,6 +223,7 @@ def main() -> int:
     # (A) issues/search 전량 수집 (페이징)
     # - additionalFields=_all을 지원하는 버전이면 더 많은 필드를 한 번에 수집한다.
     # - HTTPError(예: 파라미터 미지원) 발생 시 추가 필드를 빼고 재시도한다.
+    # - readme.md 예시처럼 ps(페이지 크기)를 적절히 설정해 호출 횟수를 줄인다.
     issues = []
     p = 1
     ps = args.ps
@@ -257,6 +272,7 @@ def main() -> int:
     # (B) rule/show, issues/show, snippet 보강
     # - rule/show 결과는 rules_cache에 저장해 중복 호출을 줄인다.
     # - issue_snippets → sources/raw 순으로 코드 스니펫을 최대한 확보한다.
+    # - readme.md 기준 LLM 입력에 rule detail과 snippet을 모두 넣어 품질을 높인다.
     rules_cache = {}
     enriched = []
 

@@ -8,16 +8,38 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 
+# 목적(길게 설명):
+# - Jenkins 파이프라인에서 웹/기술 블로그 URL을 받아 HTML을 가져온다.
+# - 본문만 남기고 메뉴/광고/사이드바/링크 같은 소음을 제거한 텍스트를 뽑는다.
+# - 정제된 텍스트를 Markdown 파일로 저장해서 Dify 지식베이스 업로드 전에 “미리 정리된 웹 지식”을 확보한다.
+# - 같은 로직을 여러 도메인에 적용하기 위해, CSS 셀렉터나 정규식은 최대한 범용적으로 구성한다.
+# - 지나치게 짧은 결과나 잡음만 남은 경우는 저장하지 않아, 지식 품질을 유지한다.
+
 # DSCORE-TTC 표준 경로
 RESULT_DIR = "/var/knowledges/docs/result"
 
 def log(msg: str) -> None:
+    """
+    크롤링 진행 상황을 한 줄씩 남긴다.
+    - Jenkins 콘솔 로그에서 단계별 진행률을 눈으로 확인할 수 있다.
+    - flush=True로 즉시 출력해 긴 작업에서도 로그가 지연되지 않도록 한다.
+    """
     print(f"[Crawl-Universal] {msg}", flush=True)
 
 def refine_any_tech_blog(html_content):
     """
-    기술 블로그의 특성(코드 블록, 본문)을 살리되 
-    메뉴, 사이드바, URL 링크 소음을 완벽히 제거한다.
+    기술 블로그 본문만 남기고 소음을 최대한 제거한다.
+    - 1단계: article/.post-content/.entry-content/main 등 “본문”으로 추정되는 컨테이너를 우선 찾는다.
+      * 실패 시 body 전체를 사용해도 HTML 파싱이 중단되지 않게 한다.
+    - 2단계: nav/footer/sidebar/menu/ads/script/style/header처럼 본문과 무관한 요소는 통째로 제거한다.
+      * “decompose”를 써서 내용이 출력에 끼어들지 않도록 완전히 없앤다.
+    - 3단계: get_text(separator='\\n')로 텍스트를 뽑아 마크다운과 비슷한 줄바꿈을 유지한다.
+    - 4단계: 정규식으로 남은 URL/잡다한 표기를 제거한다.
+      * [문구](http...)에서 링크만 제거하고 문구는 살린다.
+      * 노출된 http://... 문자열은 모두 비운다.
+      * 위키에서 흔한 [편집], [1] 같은 표기는 없애 깔끔하게 만든다.
+      * 연속된 빈 줄을 하나로 줄여 가독성을 높인다.
+    - 결과: 코드 블록/본문은 최대한 보존하고, 클릭용 링크나 광고성 문구는 없어진 텍스트 문자열이 반환된다.
     """
     soup = BeautifulSoup(html_content, 'html.parser')
     
@@ -51,6 +73,24 @@ def refine_any_tech_blog(html_content):
     return text.strip()
 
 async def build_universal_knowledge(root_url):
+    """
+    주어진 URL부터 페이지(및 필요한 경우 하위 내부 링크)를 수집해 정제한 후 MD로 저장한다.
+    - 실행 전: RESULT_DIR를 만들어 두어 파일 저장 실패를 막는다.
+    - 1) 1차 요청으로 대상 페이지를 열고 성공 여부를 확인한다.
+         * 실패하면 바로 종료해 불필요한 반복을 막는다.
+    - 2) 크롤 대상 URL 목록을 만든다.
+         * 일반적으로 입력받은 URL 하나만 넣는다.
+         * 블로그 메인처럼 보이는 경우(루트로 끝나거나 우아한형제들 블로그 도메인) 내부 링크를 추가로 모은다.
+           - 링크를 루트와 같은 도메인으로 제한해 외부 사이트로 퍼지지 않게 한다.
+           - path 길이가 1보다 커야(“/”가 아닌 경우) 실제 글로 본다.
+    - 3) 각 URL을 비동기로 가져와 refine_any_tech_blog로 정제한다.
+         * HTML이 없거나 실패하면 건너뛴다.
+         * 결과 텍스트가 300자 미만이면 품질이 낮다고 보고 저장하지 않는다.
+    - 4) URL을 안전한 파일명으로 바꿔 tech_<URL>.md 형태로 저장한다.
+         * 슬래시/점은 언더스코어로 치환하고, 너무 긴 이름은 100자로 자른다.
+         * 파일 상단에 Source URL을 남겨 추적 가능하게 한다.
+    - 5) 처리 결과를 로그로 남겨 진행률을 확인한다.
+    """
     os.makedirs(RESULT_DIR, exist_ok=True)
     
     # 에러를 방지하기 위해 필터 옵션을 비우고 원본을 가져오는 데 집중
@@ -88,9 +128,10 @@ async def build_universal_knowledge(root_url):
             try:
                 res = await crawler.arun(url=url, config=run_config)
                 if res.success and res.html:
-                    # 모든 사이트 공용 정제 로직 통과
+                    # 모든 사이트 공용 정제 로직 통과: 본문만 남기고 소음을 없앤다.
                     clean_text = refine_any_tech_blog(res.html)
                     
+                    # 너무 짧은 데이터는 무시해 품질을 관리한다.
                     if len(clean_text) < 300: continue # 너무 짧은 데이터는 무시
 
                     # 안전한 파일명 생성
@@ -98,6 +139,7 @@ async def build_universal_knowledge(root_url):
                     out_path = Path(RESULT_DIR) / f"tech_{safe_name}.md"
                     
                     with open(out_path, "w", encoding="utf-8") as f:
+                        # 출처 URL을 파일 상단에 남겨, 추후 역추적이 가능하도록 한다.
                         f.write(f"# Source: {url}\n\n{clean_text}")
                     
                     log(f"[{i+1}/{len(urls_to_crawl)}] 클린 지식 확보: {url}")
