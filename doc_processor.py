@@ -31,15 +31,18 @@ RESULT_DIR = "/var/knowledges/docs/result"
 
 def ensure_dirs():
     """
-    결과 디렉터리가 없으면 생성한다.
+    결과 디렉터리(RESULT_DIR)가 없으면 생성한다.
+    Jenkins 컨테이너 내에서 실행될 때도 동일한 절대경로를 쓰므로,
+    경로 유무를 사전에 보장해 변환·업로드 단계에서 실패를 막는다.
     """
     os.makedirs(RESULT_DIR, exist_ok=True)
 
 
 def clean_result_dir():
     """
-    이전 실행의 결과물을 제거한다.
-    PoC에서는 중복 업로드를 피하기 위해 result를 매번 비우는 방식이 가장 단순하다.
+    이전 실행의 결과물을 제거한다. (파일/폴더 모두 삭제)
+    PoC에서는 증분 업로드를 처리하지 않으므로, 매번 비우는 방식이 중복 업로드나
+    오래된 파일 잔존으로 인한 혼선을 방지한다.
     """
     if not os.path.exists(RESULT_DIR):
         return
@@ -53,8 +56,9 @@ def clean_result_dir():
 
 def df_to_markdown_simple(df: pd.DataFrame) -> str:
     """
-    pandas의 to_markdown(tabulate 의존)을 사용하지 않고,
-    최소한의 마크다운 테이블을 직접 생성한다.
+    pandas의 to_markdown(tabulate 의존)을 사용하지 않고 최소한의 마크다운 테이블을 생성한다.
+    - 멀티 인덱스, 서식 지정 등은 고려하지 않는다.
+    - NaN은 빈 문자열로 치환해 Dify 업로드 시 불필요한 'nan' 문자열이 나타나지 않도록 한다.
     """
     if df is None or df.empty:
         return ""
@@ -85,6 +89,11 @@ def convert_to_md(filepath: str, filename: str):
     출력 파일명 규칙
     - 원본이 example.pdf이면 example.pdf.md 형태로 저장한다.
     - 원본명 보존이 목적이다.
+    처리 방식
+    - TXT: 원문을 그대로 사용한다.
+    - DOCX: 비어 있지 않은 단락을 이어 붙인다.
+    - XLSX/XLS: 시트별로 제목을 붙이고 간단한 테이블 문자열로 변환한다.
+    - PDF: 각 페이지의 텍스트를 순서대로 합친다.
     """
     ext = filename.lower().split(".")[-1]
     md_content = ""
@@ -141,6 +150,9 @@ def convert_pptx_to_pdf(filepath: str, filename: str) -> str:
     반환값
     - 변환된 PDF 파일의 전체 경로를 반환한다.
     - 실패하면 빈 문자열을 반환한다.
+    사용 이유
+    - Dify 업로드 전에 PPTX를 PDF로 변환하고, 필요시 PDF에서 텍스트를 추출한 MD도 생성하기 위함이다.
+    - headless 모드만 사용하므로 Jenkins 에이전트에서도 GUI 의존성이 없다.
     """
     print(f"[Convert:PDF] {filename}")
 
@@ -173,8 +185,9 @@ def convert_pptx_to_pdf(filepath: str, filename: str) -> str:
 
 def get_dataset_doc_form(dataset_id: str, api_key: str) -> str:
     """
-    Dataset의 doc_form을 조회한다.
-    doc_form mismatch 오류를 피하기 위해, 업로드 전에 dataset의 doc_form을 확인한다.
+    Dataset의 doc_form을 조회한다. (qa_model / document / 기타)
+    업로드 요청 시 지정한 doc_form과 Dataset 설정이 다르면 Dify가 오류를 반환하므로,
+    사전 조회로 불일치 여부를 검증한다.
     """
     url = f"{DIFY_API_BASE}/datasets/{dataset_id}"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -191,8 +204,9 @@ def get_dataset_doc_form(dataset_id: str, api_key: str) -> str:
 
 def upload_md(dataset_id: str, api_key: str, file_path: str, doc_form: str, doc_language: str) -> requests.Response:
     """
-    MD 파일을 Dify에 텍스트 문서로 업로드한다.
-    Dify API 문서의 create-by-text 엔드포인트를 사용한다.  :contentReference[oaicite:3]{index=3}
+    MD 파일을 Dify에 텍스트 문서로 업로드한다. (create-by-text 엔드포인트)
+    - doc_form이 주어지면 payload에 명시해 Dataset 설정과 일치하도록 한다.
+    - doc_language가 있으면 검색/질의 품질을 높이기 위해 함께 전달한다.
     """
     url = f"{DIFY_API_BASE}/datasets/{dataset_id}/document/create-by-text"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -225,6 +239,7 @@ def upload_pdf(dataset_id: str, api_key: str, file_path: str) -> requests.Respon
     - create-by-file 문서 스키마에는 doc_form이 명시되어 있지 않다.
     - PoC에서는 파일 업로드는 문서형 Dataset에서만 수행한다.
     - Q&A Dataset(qa_model)에서는 PDF를 파일로 업로드하지 않고, PDF 텍스트를 MD로 올린다.
+    - 업로드 시 process_rule은 자동 처리로 고정한다.
     """
     url = f"{DIFY_API_BASE}/datasets/{dataset_id}/document/create-by-file"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -256,6 +271,9 @@ def upload_files(dataset_id: str, api_key: str, requested_doc_form: str = "", do
 
     반환값
     - 실패 개수를 반환한다.
+    추가 검증
+    - 호출 시 전달된 doc_form과 Dataset의 doc_form이 다르면 즉시 중단해 잘못된 업로드를 막는다.
+    - doc_language는 optional로 전달하며, Dify 측이 이를 사용하지 않아도 무해하다.
     """
     if not os.path.exists(RESULT_DIR):
         print("[Upload] result directory not found")
@@ -314,7 +332,7 @@ def upload_files(dataset_id: str, api_key: str, requested_doc_form: str = "", do
 
 def print_usage():
     """
-    스크립트 사용법을 출력한다.
+    스크립트 사용법을 출력한다. (명령 인자 부족 시 호출)
     """
     print("Usage:")
     print("  python doc_processor.py convert")
