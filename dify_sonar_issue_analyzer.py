@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# 목적: readme.md Stage 3(Quality-Issue-Workflow)에서 Sonar 이슈를 Dify Workflow로 보내 LLM 분석 결과(제목/설명/라벨)를 생성한다.
+# 원칙:
+# - sonar_issue_json 등 7개 입력 키 이름을 Dify 워크플로 정의와 동일하게 유지한다.
+# - HTTP 200이라도 run_status를 확인하고, 실패/성공/부분 실패를 로그에 남긴다.
+# - kb_query/코드 스니펫/룰 정보를 함께 전달해 LLM이 충분한 컨텍스트를 갖도록 한다.
+# 기대결과: sonar_issues.json → llm_analysis.jsonl로 변환되어, 다음 단계(gitlab_issue_creator.py)에서 바로 GitLab 이슈 생성에 활용된다.
+
 """
 dify_sonar_issue_analyzer.py
 

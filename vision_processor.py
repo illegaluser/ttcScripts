@@ -2,6 +2,13 @@ import os
 import base64
 import requests
 
+# 목적: readme.md의 DSCORE-Knowledge-Sync-Vision(Job #3)에서 이미지 파일을 Llama3 Vision(Ollama)으로 분석해 MD 설명을 생성한다.
+# 원칙:
+# - 컨테이너 내부에서 host.docker.internal:11434로만 접근하며, 모델 이름을 고정한다.
+# - 지원 확장자만 처리하고 분석 실패 시 조용히 건너뛰어 파이프라인을 끊지 않는다.
+# - 출력은 RESULT_DIR에 저장해 다른 지식 업로드 흐름(doc_processor.py)과 동일 경로를 사용한다.
+# 기대결과: 이미지당 하나의 MD가 생성되어, Dify 지식베이스로 올릴 수 있는 텍스트 설명이 확보된다.
+
 # Ollama API.
 # - Ollama는 호스트에서 실행한다고 가정한다.
 # - Jenkins 컨테이너에서 host.docker.internal:11434 로 접근한다.

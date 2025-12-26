@@ -8,12 +8,17 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 
-# 목적(길게 설명):
+# 목적:
 # - Jenkins 파이프라인에서 웹/기술 블로그 URL을 받아 HTML을 가져온다.
 # - 본문만 남기고 메뉴/광고/사이드바/링크 같은 소음을 제거한 텍스트를 뽑는다.
 # - 정제된 텍스트를 Markdown 파일로 저장해서 Dify 지식베이스 업로드 전에 “미리 정리된 웹 지식”을 확보한다.
 # - 같은 로직을 여러 도메인에 적용하기 위해, CSS 셀렉터나 정규식은 최대한 범용적으로 구성한다.
 # - 지나치게 짧은 결과나 잡음만 남은 경우는 저장하지 않아, 지식 품질을 유지한다.
+# 원칙:
+# - 공유 경로(RESULT_DIR)를 사용해 doc_processor.py 업로드 파이프라인과 동일한 출력 위치를 유지한다.
+# - 메뉴/광고/링크 등 소음을 제거하고, 300자 미만 짧은 결과는 저장하지 않아 품질을 담보한다.
+# - 내부 링크 수집은 동일 도메인으로 제한해 불필요한 외부 크롤을 피한다.
+# 기대결과: 정제된 웹 텍스트 MD들이 생성되어, Dify 지식베이스에 추가할 수 있는 웹 지식이 확보된다.
 
 # DSCORE-TTC 표준 경로
 RESULT_DIR = "/var/knowledges/docs/result"

@@ -1,36 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-gitlab_issue_creator.py
+# 목적: readme.md Stage 4(Quality-Issue-Workflow)에서 LLM 분석 결과(llm_analysis.jsonl)를 GitLab 이슈로 생성한다.
+# 원칙:
+# - llm_analysis.jsonl을 읽어 GitLab Issue를 생성한다.
+# - Dedup(중복 방지): 기본은 sonar_issue_key 검색으로 이미 등록된 이슈가 있으면 skip한다.
+# - Sonar 링크 클릭 문제 해결: description_markdown 내 URL을 등록 직전에 치환한다.
+# - Jenkins 파이프라인(Job #5)에서 LLM 분석 결과를 실제 GitLab 이슈로 옮기는 단계에 사용된다.
+# - 앞 단계(dify_sonar_issue_analyzer.py)가 만든 분석 결과를 토대로 실제 작업 티켓을 생성해, 개발자가 바로 확인하고 처리할 수 있게 한다.
+# - 내부 주소 치환과 중복 검사로, 클릭 안 되는 링크나 이슈 중복 등록 같은 실수를 줄인다.
+# - readme.md의 “Quality-Issue-Workflow” Stage 4에 해당하며,
+#   Stage 2(sonar_issue_exporter) → Stage 3(LLM 분석) 결과를 최종적으로 GitLab에 반영하는 역할이다.
+# - PAT(개인 액세스 토큰)으로 인증하며, GitLab 컨테이너 내부 주소(http://gitlab:8929)를 사용한다.
+# 기대결과: gitlab_issues_created.json 요약과 함께 실제 GitLab 이슈가 생성되어, 개발자가 바로 처리할 수 있는 티켓이 확보된다.
 
-목적.
-- llm_analysis.jsonl을 읽어 GitLab Issue를 생성한다.
-- Dedup(중복 방지): 기본은 sonar_issue_key 검색으로 이미 등록된 이슈가 있으면 skip한다.
-- Sonar 링크 클릭 문제 해결: description_markdown 내 URL을 등록 직전에 치환한다.
-- Jenkins 파이프라인(Job #5)에서 LLM 분석 결과를 실제 GitLab 이슈로 옮기는 단계에 사용된다.
-- 앞 단계(dify_sonar_issue_analyzer.py)가 만든 분석 결과를 토대로 실제 작업 티켓을 생성해,
-  개발자가 바로 확인하고 처리할 수 있게 한다.
-- 내부 주소 치환과 중복 검사로, 클릭 안 되는 링크나 이슈 중복 등록 같은 실수를 줄인다.
- - readme.md의 “Quality-Issue-Workflow” Stage 4에 해당하며,
-   Stage 2(sonar_issue_exporter) → Stage 3(LLM 분석) 결과를 최종적으로 GitLab에 반영하는 역할이다.
- - PAT(개인 액세스 토큰)으로 인증하며, GitLab 컨테이너 내부 주소(http://gitlab:8929)를 사용한다.
-
-입력(JSONL 각 줄).
-{
-  "sonar_issue_key": "...",
-  "sonar_project_key": "...",
-  "sonar_issue_url": "...",
-  "outputs": {
-    "title": "...",
-    "description_markdown": "...",
-    "labels": [...]
-  }
-}
-
-출력.
-- gitlab_issues_created.json
-"""
 
 import argparse
 import json

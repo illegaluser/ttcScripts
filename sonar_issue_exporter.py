@@ -1,28 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-sonar_issue_exporter.py
-
-목적.
-- SonarQube 특정 프로젝트에서 지정 severities/statuses 이슈를 수집한다.
-- 이슈 1건당 가능한 한 많은 원본 정보를 함께 저장한다.
-- code_snippet을 가능한 범위에서 채운다(없으면 빈 문자열).
-- Jenkins 파이프라인(Job #5: DSCORE-Quality-Issue-Workflow) 1단계에서 사용하며,
-  생성된 sonar_issues.json이 이후 LLM(Dify Workflow) 입력으로 전달되어
-  정적 분석 결과를 해석하고 해결 방안을 제시할 때 사전 컨텍스트로 활용된다.
- - readme.md Stage 2 “Export SonarQube Issues” 스크립트이며,
-   Stage 3(LLM 분석)·Stage 4(GitLab 이슈 생성)으로 이어지는 출발점이다.
- - API 호출 전용 URL(--sonar-host-url)과 UI 링크용 URL(--sonar-public-url)을
-   명확히 분리해 내부/외부 주소 혼동으로 인한 실패를 막는다.
-
-중요 원칙.
-- API 호출은 --sonar-host-url 만 사용한다. (절대 /sonarqube 같은 prefix를 임의로 붙이지 않는다)
-- --sonar-public-url 은 UI 링크(sonar_issue_url) 생성에만 사용한다. API 호출에 절대 섞지 않는다.
-
-출력.
-- sonar_issues.json
-"""
+# 목적: readme.md Stage 2(Quality-Issue-Workflow)에서 SonarQube 프로젝트의 이슈를 수집해 LLM 분석 입력(sonar_issues.json)을 만든다.
+# 원칙:
+# - API 호출은 내부 주소(--sonar-host-url)만 사용하고, UI 링크는 공개 주소(--sonar-public-url)로 분리한다.
+# - Severities/Statuses/Types 필터를 적용해 필요한 이슈만 페이징 수집한다.
+# - rule/show, issue_snippets→sources/raw 순으로 최대한 코드 스니펫과 룰 정보를 보강한다.
+# 기대결과: sonar_issues.json 파일에 이슈/룰/스니펫/메타데이터가 담겨 Stage 3(Dify LLM 분석)에서 바로 활용된다.
 
 import argparse
 import base64

@@ -3,7 +3,8 @@ import argparse
 import os
 from pathlib import Path
 
-# 리포지토리 구조와 핵심 설정/문서 내용을 하나의 Markdown으로 덤프한다.
+# 목적: readme.md의 DSCORE-Code-Knowledge-Sync(Job #4)에서 리포지토리 트리와 핵심 설정 파일을 Markdown으로 요약해 RAG/Dify 업로드용 컨텍스트를 만든다.
+# 원칙:
 # - 생성된 Markdown은 RAG 컨텍스트로 활용되어, 정적 분석 결과를 LLM이 해석하고
 #   개선 방안을 제시할 때 사전 정보(트리/README/패키지 매니페스트 등)로 쓰인다.
 # - readme.md에서 설명한 Job #4(DSCORE-Code-Knowledge-Sync) 흐름을 지원해,
@@ -14,6 +15,7 @@ from pathlib import Path
 #   빠르게 참고하도록 돕는 사전 자료 역할을 한다.
 # - 출력은 Markdown 하나로 끝나므로 Jenkins 아티팩트나 로그에 남겨 두었다가
 #   다른 스크립트/워크플로(Dify 업로드 등)에서 바로 재사용할 수 있다.
+# 기대결과: 트리 + 주요 파일 내용을 담은 Markdown이 생성되어, 코드 컨텍스트 지식베이스로 바로 업로드하거나 Jenkins 아티팩트로 활용된다.
 
 # 트리 생성 시 스킵할 디렉터리 목록.
 # (빌드 산출물, IDE 설정, 가상환경, 캐시 등은 컨텍스트 가치가 낮으므로 제외)

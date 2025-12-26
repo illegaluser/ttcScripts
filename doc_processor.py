@@ -8,6 +8,13 @@ import pandas as pd
 import fitz  # PyMuPDF(pymupdf)가 제공하는 모듈 이름은 fitz다.
 from docx import Document
 
+# 목적: readme.md의 DSCORE-Knowledge-Sync(Job #1~#3)에서 원본 문서/슬라이드/스프레드시트를 MD/PDF로 변환하고 Dify Dataset에 업로드한다.
+# 원칙:
+# - 공유 볼륨 경로(SOURCE_DIR/RESULT_DIR)와 DIFY_API_BASE를 고정해 Jenkins 컨테이너와 호스트가 동일 경로/주소를 사용하도록 한다.
+# - doc_form(doc_form=qa_model vs document) 불일치 시 업로드를 중단해 잘못된 Dataset 오염을 막는다.
+# - 변환 결과는 매 실행마다 RESULT_DIR를 비우고 재생성해 중복/잔존 파일을 없앤다.
+# 기대결과: RESULT_DIR에 생성된 MD/PDF가 Dify Dataset으로 업로드되어, 검색/질의 응답용 지식베이스가 최신 상태로 유지된다.
+
 # ---------------------------------------------------------
 # 고정 환경값
 # ---------------------------------------------------------
