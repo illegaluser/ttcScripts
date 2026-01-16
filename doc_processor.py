@@ -1,469 +1,567 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ==================================================================================
+# 파일명: doc_processor.py
+# 버전: 2.1 (Full Commented Version)
+#
+# [시스템 개요]
+# 이 스크립트는 다양한 포맷의 문서(PDF, PPTX, DOCX, XLSX, TXT)를 
+# RAG(검색 증강 생성) 시스템인 Dify에 적재하기 위해 Markdown 포맷으로 변환하는
+# 전처리(Preprocessing) 및 업로드 자동화 도구입니다.
+#
+# [핵심 아키텍처: 2-Pass Hybrid Pipeline]
+# 복잡한 문서(PDF, PPTX)의 데이터 유실을 막기 위해 아래 과정을 거칩니다.
+#
+# 1. Pass 1 (Structure Detection & Extraction):
+#    - PyMuPDF를 사용하여 문서의 뼈대(텍스트, 표 영역, 이미지 영역)를 감지합니다.
+#    - 특히 '표(Table)'가 텍스트 추출 과정에서 깨지는 것을 막기 위해, 
+#      표 영역 좌표를 우선 확보하고 해당 영역의 텍스트 추출을 건너뜁니다.
+#
+# 2. Pass 2 (Vision Refinement):
+#    - 텍스트로 표현하기 힘든 '표'와 '차트/이미지'는 원본 그대로 캡처(Crop)합니다.
+#    - 로컬 LLM(Ollama Llama 3.2 Vision)에게 이미지를 보내 상세한 설명이나
+#      Markdown 표 포맷으로 변환을 요청합니다.
+#
+# 3. Merge (Reconstruction):
+#    - 일반 텍스트(OCR)와 Vision 분석 결과를 Y축 좌표(Reading Order) 순서대로
+#      재배치하여, 사람이 읽는 순서와 동일한 하나의 Markdown 문서를 완성합니다.
+#
+# [실행 모드]
+# 1. convert: 원본 문서를 읽어 Markdown으로 변환하여 로컬에 저장합니다.
+# 2. upload: 변환된 Markdown 파일을 Dify Knowledge Base API로 전송합니다.
+# ==================================================================================
+
 import os
 import sys
 import json
+import time
 import shutil
 import subprocess
-import requests
-import pandas as pd
-import fitz  # PyMuPDF(pymupdf)가 제공하는 모듈 이름은 fitz다.
-from docx import Document
+import base64
+import io
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
+from operator import itemgetter
 
-# 목적: readme.md의 DSCORE-Knowledge-Sync(Job #1~#3)에서 원본 문서/슬라이드/스프레드시트를 MD/PDF로 변환하고 Dify Dataset에 업로드한다.
-# 원칙:
-# - 공유 볼륨 경로(SOURCE_DIR/RESULT_DIR)와 DIFY_API_BASE를 고정해 Jenkins 컨테이너와 호스트가 동일 경로/주소를 사용하도록 한다.
-# - doc_form(doc_form=qa_model vs document) 불일치 시 업로드를 중단해 잘못된 Dataset 오염을 막는다.
-# - 변환 결과는 매 실행마다 RESULT_DIR를 비우고 재생성해 중복/잔존 파일을 없앤다.
-# 기대결과: RESULT_DIR에 생성된 MD/PDF가 Dify Dataset으로 업로드되어, 검색/질의 응답용 지식베이스가 최신 상태로 유지된다.
+# 외부 라이브러리 의존성
+import requests  # API 호출용
+import fitz      # PDF 처리를 위한 PyMuPDF 라이브러리
 
-# ---------------------------------------------------------
-# 고정 환경값
-# ---------------------------------------------------------
+# ============================================================================
+# [설정] 환경 변수 및 고정 경로 설정
+# ============================================================================
 
-# Dify API는 Jenkins 컨테이너 내부에서 Dify 컨테이너(api)로 접근한다.
-# - docker-compose.override.yaml에서 api 서비스가 devops-net에 붙어 있어야 한다.
-# - 파이프라인이 컨테이너 안에서 실행되므로 http://api:5001/v1로 고정한다.
-# - 별도 프록시/도메인 설정을 섞지 말고 이 베이스만 사용한다.
-# - readme.md의 네트워크 체계(컨테이너 내부 고정 주소)에 맞춰야 Dify 업로드가 실패하지 않는다.
-DIFY_API_BASE = "http://api:5001/v1"
-
-# 지식 원본 폴더
-# - 사용자가 여기에 원본 문서파일을 넣는다.
-# - Jenkins와 호스트가 공유하는 볼륨(/var/knowledges/docs/org)로 고정
-# - readme.md Section 1.3 “공유 볼륨” 경로와 동일하게 맞춰야 파이프라인이 동일 경로를 참조한다.
+# 원본 문서가 위치한 디렉터리 (Jenkins 볼륨 마운트 경로)
 SOURCE_DIR = "/var/knowledges/docs/org"
 
-# 지식 결과 폴더
-# - 변환 결과(MD, PDF)가 여기에 생성된다.
-# - 이후 업로드 단계(upload mode)에서 이 폴더를 스캔한다.
-# - convert → upload 두 단계로 나뉜 Jenkins Job에서 공용 결과 디렉터리 역할을 한다.
+# 변환된 Markdown 파일이 저장될 디렉터리
 RESULT_DIR = "/var/knowledges/docs/result"
 
+# Dify API 접속 주소
+# Jenkins 컨테이너 내부에서 Dify API 컨테이너("api")로 접속합니다.
+DIFY_API_BASE = os.getenv("DIFY_API_BASE", "http://api:5001/v1")
 
-# ---------------------------------------------------------
-# 유틸리티 함수
-# ---------------------------------------------------------
+# Ollama Vision API 설정
+# Jenkins는 컨테이너 내부에서 돌고, Ollama는 호스트 머신(Mac 등)에서 실행 중입니다.
+# 따라서 'localhost' 대신 'host.docker.internal'을 사용하여 호스트로 통신합니다.
+OLLAMA_API_URL = "http://host.docker.internal:11434/api/generate"
 
-def ensure_dirs():
-    """
-    결과 디렉터리(RESULT_DIR)가 없으면 생성한다.
-    - Jenkins 컨테이너 내에서 실행될 때도 동일한 절대경로를 쓴다.
-    - 경로 유무를 먼저 보장해 변환·업로드 단계에서 '경로 없음' 오류를 예방한다.
-    - exist_ok=True로 이미 있을 때도 예외 없이 넘어간다.
-    - readme.md의 “지식 관리 자동화” 파이프라인(DSCORE-Knowledge-Sync 시리즈)에서
-      convert 단계가 실패 없이 시작되도록 사전 준비를 해둔다.
-    """
-    os.makedirs(RESULT_DIR, exist_ok=True)
+# 사용할 Vision 모델명
+# 사전에 호스트 머신에서 'ollama pull llama3.2-vision' 명령어로 모델을 받아둬야 합니다.
+VISION_MODEL = "llama3.2-vision:latest"
 
+# ============================================================================
+# [유틸리티] 공통 헬퍼 함수
+# ============================================================================
 
-def clean_result_dir():
+def log(msg: str) -> None:
     """
-    이전 실행의 결과물을 제거한다. (파일/폴더 모두 삭제)
-    - PoC에서는 증분 업로드를 처리하지 않으므로 매번 비우는 방식이 가장 단순하다.
-    - 오래된 파일이 남아 잘못 업로드되는 상황을 막아준다.
-    - RESULT_DIR가 없으면 조용히 반환해 불필요한 오류를 피한다.
-    - readme.md의 Jenkins Job 예시에서 convert 단계 시작 시마다 호출되어,
-      이전 파이프라인 산출물이 섞이지 않도록 하는 안전장치다.
+    Jenkins Console Output에서 로그를 명확하게 보기 위한 함수입니다.
+    flush=True를 사용하여 버퍼링 없이 즉시 출력합니다.
     """
-    if not os.path.exists(RESULT_DIR):
+    print(f"[DocProcessor] {msg}", flush=True)
+
+def safe_read_text(path: Path, max_bytes: int = 5_000_000) -> str:
+    """
+    파일을 읽을 때 발생할 수 있는 인코딩 오류와 메모리 문제를 방지합니다.
+    
+    Args:
+        path: 읽을 파일의 경로
+        max_bytes: 최대 읽기 허용 바이트 (기본 5MB). 
+                   너무 큰 텍스트 파일은 RAG 청킹 과정에서 비효율적이므로 제한합니다.
+    
+    Returns:
+        UTF-8로 디코딩된 문자열 (오류 발생 시 빈 문자열 반환)
+    """
+    try:
+        data = path.read_bytes()
+        # 파일 크기 제한 적용
+        data = data[:max_bytes]
+        # errors='ignore'로 설정하여 이모지나 특수문자 깨짐으로 인한 중단을 방지합니다.
+        return data.decode("utf-8", errors="ignore")
+    except Exception as e:
+        log(f"[Warn] 파일 읽기 실패: {path.name} / {e}")
+        return ""
+
+def write_text(path: Path, content: str) -> None:
+    """
+    문자열을 파일로 저장합니다. 
+    저장 경로의 부모 디렉터리가 없으면 자동으로 생성합니다.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+# ============================================================================
+# [Core 1] Vision Analysis Logic (Ollama 연동)
+# ============================================================================
+
+def analyze_image_region(image_bytes: bytes, prompt: str) -> str:
+    """
+    이미지 바이너리 데이터를 받아 Ollama Vision 모델에게 분석을 요청합니다.
+    
+    Args:
+        image_bytes: 분석할 이미지의 원본 바이트 데이터 (PNG/JPEG 등)
+        prompt: Vision 모델에게 지시할 명령어 (예: "이 표를 마크다운으로 바꿔줘")
+        
+    Returns:
+        모델이 생성한 텍스트 설명 (Markdown 형식)
+    """
+    try:
+        # 1. API 전송을 위해 이미지 바이트를 Base64 문자열로 인코딩합니다.
+        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        
+        # 2. Ollama API 요청 페이로드를 구성합니다.
+        payload = {
+            "model": VISION_MODEL,
+            "prompt": prompt,
+            "stream": False,    # 스트리밍을 끄고 전체 응답을 한 번에 받습니다.
+            "images": [img_b64],
+            "options": {
+                # temperature를 낮게 설정(0.1)하여 모델의 창의성을 억제합니다.
+                # 문서 변환은 사실적인 데이터 추출이 중요하기 때문입니다.
+                "temperature": 0.1,
+                # 이미지 분석은 텍스트가 길어질 수 있으므로 컨텍스트 윈도우를 확보합니다.
+                "num_ctx": 2048
+            }
+        }
+        
+        # 3. API 호출 (타임아웃 3분)
+        # Vision 모델은 추론 연산량이 많아 응답 시간이 오래 걸릴 수 있습니다.
+        r = requests.post(OLLAMA_API_URL, json=payload, timeout=180)
+        r.raise_for_status()  # HTTP 4xx/5xx 에러 발생 시 예외 처리
+        
+        # 4. 결과 추출
+        data = r.json()
+        return data.get("response", "").strip()
+        
+    except Exception as e:
+        log(f"!! [Vision Error] 분석 실패: {e}")
+        # 실패하더라도 전체 프로세스가 죽지 않도록 에러 메시지를 반환합니다.
+        return "(Vision analysis failed for this region)"
+
+# ============================================================================
+# [Core 2] Hybrid PDF Converter (핵심 변환 엔진)
+# ============================================================================
+
+def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
+    """
+    2-Pass Hybrid Pipeline을 구현한 핵심 함수입니다.
+    PDF의 각 페이지를 순회하며 텍스트와 비주얼 요소를 분리하여 처리하고 다시 합칩니다.
+    """
+    # PyMuPDF로 문서를 엽니다.
+    doc = fitz.open(str(pdf_path))
+    full_doc = []  # 전체 페이지의 변환 결과를 담을 리스트
+    
+    total_pages = len(doc)
+    log(f"[Hybrid] Processing Start: {pdf_path.name} (Total Pages: {total_pages})")
+
+    # 각 페이지 순회 (1페이지부터 시작)
+    for page_num, page in enumerate(doc, start=1):
+        log(f"  Processing Page {page_num}/{total_pages}...")
+        
+        # 페이지 내 추출된 요소들을 저장할 리스트
+        # 구조: {'y': Y축좌표, 'type': 'text'|'table'|'image', 'content': 'Markdown내용'}
+        page_content = []
+        
+        # --------------------------------------------------------------------
+        # Pass 1-1: 표(Table) 영역 감지 (Priority 1)
+        # --------------------------------------------------------------------
+        # 이유: 표는 텍스트 추출 시 행/열 구조가 깨지기 가장 쉽습니다.
+        # 따라서 PyMuPDF의 'find_tables' 기능을 이용해 표 영역 좌표(bbox)를 먼저 찾습니다.
+        tables = page.find_tables()
+        table_rects = [tab.bbox for tab in tables]
+        
+        for rect in table_rects:
+            # 감지된 표 영역을 이미지로 잘라냅니다 (Crop).
+            pix = page.get_pixmap(clip=rect)
+            img_bytes = pix.tobytes("png")
+            
+            log(f"    -> [Vision] Table detected at Y={rect[1]:.1f}, analyzing...")
+            
+            # Vision 모델에게 "이미지만 보고 마크다운 표를 만들어달라"고 요청합니다.
+            md_table = analyze_image_region(
+                img_bytes, 
+                "Convert this table image into a Markdown table format. Only output the table, no description."
+            )
+            
+            # 결과 저장 (좌표 포함)
+            page_content.append({
+                "y": rect[1],    # 정렬 기준이 될 상단 Y 좌표
+                "type": "table",
+                "content": f"\n{md_table}\n"
+            })
+
+        # --------------------------------------------------------------------
+        # Pass 1-2: 텍스트 및 이미지 블록 추출 (Priority 2)
+        # --------------------------------------------------------------------
+        # get_text("dict") 모드는 페이지 내용을 블록 단위 구조체로 반환합니다.
+        # blocks 리스트에는 텍스트 블록과 이미지 블록이 섞여 있습니다.
+        blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]
+        
+        for block in blocks:
+            # 블록의 좌표(bbox)를 가져옵니다.
+            bbox = fitz.Rect(block["bbox"])
+            
+            # [중요: 중복 방지 필터링]
+            # 현재 처리 중인 블록이 앞서 감지한 '표 영역' 안에 포함되는지 확인합니다.
+            # 표 영역 안에 있는 텍스트는 이미 Vision 모델이 표로 변환했습니다.
+            # 따라서 여기서 또 추출하면 내용이 중복되므로 건너뛰어야(Skip) 합니다.
+            is_inside_table = False
+            for t_rect in table_rects:
+                # 두 영역의 교차 영역을 계산합니다.
+                intersect = bbox.intersect(fitz.Rect(t_rect))
+                # 블록 면적의 80% 이상이 표 영역과 겹치면 표의 일부로 간주합니다.
+                if intersect.get_area() > 0.8 * bbox.get_area():
+                    is_inside_table = True
+                    break
+            
+            if is_inside_table:
+                continue
+
+            # ----------------------------------------------------------------
+            # Case A: 텍스트 블록 처리 (type=0)
+            # ----------------------------------------------------------------
+            if block["type"] == 0: 
+                text = ""
+                # 텍스트 블록은 여러 라인(lines)과 스팬(spans)으로 구성됩니다.
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        text += span["text"] + " "
+                    text += "\n"
+                
+                # 내용이 있는 경우에만 추가합니다.
+                if text.strip():
+                    page_content.append({
+                        "y": bbox.y0,
+                        "type": "text",
+                        "content": text
+                    })
+
+            # ----------------------------------------------------------------
+            # Case B: 이미지 블록 처리 (type=1)
+            # ----------------------------------------------------------------
+            elif block["type"] == 1:
+                # [노이즈 필터링]
+                # 문서에는 아이콘, 장식선, 배경 등 의미 없는 작은 이미지가 많습니다.
+                # 가로/세로가 50px 미만인 이미지는 분석 가치가 없다고 판단하여 무시합니다.
+                width = bbox[2] - bbox[0]
+                height = bbox[3] - bbox[1]
+                if width < 50 or height < 50:
+                    continue
+                
+                img_bytes = block["image"]
+                
+                log(f"    -> [Vision] Image detected at Y={bbox.y0:.1f}, analyzing...")
+                
+                # Vision 모델에게 이미지 설명을 요청합니다.
+                desc = analyze_image_region(
+                    img_bytes,
+                    "Describe this image in detail. If it's a chart, summarize the data trends."
+                )
+                
+                # 이미지는 인용구(>) 형식으로 마크다운에 삽입하여 구분합니다.
+                page_content.append({
+                    "y": bbox.y0,
+                    "type": "image",
+                    "content": f"\n> **[Image Analysis]**\n> {desc}\n"
+                })
+
+        # --------------------------------------------------------------------
+        # Pass 2: 병합 (Merge & Sort)
+        # --------------------------------------------------------------------
+        # 수집된 모든 요소(텍스트, 표, 이미지 설명)를 Y축 좌표(문서 위->아래) 순서로 정렬합니다.
+        # 이를 통해 문서의 원래 읽는 순서(Reading Order)를 복원합니다.
+        page_content.sort(key=itemgetter("y"))
+        
+        # 정렬된 요소들의 내용을 하나로 합칩니다.
+        page_md = f"## Page {page_num}\n\n"
+        page_md += "\n".join([item["content"] for item in page_content])
+        full_doc.append(page_md)
+
+    doc.close()
+    
+    # 전체 페이지 내용을 구분선으로 연결하여 반환합니다.
+    title = pdf_path.name
+    body = "\n\n---\n\n".join(full_doc)
+    return f"# {title}\n\n{body}\n"
+
+# ============================================================================
+# [유틸리티] 일반 문서 포맷 변환기 (Legacy Support)
+# ============================================================================
+
+def docx_to_markdown(docx_path: Path) -> str:
+    """DOCX 파일을 텍스트만 추출하여 Markdown으로 변환합니다."""
+    try:
+        from docx import Document
+        d = Document(str(docx_path))
+        # 빈 줄을 제외하고 모든 문단을 추출합니다.
+        lines = [p.text.strip() for p in d.paragraphs if p.text.strip()]
+        if not lines: return ""
+        return f"# {docx_path.name}\n\n" + "\n\n".join(lines) + "\n"
+    except Exception as e:
+        log(f"[Warn] DOCX 변환 실패: {e}")
+        return ""
+
+def excel_to_markdown(xls_path: Path) -> str:
+    """Excel 파일의 각 시트를 Markdown 표 형태로 변환합니다."""
+    try:
+        import pandas as pd
+        # 모든 시트를 읽어옵니다.
+        sheets = pd.read_excel(str(xls_path), sheet_name=None)
+        if not sheets: return ""
+        
+        out = [f"# {xls_path.name}\n"]
+        for sheet_name, df in sheets.items():
+            out.append(f"## Sheet: {sheet_name}\n")
+            # pandas의 to_markdown 기능을 활용합니다.
+            out.append(df.to_markdown(index=False))
+            out.append("\n")
+        return "\n".join(out).strip() + "\n"
+    except Exception as e:
+        log(f"[Warn] Excel 변환 실패: {e}")
+        return ""
+
+def pptx_to_pdf(pptx_path: Path, out_dir: Path) -> Optional[Path]:
+    """
+    PPTX 파일을 PDF로 변환합니다.
+    
+    이유: 
+    PPTX 라이브러리로 텍스트를 직접 추출하면 레이아웃 순서가 뒤죽박죽이 되고,
+    도표나 차트 데이터를 놓치기 쉽습니다.
+    대신 LibreOffice를 사용해 PDF로 '인쇄'하듯 변환하면 레이아웃이 고정되므로,
+    이후 Hybrid Pipeline으로 처리하기 최적의 상태가 됩니다.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # 변환될 PDF 파일의 예상 경로
+    expected_pdf = out_dir / (pptx_path.stem + ".pdf")
+    
+    # LibreOffice Headless 모드 실행 명령어
+    cmd = [
+        "soffice", "--headless", "--nologo", "--nolockcheck", "--norestore",
+        "--convert-to", "pdf", "--outdir", str(out_dir), str(pptx_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        log(f"[Warn] PPTX -> PDF 변환 실패 (LibreOffice 확인 필요): {e}")
+        return None
+    
+    if expected_pdf.exists():
+        return expected_pdf
+    return None
+
+# ============================================================================
+# [실행 모드 1] 변환 로직 (Convert)
+# ============================================================================
+
+def convert_one(src_path: Path) -> None:
+    """단일 파일에 대해 파일 확장자를 확인하고 적절한 변환기를 호출합니다."""
+    ext = src_path.suffix.lower()
+    
+    # 1. PDF 처리 (Hybrid Vision 적용)
+    if ext == ".pdf":
+        log(f"[Target] PDF Detected: {src_path.name}")
+        md = pdf_to_markdown_hybrid(src_path)
+        if md:
+            out = Path(RESULT_DIR) / f"{src_path.name}.md"
+            write_text(out, md)
+            log(f"[Saved] {out}")
         return
-    for name in os.listdir(RESULT_DIR):
-        path = os.path.join(RESULT_DIR, name)
-        if os.path.isfile(path):
-            os.remove(path)
-        else:
-            shutil.rmtree(path, ignore_errors=True)
+    
+    # 2. PPTX 처리 (PDF 변환 -> Hybrid Vision 적용)
+    # PPTX는 시각적 요소가 중요하므로 PDF로 1차 변환 후 Hybrid 엔진을 태웁니다.
+    if ext == ".pptx":
+        log(f"[Target] PPTX Detected: {src_path.name} -> Converting to PDF first...")
+        pdf = pptx_to_pdf(src_path, Path(RESULT_DIR))
+        if pdf:
+            # 변환된 PDF를 대상으로 Hybrid 로직 실행
+            md = pdf_to_markdown_hybrid(pdf)
+            if md:
+                out = Path(RESULT_DIR) / f"{src_path.name}.md"
+                write_text(out, md)
+                log(f"[Saved] {out}")
+        return
 
+    # 3. 기타 텍스트 포맷 처리 (단순 추출)
+    if ext == ".docx":
+        md = docx_to_markdown(src_path)
+        if md:
+            out = Path(RESULT_DIR) / f"{src_path.name}.md"
+            write_text(out, md)
+            log(f"[Saved] {out}")
+        return
+    
+    if ext in [".xlsx", ".xls"]:
+        md = excel_to_markdown(src_path)
+        if md:
+            out = Path(RESULT_DIR) / f"{src_path.name}.md"
+            write_text(out, md)
+            log(f"[Saved] {out}")
+        return
+    
+    if ext == ".txt":
+        text = safe_read_text(src_path)
+        if text.strip():
+            md = f"# {src_path.name}\n\n{text.strip()}\n"
+            out = Path(RESULT_DIR) / f"{src_path.name}.md"
+            write_text(out, md)
+            log(f"[Saved] {out}")
+        return
 
-def df_to_markdown_simple(df: pd.DataFrame) -> str:
+def convert_all() -> None:
+    """SOURCE_DIR의 모든 파일을 검색하여 변환을 수행하는 메인 루프입니다."""
+    log("=== [Hybrid Doc Processor] Convert Start ===")
+    
+    # 결과 디렉터리가 없으면 생성
+    os.makedirs(RESULT_DIR, exist_ok=True)
+    src_root = Path(SOURCE_DIR)
+    
+    # 재귀적으로 파일 탐색
+    for root, _, files in os.walk(src_root):
+        for name in files:
+            p = Path(root) / name
+            # 지원하는 확장자만 필터링
+            if p.suffix.lower() in [".pdf", ".docx", ".xlsx", ".xls", ".txt", ".pptx"]:
+                convert_one(p)
+                
+    log("=== [Hybrid Doc Processor] Convert Done ===")
+
+# ============================================================================
+# [실행 모드 2] 업로드 로직 (Upload)
+# ============================================================================
+
+def dify_headers(api_key: str) -> dict:
+    """Dify API 호출을 위한 인증 헤더를 생성합니다."""
+    return {"Authorization": f"Bearer {api_key}"}
+
+def get_dataset_doc_form(api_key: str, dataset_id: str) -> str:
     """
-    pandas의 to_markdown(tabulate 의존)을 사용하지 않고 최소한의 마크다운 테이블을 생성한다.
-    - 멀티 인덱스, 서식 지정 등은 고려하지 않는다.
-    - NaN은 빈 문자열로 치환해 Dify 업로드 시 불필요한 'nan' 문자열이 나타나지 않도록 한다.
-    - tabulate 설치가 안 된 환경에서도 바로 동작하도록 직접 테이블 문자열을 만든다.
-    - 열 순서는 DataFrame의 열 순서를 그대로 따르며, 모든 값을 문자열로 변환한다.
-    - readme.md에서 “지식 업로드” 단계는 Jenkins 슬림 이미지 기준이므로,
-      추가 패키지 설치 없이도 테이블을 만들 수 있게 최소 구현으로 유지한다.
-    """
-    if df is None or df.empty:
-        return ""
-
-    cols = [str(c) for c in df.columns.tolist()]
-    header = "| " + " | ".join(cols) + " |"
-    sep = "| " + " | ".join(["---"] * len(cols)) + " |"
-
-    rows = []
-    for _, row in df.iterrows():
-        vals = []
-        for c in cols:
-            v = row.get(c, "")
-            vals.append("" if pd.isna(v) else str(v))
-        rows.append("| " + " | ".join(vals) + " |")
-
-    return "\n".join([header, sep] + rows)
-
-
-# ---------------------------------------------------------
-# 변환 함수
-# ---------------------------------------------------------
-
-def convert_to_md(filepath: str, filename: str):
-    """
-    TXT, DOCX, XLSX/XLS, PDF를 Markdown 텍스트로 변환하여 result에 저장한다.
-
-    출력 파일명 규칙
-    - 원본이 example.pdf이면 example.pdf.md 형태로 저장한다.
-    - 원본명 보존이 목적이다.
-    처리 방식
-    - TXT: 원문을 그대로 사용한다.
-    - DOCX: 비어 있지 않은 단락을 이어 붙인다.
-    - XLSX/XLS: 시트별로 제목을 붙이고 간단한 테이블 문자열로 변환한다.
-    - PDF: 각 페이지의 텍스트를 순서대로 합친다.
-    - PPTX는 convert_pptx_to_pdf에서 PDF를 만든 뒤 여기로 넘어와 MD를 추가로 생성한다.
-    사소하지만 중요한 포인트
-    - 파일 인코딩 문제를 피하려고 errors="ignore"로 열어 깨진 문자도 무시하고 진행한다.
-    - 변환 결과가 비어 있으면 저장을 생략해 불필요한 빈 파일을 만들지 않는다.
-    - readme.md의 Jenkins Job #1/#2/#3(문서/Q&A/Vision 지식 동기화)에서
-      원본 포맷을 모두 Markdown 텍스트로 통일해 Dify에 업로드하기 위한 전처리 단계다.
-    - 시트 이름이나 PDF 페이지 순서를 유지해, 이후 검색·질의 응답 시 원본 구조를 추적하기 쉽다.
-    """
-    ext = filename.lower().split(".")[-1]
-    md_content = ""
-    target_path = os.path.join(RESULT_DIR, f"{filename}.md")
-
-    print(f"[Convert:MD] {filename}")
-
-    try:
-        if ext == "txt":
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                md_content = f.read()
-
-        elif ext == "docx":
-            doc = Document(filepath)
-            parts = []
-            for para in doc.paragraphs:
-                t = para.text.strip()
-                if t:
-                    parts.append(t)
-            md_content = "\n\n".join(parts)
-
-        elif ext in ["xlsx", "xls"]:
-            xls = pd.ExcelFile(filepath)
-            parts = []
-            for sheet_name in xls.sheet_names:
-                parts.append(f"## Sheet: {sheet_name}")
-                df = pd.read_excel(xls, sheet_name=sheet_name)
-                table = df_to_markdown_simple(df)
-                if table:
-                    parts.append(table)
-                parts.append("")
-            md_content = "\n\n".join(parts)
-
-        elif ext == "pdf":
-            doc = fitz.open(filepath)
-            parts = []
-            for page in doc:
-                parts.append(page.get_text())
-            md_content = "\n\n".join(parts)
-
-        if md_content.strip():
-            with open(target_path, "w", encoding="utf-8") as f:
-                f.write(f"# {filename}\n\n{md_content}\n")
-            print(f"[Saved] {target_path}")
-
-    except Exception as e:
-        print(f"[Error] convert_to_md failed: {filename} / {e}")
-
-
-def convert_pptx_to_pdf(filepath: str, filename: str) -> str:
-    """
-    PPTX를 LibreOffice(soffice) headless 모드로 PDF로 변환한다.
-
-    반환값
-    - 변환된 PDF 파일의 전체 경로를 반환한다.
-    - 실패하면 빈 문자열을 반환한다.
-    사용 이유
-    - Dify 업로드 전에 PPTX를 PDF로 변환하고, 필요시 PDF에서 텍스트를 추출한 MD도 생성하기 위함이다.
-    - headless 모드만 사용하므로 Jenkins 에이전트에서도 GUI 의존성이 없다.
-    - soffice가 설치되어 있어야 동작하며, 실패 시 예외를 잡아 빈 문자열을 반환한다.
-    - 표준 출력/에러는 버려 로그를 간결하게 유지한다.
-    - readme.md의 “지식 업로드” 파이프라인에서 PPTX는 바로 텍스트 추출이 어렵기 때문에,
-      PDF 중간 변환을 거쳐 텍스트/파일 업로드 모두를 지원하는 구조다.
-    """
-    print(f"[Convert:PDF] {filename}")
-
-    try:
-        subprocess.run(
-            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", RESULT_DIR, filepath],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        pdf_name = filename.rsplit(".", 1)[0] + ".pdf"
-        pdf_path = os.path.join(RESULT_DIR, pdf_name)
-
-        if os.path.exists(pdf_path):
-            print(f"[Saved] {pdf_path}")
-            return pdf_path
-
-        print(f"[Error] PPTX conversion output not found: {pdf_path}")
-        return ""
-
-    except Exception as e:
-        print(f"[Error] convert_pptx_to_pdf failed: {filename} / {e}")
-        return ""
-
-
-# ---------------------------------------------------------
-# Dify API 연동 함수
-# ---------------------------------------------------------
-
-def get_dataset_doc_form(dataset_id: str, api_key: str) -> str:
-    """
-    Dataset의 doc_form을 조회한다. (qa_model / document / 기타)
-    업로드 요청 시 지정한 doc_form과 Dataset 설정이 다르면 Dify가 오류를 반환하므로,
-    사전 조회로 불일치 여부를 검증한다.
-    - 요청 실패나 예상치 못한 응답은 빈 문자열로 처리해 이후 로직이 기본값 흐름을 따른다.
-    - 네트워크 예외는 조용히 무시하고 빈 문자열을 반환한다.
-    - readme.md의 Job #2(QA 모델)처럼 doc_form이 특정되어 있을 때,
-      사용자가 CLI에서 doc_form을 잘못 넘겨도 여기서 감지해 업로드를 중단한다.
+    Dify Dataset의 설정(문서 형식)을 조회합니다.
+    사용자가 '문서형' Dataset에 'Q&A' 데이터를 넣으려는 실수를 방지하기 위함입니다.
     """
     url = f"{DIFY_API_BASE}/datasets/{dataset_id}"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    r = requests.get(url, headers=dify_headers(api_key), timeout=60)
+    r.raise_for_status()
+    # doc_form 값 (text_model, qa_model 등) 반환
+    return str(r.json().get("doc_form", ""))
 
-    try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        if resp.status_code != 200:
-            return ""
-        data = resp.json()
-        return data.get("doc_form", "")
-    except Exception:
-        return ""
-
-
-def upload_md(dataset_id: str, api_key: str, file_path: str, doc_form: str, doc_language: str) -> requests.Response:
+def ensure_doc_form_matches(api_key: str, dataset_id: str, expected_doc_form: str) -> None:
     """
-    MD 파일을 Dify에 텍스트 문서로 업로드한다. (create-by-text 엔드포인트)
-    - doc_form이 주어지면 payload에 명시해 Dataset 설정과 일치하도록 한다.
-    - doc_language가 있으면 검색/질의 품질을 높이기 위해 함께 전달한다.
-    - indexing_technique는 high_quality로 고정해 검색 품질을 우선한다.
-    - process_rule은 자동 처리로 설정한다.
-    - 파일은 UTF-8로 읽되 errors="ignore"로 깨진 문자를 무시한다.
-    - readme.md의 “Knowledge Base 업로드” 예시에서 사용하는 엔드포인트와 동일하다.
-    - doc_language는 비워도 되지만, 명시하면 LLM 검색 성능이 조금 더 향상될 수 있다.
+    Dataset의 실제 설정과 업로드하려는 데이터 형식이 일치하는지 검증합니다.
+    불일치 시 프로세스를 강제 종료하여 데이터 오염을 막습니다.
+    """
+    actual = get_dataset_doc_form(api_key, dataset_id)
+    if actual != expected_doc_form:
+        raise SystemExit(f"[FAIL] Dataset 설정 불일치! (Dataset={actual} / Request={expected_doc_form})")
+
+def upload_text_document(api_key: str, dataset_id: str, name: str, text: str, doc_form: str, doc_language: str) -> Tuple[bool, str]:
+    """
+    Dify의 '텍스트로 문서 만들기' API를 호출합니다.
     """
     url = f"{DIFY_API_BASE}/datasets/{dataset_id}/document/create-by-text"
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
-
+    
+    # API 요청 페이로드
     payload = {
-        "name": os.path.basename(file_path),
-        "text": content,
-        "indexing_technique": "high_quality",
-        "process_rule": {"mode": "automatic"},
+        "name": name, 
+        "text": text, 
+        "indexing_technique": "economy",  # 벡터 DB 비용 절약을 위해 economy 모드 사용
+        "doc_form": doc_form,             # text_model(문서형) 또는 qa_model(Q&A형)
+        "doc_language": doc_language,     # Korean 등
+        "process_rule": {
+            "rules": {"remove_extra_spaces": True},  # 불필요한 공백 제거
+            "remove_urls_emails": False              # URL/이메일은 보존
+        },
+        "mode": "automatic",  # 청킹(Chunking)을 자동으로 수행
     }
+    
+    # 문서 생성 요청
+    r = requests.post(url, headers={**dify_headers(api_key), "Content-Type": "application/json"}, json=payload, timeout=300)
+    
+    if r.status_code >= 400:
+        return False, f"HTTP {r.status_code} / {r.text}"
+    return True, "OK"
 
-    if doc_form:
-        payload["doc_form"] = doc_form
+def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) -> None:
+    """RESULT_DIR에 있는 변환된 Markdown 파일들을 Dify로 업로드합니다."""
+    log("=== [Hybrid Doc Processor] Upload Start ===")
+    
+    # 1. Dataset 설정 검증 (안전장치)
+    ensure_doc_form_matches(api_key, dataset_id, doc_form)
+    
+    result_root = Path(RESULT_DIR)
+    if not result_root.exists():
+        log("[Error] 변환 결과 디렉터리가 없습니다. 먼저 convert를 실행하세요.")
+        return
+        
+    # 2. 결과 파일 순회 및 업로드
+    for p in sorted(result_root.glob("*.md")):
+        text = safe_read_text(p)
+        if not text:
+            continue
+            
+        ok, detail = upload_text_document(api_key, dataset_id, p.name, text, doc_form, doc_language)
+        
+        if ok:
+            log(f"[Upload:OK] {p.name}")
+        else:
+            log(f"[Upload:FAIL] {p.name} / {detail}")
+            
+    log("=== [Hybrid Doc Processor] Upload Done ===")
 
-    if doc_language:
-        payload["doc_language"] = doc_language
+# ============================================================================
+# [메인] 프로그램 진입점 (CLI 파서)
+# ============================================================================
 
-    return requests.post(url, headers=headers, json=payload, timeout=60)
-
-
-def upload_pdf(dataset_id: str, api_key: str, file_path: str) -> requests.Response:
+def main() -> None:
     """
-    PDF 파일을 Dify에 파일로 업로드한다.
-    Dify API 문서의 create-by-file 엔드포인트를 사용한다. :contentReference[oaicite:4]{index=4}
-
-    주의
-    - create-by-file 문서 스키마에는 doc_form이 명시되어 있지 않다.
-    - PoC에서는 파일 업로드는 문서형 Dataset에서만 수행한다.
-    - Q&A Dataset(qa_model)에서는 PDF를 파일로 업로드하지 않고, PDF 텍스트를 MD로 올린다.
-    - 업로드 시 process_rule은 자동 처리로 고정한다.
-    - PDF는 바이너리로 전송하며, requests의 files 인자를 사용한다.
-    - readme.md Job #1(문서형)에서는 PDF 업로드가 활성화되며,
-      Job #2(QA형)에서는 convert_to_md를 통해 텍스트만 올린다.
+    명령행 인자를 파싱하여 convert 또는 upload 모드를 실행합니다.
+    사용법:
+      1. 변환: python3 doc_processor.py convert
+      2. 업로드: python3 doc_processor.py upload <API_KEY> <DATASET_ID> <FORM> <LANG>
     """
-    url = f"{DIFY_API_BASE}/datasets/{dataset_id}/document/create-by-file"
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    data = {
-        "indexing_technique": "high_quality",
-        "process_rule": json.dumps({"mode": "automatic"}),
-    }
-
-    files = {
-        "file": (os.path.basename(file_path), open(file_path, "rb"), "application/pdf")
-    }
-
-    return requests.post(url, headers=headers, data=data, files=files, timeout=120)
-
-
-def upload_files(dataset_id: str, api_key: str, requested_doc_form: str = "", doc_language: str = "") -> int:
-    """
-    result 폴더의 파일을 스캔하여 Dify로 업로드한다.
-
-    동작 규칙
-    - doc_form이 qa_model이면:
-      - MD만 업로드한다.
-      - PDF 파일 업로드는 수행하지 않는다.
-      - PDF 원본이 있으면, 그 PDF에서 추출한 *.pdf.md를 업로드 대상으로 삼는다.
-    - doc_form이 비어 있거나 qa_model이 아니면:
-      - MD는 create-by-text로 업로드한다.
-      - PDF는 create-by-file로 업로드한다.
-
-    반환값
-    - 실패 개수를 반환한다.
-    추가 검증
-    - 호출 시 전달된 doc_form과 Dataset의 doc_form이 다르면 즉시 중단해 잘못된 업로드를 막는다.
-    - doc_language는 optional로 전달하며, Dify 측이 이를 사용하지 않아도 무해하다.
-    업로드 시나리오 예시
-    - 문서형 Dataset(document): PDF 원본은 파일로, 기타/추출물은 MD로 업로드한다.
-    - Q&A Dataset(qa_model): PDF 파일 업로드를 건너뛰고, 추출한 *.pdf.md만 올린다.
-    - doc_form 파라미터를 CLI에서 지정하면 Dataset 설정과 일치하는지 확인해 불일치 시 에러를 낸다.
-    실패 처리
-    - 각 파일 업로드 실패 시 fail_count를 올리고 오류 메시지를 출력한다.
-    - 전체 완료 후 fail_count가 0보다 크면 호출부에서 비정상 종료 코드로 반환한다.
-    - readme.md Stage 1/2에서 Jenkins가 이 함수를 호출하며, 실패 count가 0보다 크면
-      파이프라인이 실패로 표시되어 문제를 즉시 알 수 있다.
-    - QA(doc_form=qa_model)일 때 PDF 원본을 건너뛰는 분기 로직이 핵심이다.
-    """
-    if not os.path.exists(RESULT_DIR):
-        print("[Upload] result directory not found")
-        return 1
-
-    dataset_doc_form = get_dataset_doc_form(dataset_id, api_key)
-    effective_doc_form = requested_doc_form or dataset_doc_form
-
-    if requested_doc_form and dataset_doc_form and requested_doc_form != dataset_doc_form:
-        print(f"[Upload:Error] requested doc_form={requested_doc_form} but dataset doc_form={dataset_doc_form}")
-        print("[Upload:Error] dataset의 doc_form과 업로드 doc_form이 일치해야 한다.")
-        return 1
-
-    print(f"[Upload] scan: {RESULT_DIR}")
-    print(f"[Upload] doc_form: {effective_doc_form if effective_doc_form else '(not set)'}")
-    print(f"[Upload] doc_language: {doc_language if doc_language else '(not set)'}")
-
-    fail_count = 0
-
-    for root, _, files in os.walk(RESULT_DIR):
-        for name in files:
-            path = os.path.join(root, name)
-            ext = name.lower().split(".")[-1]
-
-            try:
-                if ext == "md":
-                    resp = upload_md(dataset_id, api_key, path, effective_doc_form, doc_language)
-                    if resp.status_code == 200:
-                        print(f"[Upload:OK] {name}")
-                    else:
-                        fail_count += 1
-                        print(f"[Upload:FAIL] {name} / {resp.status_code} / {resp.text}")
-
-                elif ext == "pdf":
-                    if effective_doc_form == "qa_model":
-                        print(f"[Upload:SKIP] {name} (qa_model에서는 PDF 파일 업로드를 생략한다)")
-                        continue
-
-                    resp = upload_pdf(dataset_id, api_key, path)
-                    if resp.status_code == 200:
-                        print(f"[Upload:OK] {name}")
-                    else:
-                        fail_count += 1
-                        print(f"[Upload:FAIL] {name} / {resp.status_code} / {resp.text}")
-
-            except Exception as e:
-                fail_count += 1
-                print(f"[Upload:Error] {name} / {e}")
-
-    return fail_count
-
-
-# ---------------------------------------------------------
-# 메인
-# ---------------------------------------------------------
-
-def print_usage():
-    """
-    스크립트 사용법을 출력한다. (명령 인자 부족 시 호출)
-    - convert: SOURCE_DIR의 문서를 RESULT_DIR로 변환만 수행한다.
-    - upload: RESULT_DIR의 산출물을 Dify Dataset으로 업로드한다.
-    - doc_form/doc_language는 선택 인자로, Dataset 설정과 불일치 시 업로드를 막는다.
-    - readme.md의 Jenkins 샘플 파이프라인 명령과 동일한 인자 구성을 유지해 혼란을 줄인다.
-    """
-    print("Usage:")
-    print("  python doc_processor.py convert")
-    print("  python doc_processor.py upload <dataset_id> <api_key> [doc_form] [doc_language]")
-    print("")
-    print("Examples:")
-    print("  python doc_processor.py upload <id> <key>")
-    print("  python doc_processor.py upload <id> <key> qa_model Korean")
-
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: doc_processor.py [convert|upload] ...")
+    
+    cmd = sys.argv[1].strip().lower()
+    
+    # 1. 변환 모드 실행
+    if cmd == "convert":
+        convert_all()
+        return
+    
+    # 2. 업로드 모드 실행
+    if cmd == "upload":
+        if len(sys.argv) != 6:
+            raise SystemExit("usage: doc_processor.py upload <API_KEY> <DATASET_ID> <doc_form> <doc_language>")
+        
+        # 인자 매핑
+        api_key = sys.argv[2]
+        dataset_id = sys.argv[3]
+        doc_form = sys.argv[4]
+        doc_language = sys.argv[5]
+        
+        upload_all(api_key, dataset_id, doc_form, doc_language)
+        return
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print_usage()
-        sys.exit(1)
-
-    mode = sys.argv[1].strip()
-
-    if mode == "convert":
-        # 1) 변환 전 환경 준비: 결과 디렉터리를 만들고 기존 결과물을 비운다.
-        ensure_dirs()
-        clean_result_dir()
-
-        print("[Convert] start")
-
-        for root, _, files in os.walk(SOURCE_DIR):
-            for name in files:
-                # Office 임시 파일(~$로 시작)은 건너뛴다.
-                if name.startswith("~$"):
-                    continue
-
-                full_path = os.path.join(root, name)
-                ext = name.lower().split(".")[-1]
-
-                if ext == "pptx":
-                    # PPTX는 먼저 PDF로 변환한다.
-                    # Q&A Dataset에서도 PDF 텍스트를 활용할 수 있도록, PDF에서 MD도 추가 생성한다.
-                    # readme.md의 지침대로, PPTX 업로드는 PDF 변환을 필수로 거쳐야 한다.
-                    pdf_path = convert_pptx_to_pdf(full_path, name)
-                    # PPTX는 PDF로 변환하는 것이 핵심이다.
-                    # Q&A Dataset 업로드를 위해, 변환된 PDF에서 텍스트를 추출한 MD도 함께 만든다.
-                    if pdf_path:
-                        convert_to_md(pdf_path, os.path.basename(pdf_path))
-
-                elif ext in ["txt", "docx", "xlsx", "xls", "pdf"]:
-                    # 나머지 포맷은 바로 MD로 변환해 결과 디렉터리에 저장한다.
-                    # readme.md의 DSCORE-Knowledge-Sync 흐름에서 지원 포맷은 이 목록에 포함된다.
-                    convert_to_md(full_path, name)
-
-        print("[Convert] done")
-        sys.exit(0)
-
-    if mode == "upload":
-        if len(sys.argv) < 4:
-            print_usage()
-            sys.exit(1)
-
-        dataset_id = sys.argv[2].strip()
-        api_key = sys.argv[3].strip()
-        doc_form = sys.argv[4].strip() if len(sys.argv) >= 5 else ""
-        doc_language = sys.argv[5].strip() if len(sys.argv) >= 6 else ""
-
-        print("[Upload] start")
-        # 변환 결과를 스캔해 Dataset에 업로드한다.
-        fail = upload_files(dataset_id, api_key, doc_form, doc_language)
-        print("[Upload] done")
-
-        # 업로드 실패가 1건이라도 있으면 Jenkins에서 실패로 표시되도록 exit code를 비정상으로 종료한다.
-        if fail > 0:
-            sys.exit(2)
-        sys.exit(0)
-
-    print_usage()
-    sys.exit(1)
+    main()
