@@ -1,4 +1,4 @@
-# [중복 제거·수정 반영 최종본] 외부 AI 에이전트 평가 시스템 구축 상세 기술 명세서 (v37.0)
+# 외부 AI 에이전트 평가 시스템 구축 상세 기술 명세서
 
 **문서 번호:** EXTERNAL-AI-EVAL-SPEC-2026-FINAL-V37
 **작성 일자:** 2026. 01. 19
@@ -6,7 +6,6 @@
 **적용 기술:** Promptfoo, DeepEval, Adapter Pattern, Jenkins, Ollama, Langfuse, Pytest-xdist, jsonschema
 **버전 특징:**
 
-* 문서 내 **중복 섹션 제거(Chapter 중복 제거)**
 * Promptfoo 설정/스키마 검증/에이전트 성공조건 파싱/Trace 충돌 방지 등 **실행 가능성 중심 보강사항 전량 반영**
 * 코드/설정 파일 **Full-text 전문 수록**
 * 운영자 관점 User Measurement Flow **대폭 확장(초단위 시뮬레이션 수준)**
@@ -62,7 +61,7 @@
 
 폐쇄망 환경 및 의존성 충돌 방지를 위해 모든 라이브러리를 포함한 단일 이미지를 사용한다.
 
-## 2.2 Dockerfile (`dscore-eval-runner:v1-fat`) — Full-text
+## 2.2 Dockerfile (`dscore-eval-runner:v1-fat`)
 
 ```dockerfile
 FROM python:3.11-slim-bookworm
@@ -109,22 +108,22 @@ CMD ["tail", "-f", "/dev/null"]
 
 | 연번 | 후보 지표명                  | 판정     | 선정/탈락 상세 근거                                          |
 | -- | ----------------------- | ------ | ---------------------------------------------------- |
-| 1  | **Policy Violation**    | **선정** | **[필수]** 개인정보/기밀 유출은 타협 불가능한 Red-line. 정규식 기반 차단 필수. |
-| 2  | **Format Compliance**   | **선정** | **[필수]** 시스템 연동을 위한 JSON 스키마 준수 여부 확인.               |
-| 3  | **Faithfulness**        | **선정** | **[RAG 핵심]** 답변이 근거 문서에 기반하는지(환각 여부) 검증.             |
-| 4  | Hallucination Rate      | 통합     | Faithfulness의 역수(1 - Faithfulness)이므로 중복 제거.         |
-| 5  | **Contextual Recall**   | **선정** | **[RAG 핵심]** 정답을 맞힐 정보를 찾아왔는지 검색 엔진 성능 평가.           |
-| 6  | Context Precision       | 탈락     | 미세한 순위(Ranking) 판별은 로컬 LLM 성능 한계로 신뢰도 낮음.            |
-| 7  | **Answer Relevancy**    | **선정** | **[품질 기본]** 동문서답 여부 확인. 질문 의도 파악 능력 검증.              |
-| 8  | Answer Correctness      | 탈락     | 생성형 AI 특성상 텍스트 완전 일치 여부는 무의미함.                       |
-| 9  | **Task Completion**     | **선정** | **[Agent 핵심]** 실제 도구 호출 및 과업 성공 여부 확인.               |
-| 10 | Tool Selection Accuracy | 통합     | Task Completion 과정에서 올바른 도구 사용 여부가 함께 검증됨.           |
-| 11 | Tool Argument Quality   | 통합     | Task Completion의 성공 조건 검증 단계에 포함됨.                   |
-| 12 | **Latency**             | **선정** | **[UX 필수]** 응답 속도는 사용자 경험의 핵심 지표.                    |
-| 13 | Token Cost              | 탈락     | 품질 검증 목적과 무관한 비용 관리 영역.                              |
-| 14 | Toxicity / Bias         | 탈락     | 로컬 모델은 기술 용어(kill process 등)를 폭력적 언어로 오판할 가능성 높음.    |
-| 15 | Tone / Style            | 탈락     | 주관적 지표는 로컬 Judge의 채점 일관성이 낮음.                        |
-| 16 | Conciseness             | 탈락     | 답변 길이는 질문 성격에 따라 다르므로 일률적 평가 불가.                     |
+| 1  | **Policy Violation**    | **선정** | **[필수]** 개인정보/기밀 유출은 타협 불가능한 Red-line. 정규식 기반 차단 필수 |
+| 2  | **Format Compliance**   | **선정** | **[필수]** 시스템 연동을 위한 JSON 스키마 준수 여부 확인               |
+| 3  | **Faithfulness**        | **선정** | **[RAG 핵심]** 답변이 근거 문서에 기반하는지(환각 여부) 검증             |
+| 4  | Hallucination Rate      | 통합     | Faithfulness의 역수(1 - Faithfulness)이므로 중복 제거         |
+| 5  | **Contextual Recall**   | **선정** | **[RAG 핵심]** 정답을 맞힐 정보를 찾아왔는지 검색 엔진 성능 평가           |
+| 6  | Context Precision       | 탈락     | 미세한 순위(Ranking) 판별은 로컬 LLM 성능 한계로 신뢰도 낮음            |
+| 7  | **Answer Relevancy**    | **선정** | **[품질 기본]** 동문서답 여부 확인. 질문 의도 파악 능력 검증              |
+| 8  | Answer Correctness      | 탈락     | 생성형 AI 특성상 텍스트 완전 일치 여부는 무의미함                       |
+| 9  | **Task Completion**     | **선정** | **[Agent 핵심]** 실제 도구 호출 및 과업 성공 여부 확인               |
+| 10 | Tool Selection Accuracy | 통합     | Task Completion 과정에서 올바른 도구 사용 여부가 함께 검증됨           |
+| 11 | Tool Argument Quality   | 통합     | Task Completion의 성공 조건 검증 단계에 포함됨                   |
+| 12 | **Latency**             | **선정** | **[UX 필수]** 응답 속도는 사용자 경험의 핵심 지표                    |
+| 13 | Token Cost              | 탈락     | 품질 검증 목적과 무관한 비용 관리 영역                              |
+| 14 | Toxicity / Bias         | 탈락     | 로컬 모델은 기술 용어(kill process 등)를 폭력적 언어로 오판할 가능성 높음    |
+| 15 | Tone / Style            | 탈락     | 주관적 지표는 로컬 Judge의 채점 일관성이 낮음                        |
+| 16 | Conciseness             | 탈락     | 답변 길이는 질문 성격에 따라 다르므로 일률적 평가 불가                     |
 
 ## 3.2 확정된 7대 지표 상세 명세
 
@@ -174,6 +173,7 @@ CMD ["tail", "-f", "/dev/null"]
 
 1. **Dependency Hell:** 특정 버전 종속성으로 단일 이미지 패키징 시 충돌 발생
 2. **Stability Issue:** Pydantic 버전 혼용으로 런타임 에러 빈번
+3. **Duplicated Functions:** DeepEval 버전업에 따라 Ragas의 측정지표 상당수를 커버할 수 있게 됨
 
 ---
 
@@ -214,14 +214,14 @@ CMD ["tail", "-f", "/dev/null"]
 +-----------------------------------------------------------------------+
 ```
 
-## 5.2 용어 정의(혼선 방지)
+## 5.2 용어 정의
 
 | 용어            | 위치               | 값 예시                     | 의미                            |
 | ------------- | ---------------- | ------------------------ | ----------------------------- |
 | `TARGET_TYPE` | Jenkins 파라미터/ENV | `http`                   | **어댑터 타입(adapter type)**      |
 | `target_type` | `golden.csv` 컬럼  | `rag` / `agent` / `chat` | **평가 대상 유형(target category)** |
 
-## 5.3 CDM (Canonical Data Model) — Full-text
+## 5.3 CDM (Canonical Data Model)
 
 ```python
 # adapters/base.py
@@ -260,7 +260,7 @@ class BaseAdapter:
         raise NotImplementedError
 ```
 
-## 5.4 Universal HTTP Adapter — Full-text
+## 5.4 Universal HTTP Adapter
 
 ```python
 # adapters/http_adapter.py
@@ -334,7 +334,7 @@ class GenericHttpAdapter(BaseAdapter):
             )
 ```
 
-## 5.5 Adapter Registry — Full-text
+## 5.5 Adapter Registry
 
 ```python
 # adapters/registry.py
@@ -362,7 +362,7 @@ class AdapterRegistry:
 AdapterRegistry.register("http", GenericHttpAdapter)
 ```
 
-## 5.6 Test Runner (`tests/test_runner.py`) — Full-text (보강 반영본)
+## 5.6 Test Runner (`tests/test_runner.py`)
 
 * Promptfoo: Policy Violation 중심의 Fail-Fast
 * jsonschema: schema.json 기반 Format Compliance 완전 검증
@@ -649,7 +649,7 @@ def test_evaluation(case):
 
 평가의 품질은 데이터셋의 품질에 의해 결정된다. 아래의 가이드를 엄수하여 작성한다.
 
-## 6.1 Format Compliance 스키마 (`configs/schema.json`) — Full-text
+## 6.1 Format Compliance 스키마 (`configs/schema.json`)
 
 외부 에이전트의 원본 응답(`raw_response`)이 갖춰야 할 최소 구조를 정의한다.
 
@@ -666,7 +666,7 @@ def test_evaluation(case):
 }
 ```
 
-## 6.2 Policy Violation 규칙 (`configs/security.yaml`) — Full-text
+## 6.2 Policy Violation 규칙 (`configs/security.yaml`)
 
 Promptfoo가 수행하는 Fail-Fast 보안 규칙이다. **금칙 패턴 탐지에 집중**한다.
 
