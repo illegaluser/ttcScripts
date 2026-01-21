@@ -1,219 +1,157 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-dify_sonar_issue_analyzer.py
-
-[목적]
-Dify Workflow 분석 실행.
-
-[최종 수정 사항]
-- 언어 매핑 로직 강화 (Web -> HTML)
-- LLM이 모호한 언어 힌트(WEB) 때문에 환각을 보지 않도록 명시적 언어명 제공.
-"""
-
 import argparse
 import json
 import sys
 import time
-from urllib.parse import urljoin
+import uuid
+import re
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60):
+# [수정] HTML 정제 함수 삭제 (데이터 손실 원인)
+# 대신 룰 설명이 너무 길어 코드를 밀어내는 것만 방지
+def truncate_text(text, max_chars=1000):
+    if not text: return ""
+    if len(text) <= max_chars: return text
+    return text[:max_chars] + "... (Rule Truncated)"
+
+def send_dify_request(url, api_key, payload):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    h = dict(headers or {})
-    h["Content-Type"] = "application/json"
-    h["Accept"] = "application/json"
-    req = Request(url, method="POST", headers=h, data=data)
+    req = Request(url, method="POST", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, data=data)
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return resp.status, body
+        with urlopen(req, timeout=300) as resp:
+            return resp.status, resp.read().decode("utf-8")
     except HTTPError as e:
         return e.code, e.read().decode("utf-8", errors="replace")
     except Exception as e:
         return 0, str(e)
 
-def _safe_json_dumps(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-
-def build_kb_query(issue_record: dict) -> str:
-    msg = (issue_record.get("issue_search_item") or {}).get("message") or ""
-    rule_key = issue_record.get("sonar_rule_key") or ""
-    sev = (issue_record.get("issue_search_item") or {}).get("severity") or ""
-    return f"{rule_key} {sev} {msg}".strip()[:200]
-
-def get_language_hint(rule_key: str) -> str:
-    """
-    [핵심] SonarQube Rule Key Prefix를 기반으로 정확한 언어명을 반환.
-    LLM이 'WEB' 같은 모호한 단어 때문에 환각을 보지 않도록 HTML 등으로 명확히 변환.
-    """
-    if not rule_key or ":" not in rule_key:
-        return "CODE"
-    
-    prefix = rule_key.split(":")[0].lower()
-    
-    mapping = {
-        "web": "HTML",
-        "js": "JAVASCRIPT",
-        "javascript": "JAVASCRIPT",
-        "ts": "TYPESCRIPT",
-        "typescript": "TYPESCRIPT",
-        "css": "CSS",
-        "java": "JAVA",
-        "py": "PYTHON",
-        "python": "PYTHON",
-        "csharp": "C#",
-        "cs": "C#"
-    }
-    
-    return mapping.get(prefix, prefix.upper())
-
-def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, user: str, response_mode: str, timeout: int):
-    endpoint = urljoin(dify_api_base.rstrip("/") + "/", "workflows/run")
-    headers = {"Authorization": f"Bearer {dify_api_key}"}
-    payload = {"inputs": inputs, "response_mode": response_mode, "user": user}
-
-    try:
-        print(f"\n[DEBUG PAYLOAD PREVIEW]\n{inputs.get('code_snippet', '')[:500]}\n", file=sys.stdout)
-        with open("dify_input_debug.json", "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-    except: pass
-
-    status, body = _http_post_json(endpoint, headers, payload, timeout=timeout)
-    
-    if status >= 400:
-        return False, status, body, None
-        
-    try:
-        data = json.loads(body)
-        run_status = data.get("data", {}).get("status") or data.get("status")
-        outputs = data.get("data", {}).get("outputs") or data.get("outputs")
-        
-        if run_status and str(run_status).lower() not in ("succeeded", "success", "completed"):
-            return False, status, body, None
-            
-        return True, status, body, outputs
-    except Exception:
-        return False, status, body, None
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dify-api-base", required=True)
-    ap.add_argument("--dify-api-key", required=True)
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", default="llm_analysis.jsonl")
-    ap.add_argument("--user", default="jenkins")
-    ap.add_argument("--response-mode", default="blocking")
-    ap.add_argument("--timeout", type=int, default=180)
-    ap.add_argument("--max-issues", type=int, default=0)
-    ap.add_argument("--print-first-errors", type=int, default=5)
-    args = ap.parse_args()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dify-api-base", required=True)
+    parser.add_argument("--dify-api-key", required=True)
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", default="llm_analysis.jsonl")
+    parser.add_argument("--max-issues", type=int, default=0)
+    parser.add_argument("--user", default="")
+    parser.add_argument("--response-mode", default="")
+    parser.add_argument("--timeout", type=int, default=0)
+    parser.add_argument("--print-first-errors", type=int, default=0)
+    args, _ = parser.parse_known_args()
 
     try:
         with open(args.input, "r", encoding="utf-8") as f:
-            src = json.load(f)
+            data = json.load(f)
     except Exception as e:
-        print(f"[ERROR] Read failed: {e}", file=sys.stderr)
-        return 2
+        print(f"[ERROR] Cannot read input file: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    issues = src.get("issues") or []
-    limit = args.max_issues if args.max_issues > 0 else len(issues)
-    
-    analyzed = 0
-    failed = 0
-    printed = 0
+    issues = data.get("issues", [])
+    if args.max_issues > 0: issues = issues[:args.max_issues]
 
     out_fp = open(args.output, "w", encoding="utf-8")
+    
+    base_url = args.dify_api_base.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
+    target_api_url = f"{base_url}/workflows/run"
 
-    for rec in issues[:limit]:
-        sonar_key = rec.get("sonar_issue_key")
-        
-        issue_item = rec.get("issue_search_item") or {}
-        rule_detail = rec.get("rule_detail") or {}
-        raw_snippet = rec.get("code_snippet") or ""
-        
-        target_line = issue_item.get("line")
-        rule_key = rec.get("sonar_rule_key", "")
-        rule_name = rule_detail.get("name", "")
-        
-        # [1] 언어 자동 감지 (매핑 적용)
-        lang_hint = get_language_hint(rule_key)
-            
-        # [2] 룰 설명 추출
-        rule_desc = rule_detail.get("mdDesc") or rule_detail.get("description") or rule_detail.get("htmlDesc") or "No description available."
-        
-        # [3] 강력한 프롬프트 주입
-        # 언어가 HTML이면, "THIS IS HTML CODE"라고 박히게 됨.
-        injected_snippet = (
-            f"!!! SYSTEM INSTRUCTION: THIS IS {lang_hint} CODE. ANALYZE BASED ON {lang_hint} RULES !!!\n"
-            f"!!! IGNORE ALL EXAMPLES FROM OTHER LANGUAGES !!!\n\n"
-            f"=== VIOLATED RULE INFO ===\n"
-            f"Rule ID: {rule_key}\n"
-            f"Rule Name: {rule_name}\n"
-            f"Rule Description:\n{rule_desc[:2000]}...\n"
-            f"==========================\n\n"
-            f"=== TARGET CODE (Source: Snippet API) ===\n"
-            f"{raw_snippet}"
-        )
-        
-        if len(injected_snippet) > 40000:
-            injected_snippet = injected_snippet[:40000] + "\n...(truncated)..."
+    print(f"[INFO] Analyzing {len(issues)} issues...", file=sys.stderr)
 
+    for item in issues:
+        key = item.get("sonar_issue_key")
+        rule = item.get("sonar_rule_key", "")
+        project = item.get("sonar_project_key", "")
+        
+        issue_item = item.get("issue_search_item", {})
+        msg = issue_item.get("message", "")
+        severity = issue_item.get("severity", "")
+        component = item.get("component", "")
+        line = issue_item.get("line") or issue_item.get("textRange", {}).get("startLine", 0)
+        
+        # [핵심 수정] 코드 추출 로직 강화 (여러 키 시도)
+        raw_code = item.get("code_snippet", "")
+        if not raw_code:
+            raw_code = item.get("source", "") or item.get("code", "")
+        
+        # 가공 없이 원본 사용 (정제 로직 삭제)
+        final_code = raw_code if raw_code else "(NO CODE CONTENT)"
+        
+        # 룰 설명 (길이 제한만 적용, HTML 제거 안 함)
+        rule_detail = item.get("rule_detail", {})
+        raw_desc = rule_detail.get("description", "")
+        safe_desc = truncate_text(raw_desc, max_chars=800)
+        
+        # 룰 JSON 생성 (중괄호만 치환하여 Dify 에러 방지)
+        safe_rule_json = json.dumps({
+            "key": rule_detail.get("key"),
+            "name": rule_detail.get("name"),
+            "description": safe_desc.replace("{", "(").replace("}", ")")
+        }, ensure_ascii=False)
+
+        # 메타데이터 JSON 생성
+        safe_issue_json = json.dumps({
+            "key": key, "rule": rule, "message": msg, "severity": severity,
+            "project": project, "component": component, "line": line
+        }, ensure_ascii=False)
+
+        session_user = f"jenkins-{uuid.uuid4()}"
+
+        print(f"\n[DEBUG] >>> Sending Issue {key}")
+        
+        # [데이터 전송] 가공 없는 원본 코드 전송
         inputs = {
-            "sonar_issue_json": _safe_json_dumps({
-                "key": sonar_key,
-                "project": rec.get("sonar_project_key"),
-                "severity": issue_item.get("severity"),
-                "message": issue_item.get("message"),
-                "line": target_line,
-                "component": rec.get("component")
-            }),
-            "sonar_rule_json": _safe_json_dumps(rule_detail),
-            "code_snippet": injected_snippet,
-            "sonar_issue_url": rec.get("sonar_issue_url"),
-            "sonar_issue_key": sonar_key,
-            "sonar_project_key": rec.get("sonar_project_key"),
-            "kb_query": build_kb_query(rec),
+            "sonar_issue_key": key,
+            "sonar_project_key": project,
+            "code_snippet": final_code, 
+            "sonar_issue_url": item.get("sonar_issue_url", ""),
+            "kb_query": f"{rule} {msg}",
+            "sonar_issue_json": safe_issue_json,
+            "sonar_rule_json": safe_rule_json
         }
 
-        try:
-            ok, http, body, outputs = dify_run_workflow(
-                dify_api_base=args.dify_api_base,
-                dify_api_key=args.dify_api_key,
-                inputs=inputs,
-                user=args.user,
-                response_mode=args.response_mode,
-                timeout=args.timeout
-            )
-        except Exception as e:
-            failed += 1
-            print(f"[FAIL] Exception {sonar_key}: {e}", file=sys.stderr)
-            continue
-
-        if not ok:
-            failed += 1
-            if printed < args.print_first_errors:
-                print(f"[FAIL] Dify error {sonar_key}: http={http} body={body}", file=sys.stderr)
-                printed += 1
-            continue
-
-        if not isinstance(outputs, dict): outputs = {}
-
-        row = {
-            "sonar_issue_key": sonar_key,
-            "severity": issue_item.get("severity"),
-            "sonar_message": issue_item.get("message"),
-            "outputs": outputs,
-            "generated_at": int(time.time()),
+        # [검증 로그] 실제 잡힌 코드 확인
+        print(f"   [DATA CHECK] Code Length: {len(final_code)}")
+        print(f"   [DATA CHECK] Preview: {final_code[:100].replace(chr(10), ' ')}...")
+        
+        payload = {
+            "inputs": inputs,
+            "response_mode": "blocking",
+            "user": session_user
         }
-        out_fp.write(json.dumps(row, ensure_ascii=False) + "\n")
-        analyzed += 1
+
+        success = False
+        for i in range(3):
+            status, body = send_dify_request(target_api_url, args.dify_api_key, payload)
+            
+            if status == 200:
+                try:
+                    res = json.loads(body)
+                    if res.get("data", {}).get("status") == "succeeded":
+                        out_row = {
+                            "sonar_issue_key": key,
+                            "severity": severity,
+                            "sonar_message": msg,
+                            "outputs": res["data"]["outputs"],
+                            "generated_at": int(time.time())
+                        }
+                        out_fp.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+                        success = True
+                        print(f"   -> Success.")
+                        break
+                    else:
+                        print(f"   -> Dify Internal Fail: {res}", file=sys.stderr)
+                except: pass
+            
+            print(f"   -> Retry {i+1}/3 due to Status {status} | Error: {body}")
+            time.sleep(2)
+        
+        if not success:
+            print(f"[FAIL] Failed to analyze {key}", file=sys.stderr)
 
     out_fp.close()
-    print(f"[OK] Analyzed: {analyzed}, Failed: {failed}", file=sys.stdout)
-    return 2 if failed else 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
