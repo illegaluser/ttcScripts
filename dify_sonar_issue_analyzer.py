@@ -3,7 +3,13 @@
 
 """
 dify_sonar_issue_analyzer.py
-[목적] Dify Workflow 분석 실행.
+
+[목적]
+Dify Workflow 분석 실행.
+
+[최종 수정 사항]
+- 언어 매핑 로직 강화 (Web -> HTML)
+- LLM이 모호한 언어 힌트(WEB) 때문에 환각을 보지 않도록 명시적 언어명 제공.
 """
 
 import argparse
@@ -38,13 +44,39 @@ def build_kb_query(issue_record: dict) -> str:
     sev = (issue_record.get("issue_search_item") or {}).get("severity") or ""
     return f"{rule_key} {sev} {msg}".strip()[:200]
 
+def get_language_hint(rule_key: str) -> str:
+    """
+    [핵심] SonarQube Rule Key Prefix를 기반으로 정확한 언어명을 반환.
+    LLM이 'WEB' 같은 모호한 단어 때문에 환각을 보지 않도록 HTML 등으로 명확히 변환.
+    """
+    if not rule_key or ":" not in rule_key:
+        return "CODE"
+    
+    prefix = rule_key.split(":")[0].lower()
+    
+    mapping = {
+        "web": "HTML",
+        "js": "JAVASCRIPT",
+        "javascript": "JAVASCRIPT",
+        "ts": "TYPESCRIPT",
+        "typescript": "TYPESCRIPT",
+        "css": "CSS",
+        "java": "JAVA",
+        "py": "PYTHON",
+        "python": "PYTHON",
+        "csharp": "C#",
+        "cs": "C#"
+    }
+    
+    return mapping.get(prefix, prefix.upper())
+
 def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, user: str, response_mode: str, timeout: int):
     endpoint = urljoin(dify_api_base.rstrip("/") + "/", "workflows/run")
     headers = {"Authorization": f"Bearer {dify_api_key}"}
     payload = {"inputs": inputs, "response_mode": response_mode, "user": user}
 
-    # [디버그] Dify로 보내는 데이터를 파일로 저장하여 증거 확보
     try:
+        print(f"\n[DEBUG PAYLOAD PREVIEW]\n{inputs.get('code_snippet', '')[:500]}\n", file=sys.stdout)
         with open("dify_input_debug.json", "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
     except: pass
@@ -97,6 +129,7 @@ def main() -> int:
 
     for rec in issues[:limit]:
         sonar_key = rec.get("sonar_issue_key")
+        
         issue_item = rec.get("issue_search_item") or {}
         rule_detail = rec.get("rule_detail") or {}
         raw_snippet = rec.get("code_snippet") or ""
@@ -105,18 +138,23 @@ def main() -> int:
         rule_key = rec.get("sonar_rule_key", "")
         rule_name = rule_detail.get("name", "")
         
-        # 언어 감지
-        lang_hint = "CODE"
-        if ":" in rule_key:
-            lang_hint = rule_key.split(":")[0].upper()
+        # [1] 언어 자동 감지 (매핑 적용)
+        lang_hint = get_language_hint(rule_key)
+            
+        # [2] 룰 설명 추출
+        rule_desc = rule_detail.get("mdDesc") or rule_detail.get("description") or rule_detail.get("htmlDesc") or "No description available."
         
+        # [3] 강력한 프롬프트 주입
+        # 언어가 HTML이면, "THIS IS HTML CODE"라고 박히게 됨.
         injected_snippet = (
             f"!!! SYSTEM INSTRUCTION: THIS IS {lang_hint} CODE. ANALYZE BASED ON {lang_hint} RULES !!!\n"
-            f"=== VIOLATED RULE: {rule_key} ===\n"
+            f"!!! IGNORE ALL EXAMPLES FROM OTHER LANGUAGES !!!\n\n"
+            f"=== VIOLATED RULE INFO ===\n"
+            f"Rule ID: {rule_key}\n"
             f"Rule Name: {rule_name}\n"
-            f"Description: {rule_detail.get('mdDesc') or rule_detail.get('description') or ''}\n"
-            f"--------------------------------------------------\n"
-            f"=== TARGET CODE (Context +/- 20 lines) ===\n"
+            f"Rule Description:\n{rule_desc[:2000]}...\n"
+            f"==========================\n\n"
+            f"=== TARGET CODE (Source: Snippet API) ===\n"
             f"{raw_snippet}"
         )
         
