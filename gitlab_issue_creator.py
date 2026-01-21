@@ -19,6 +19,7 @@ import argparse
 import json
 import sys
 import time
+import re  # [추가] 정규표현식 사용을 위해 import
 from urllib.parse import urlencode, urljoin, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -74,25 +75,34 @@ def _replace_sonar_url(text: str, sonar_host_url: str, sonar_public_url: str) ->
     """
     SonarQube 내부 주소가 이슈 본문에 그대로 들어가면 브라우저에서 클릭이 안 되므로
     외부에서 접근 가능한 주소로 치환한다.
-    - 인자로 받은 host/public을 우선 적용하고, 기본값으로 sonarqube:9000 -> localhost:9000을 치환한다.
-    - Jenkins 컨테이너 내부 주소와 실제 브라우저 접속 주소가 다르다는 점을
-      최종 등록 직전에 보정해 준다.
-    - readme.md의 “주소 체계”에서 언급된 내부/외부 URL 차이를 그대로 반영한 처리다.
-    - Sonar UI를 클릭해도 열리지 않는 문제를 사전에 막는다.
+    
+    [수정 사항]
+    - 내부 주소(http://sonarqube:9000)를 외부 주소로 치환
+    - 도메인이 누락된 상대 경로(/project/issues...)도 외부 주소로 자동 보정
     """
     if not text:
         return text
 
-    # (A) 명시적으로 받은 host/public로 치환
-    if sonar_host_url and sonar_public_url:
-        a = sonar_host_url.rstrip("/")
-        b = sonar_public_url.rstrip("/")
-        text = text.replace(a, b)
+    # 1. 사용할 공개 주소(Public URL) 확정 (기본값 localhost:9000)
+    target_base = (sonar_public_url or "http://localhost:9000").rstrip("/")
 
-    # (B) PoC 기본 치환(네가 말한 “문자열 치환 1줄”)
-    # - 이슈 본문에 내부 주소가 들어가도 브라우저에서 클릭 가능하게 만든다.
-    text = text.replace("http://sonarqube:9000", "http://localhost:9000")
-    text = text.replace("https://sonarqube:9000", "http://localhost:9000")
+    # 2. 내부 주소(Internal URL)를 공개 주소로 치환
+    # (A) 인자로 받은 호스트 치환
+    if sonar_host_url:
+        internal_base = sonar_host_url.rstrip("/")
+        text = text.replace(internal_base, target_base)
+    
+    # (B) 하드코딩된 내부 주소 치환 (Docker Service Name)
+    text = text.replace("http://sonarqube:9000", target_base)
+    text = text.replace("https://sonarqube:9000", target_base)
+
+    # 3. [FIX] 도메인이 누락된 상대 경로(/project/issues...) 보정
+    # LLM이 도메인을 생략하고 경로만 출력하는 경우(예: "링크: /project/issues?id=...")를 처리
+    # 정규식 설명: http: 또는 https: 로 시작하지 않는 "/project/issues" 문자열을 찾아 도메인을 붙임
+    # (?<!...)는 부정형 후방탐색(Negative Lookbehind)
+    pattern = r"(?<!http:)(?<!https:)(?<![a-zA-Z0-9])(/project/issues\?)"
+    text = re.sub(pattern, f"{target_base}\\1", text)
+
     return text
 
 
@@ -186,6 +196,7 @@ def main() -> int:
         # (1) URL 치환: 등록 직전에만 한다.
         # - 내부 주소로 남으면 브라우저에서 열리지 않을 수 있어 외부용 주소로 교체한다.
         # - readme.md 주소 체계(내부: sonarqube:9000 / 외부: localhost:9000)를 따른다.
+        # - [FIX] LLM이 도메인을 생략한 경우도 여기서 강제로 붙여준다.
         desc = _replace_sonar_url(desc, args.sonar_host_url, args.sonar_public_url)
 
         # (2) Dedup: sonar_issue_key로 검색해서 있으면 skip
