@@ -12,7 +12,7 @@ dify_sonar_issue_analyzer.py
   제목/설명/라벨을 만드는 단계에 사용된다.
 - 결과물인 llm_analysis.jsonl은 다음 단계(gitlab_issue_creator.py)에서
   실제 GitLab 이슈 생성 입력으로 활용된다.
-- [수정] GitLab 이슈 제목에 심각도를 표시하기 위해 severity 정보를 추출하여 전달한다.
+- [수정] GitLab 이슈 제목의 정확성을 위해 SonarQube 원본 Message를 추출하여 전달한다.
 
 중요
 - Dify Workflow Start inputs 변수명은 아래 7개를 "그대로" 사용한다.
@@ -35,9 +35,6 @@ from urllib.error import HTTPError, URLError
 def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60):
     """
     간단한 HTTP POST 헬퍼.
-    - payload를 JSON으로 직렬화해 보내고, 응답 상태 코드와 본문 텍스트를 돌려준다.
-    - 호출자가 결과를 그대로 확인할 수 있게 예외를 숨기지 않는다.
-    - Content-Type/Accept를 매번 설정하는 반복을 줄여 코드 길이를 줄인다.
     """
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     h = dict(headers or {})
@@ -51,9 +48,7 @@ def _http_post_json(url: str, headers: dict, payload: dict, timeout: int = 60):
 
 def _safe_json_dumps(obj) -> str:
     """
-    JSON 직렬화를 실패 없이 수행하기 위한 헬퍼
-    - ensure_ascii=False로 한글이 깨지지 않도록 하고,
-    - separators를 설정해 불필요한 공백 없이 짧은 문자열을 만든다.
+    JSON 직렬화를 실패 없이 수행하기 위한 헬퍼.
     """
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
@@ -61,8 +56,6 @@ def _safe_json_dumps(obj) -> str:
 def build_kb_query(issue_record: dict) -> str:
     """
     LLM이 참고할 추가 검색어(kb_query)를 만든다.
-    - Sonar 이슈 메시지 + 룰 키 + 심각도를 합쳐 간단한 문구로 만든다.
-    - 너무 길면 200자에서 잘라 Dify 입력 크기를 제한한다.
     """
     msg = ""
     try:
@@ -82,10 +75,7 @@ def build_kb_query(issue_record: dict) -> str:
 def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, user: str,
                       response_mode: str, timeout: int):
     """
-    Dify Workflow 실행을 감싸는 함수
-    - /workflows/run 엔드포인트에 inputs를 그대로 던진다.
-    - HTTP 200이라도 run_status가 실패일 수 있으므로 status와 run_status 둘 다 검사한다.
-    - outputs가 없거나 형식이 이상하면 호출 측에서 처리할 수 있게 False를 반환한다.
+    Dify Workflow 실행을 감싸는 함수.
     """
     if not isinstance(dify_api_base, str):
         raise TypeError(f"dify_api_base must be str, got {type(dify_api_base)}")
@@ -128,13 +118,11 @@ def dify_run_workflow(*, dify_api_base: str, dify_api_key: str, inputs: dict, us
 
 def main() -> int:
     """
-    CLI 엔트리포인트
-    - 입력: sonar_issue_exporter.py가 생성한 sonar_issues.json
-    - 출력: LLM 분석 결과를 행 단위로 쌓은 llm_analysis.jsonl
+    CLI 엔트리포인트.
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("--dify-api-base", required=True, help="ex) http://api:5001/v1")
-    ap.add_argument("--dify-api-key", required=True, help="Dify API Key (Workflow App)")
+    ap.add_argument("--dify-api-key", required=True, help="Dify API Key")
     ap.add_argument("--input", required=True, help="sonar_issues.json")
     ap.add_argument("--output", default="llm_analysis.jsonl", help="output jsonl")
     ap.add_argument("--user", default="jenkins", help="Dify user field")
@@ -170,20 +158,17 @@ def main() -> int:
             sonar_project_key = rec.get("sonar_project_key") or ""
             sonar_issue_url = rec.get("sonar_issue_url") or ""
 
-            # [추가] 심각도(Severity) 정보 추출
-            # - SonarQube 이슈 정보에서 심각도를 가져와 변수에 저장한다.
-            # - 이 정보는 llm_analysis.jsonl에 포함되어 다음 단계(GitLab 이슈 생성)로 전달된다.
-            severity = ""
-            try:
-                severity = (rec.get("issue_search_item") or {}).get("severity") or ""
-            except Exception:
-                severity = ""
+            # [수정] Severity 및 Message 추출
+            # - GitLab 제목 생성을 위해 SonarQube의 원본 메시지와 심각도를 추출하여 보존한다.
+            issue_item = rec.get("issue_search_item") or {}
+            severity = issue_item.get("severity") or ""
+            sonar_message = issue_item.get("message") or ""
 
             sonar_issue_json = _safe_json_dumps({
                 "sonar_project_key": sonar_project_key,
                 "sonar_issue_key": sonar_issue_key,
                 "sonar_issue_url": sonar_issue_url,
-                "issue_search_item": rec.get("issue_search_item") or {},
+                "issue_search_item": issue_item,
                 "issue_detail": rec.get("issue_detail") or {},
                 "component": rec.get("component") or "",
                 "sonar_rule_key": rec.get("sonar_rule_key") or "",
@@ -232,7 +217,7 @@ def main() -> int:
                     printed += 1
                 continue
 
-            # (케이스1) 스키마 객체 매핑 에러 감지
+            # 스키마 매핑 오류 감지
             if isinstance(outputs.get("title"), dict) and outputs.get("title", {}).get("type") == "string":
                 failed += 1
                 print(f"[DIFY][FAIL][outputs] issue={sonar_issue_key} outputs mapped to schema object", file=sys.stderr)
@@ -255,7 +240,8 @@ def main() -> int:
                 "sonar_issue_key": sonar_issue_key,
                 "sonar_project_key": sonar_project_key,
                 "sonar_issue_url": sonar_issue_url,
-                "severity": severity,  # [추가] 심각도 필드 저장
+                "severity": severity,          # [추가] 심각도
+                "sonar_message": sonar_message, # [추가] Sonar 원본 메시지 (제목용)
                 "kb_query": kb_query,
                 "code_snippet": code_snippet,
                 "outputs": outputs,
