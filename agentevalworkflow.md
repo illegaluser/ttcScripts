@@ -6,10 +6,6 @@
 **적용 기술:** Promptfoo, DeepEval, Adapter Pattern, Jenkins, Ollama, Langfuse, Pytest-xdist, jsonschema
 **버전 특징:**
 
-* Promptfoo 설정/스키마 검증/에이전트 성공조건 파싱/Trace 충돌 방지 등 **실행 가능성 중심 보강사항 전량 반영**
-* 코드/설정 파일 **Full-text 전문 수록**
-* 운영자 관점 User Measurement Flow **대폭 확장(초단위 시뮬레이션 수준)**
-
 ---
 
 # 제0장. 시스템 개요 및 목적
