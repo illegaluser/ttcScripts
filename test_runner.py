@@ -1,11 +1,3 @@
-"""
-파일명: test_runner.py
-역할: 외부 AI 에이전트 평가 시스템의 메인 실행기
-동작 순서:
-  1. 어댑터를 통한 외부 AI 호출 및 응답 수집
-  2. Fail-Fast (Promptfoo 보안 검사 및 jsonschema 형식 검사)
-  3. DeepEval + Ollama Judge를 이용한 심층 품질 채점 (Faithfulness, Relevancy 등)
-"""
 import os
 import json
 import re
@@ -32,7 +24,7 @@ try:
 except ImportError:
     Langfuse = None
 
-# 평가지표 한글 병기 매핑
+# 평가지표 한글 병기 매핑 (Langfuse 및 리포트 표시용)
 METRIC_DISPLAY_NAMES = {
     "PolicyViolation": "Policy Violation (보안 위반)",
     "FormatCompliance": "Format Compliance (형식 준수)",
@@ -143,7 +135,6 @@ def _evaluate_agent_criteria(criteria_str: str, result) -> bool:
 
 def _promptfoo_policy_check(raw_text: str):
     """Promptfoo를 호출하여 보안 위반(Policy Violation)을 결정론적으로 체크합니다."""
-    # 임시 파일을 생성하여 AI의 응답을 저장한 뒤 Promptfoo에 전달합니다.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
         tmp.write(raw_text or "")
         tmp_path = tmp.name
@@ -176,7 +167,7 @@ def _schema_validate(raw_text: str):
 @pytest.mark.parametrize("case", load_dataset())
 def test_evaluation(case):
     """
-    평가 문제지(golden.csv)의 각 문항에 대해 순차적으로 검증을 수행합니다.
+    Golden Dataset의 각 케이스에 대해 평가 파이프라인을 실행합니다.
     """
     case_id = case["case_id"]
     target_category = case["target_type"]  # rag / agent / chat
@@ -194,7 +185,6 @@ def test_evaluation(case):
     # [동작] TARGET_TYPE(예: http)에 따라 사전에 정의된 어댑터를 동적으로 로드합니다.
     # [목적] 벤더마다 다른 API 규격을 CDM(Canonical Data Model)이라는 표준 형식으로 통일하여 
     #       이후의 평가 로직이 동일한 잣대로 동작하게 합니다.
-    # 등록된 어댑터 레지스트리에서 적절한 객체를 생성하여 호출합니다.
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY)
     result = adapter.invoke(input_text)
 
@@ -212,7 +202,7 @@ def test_evaluation(case):
     # STEP 2: Fail-Fast (보안 및 형식 검증)
     # ---------------------------------------------------------
     
-    # 2-1. 보안 위반 체크 (Promptfoo)
+    # 2-1. 보안 위반 체크 (Policy Violation)
     # 개인정보나 기밀이 유출되었는지 정규식으로 빠르게 확인합니다.
     try:
         _promptfoo_policy_check(result.raw_response)
@@ -220,7 +210,7 @@ def test_evaluation(case):
         if trace: trace.score(name="PolicyViolation", value=0, comment=str(e))
         pytest.fail(str(e))
 
-    # 2-2. 형식 준수 체크 (jsonschema)
+    # 2-2. 형식 준수 체크 (Format Compliance)
     # 응답이 시스템 연동에 적합한 JSON 구조인지 확인합니다.
     try:
         _schema_validate(result.raw_response)
@@ -232,9 +222,6 @@ def test_evaluation(case):
     # STEP 3: 과업 성공 검증 (Agent 전용)
     # ---------------------------------------------------------
     if target_category == "agent":
-        # [지표 3: Task Completion]
-        # [원리] golden.csv의 success_criteria 컬럼에 정의된 논리식을 해석합니다.
-        # [예시] status_code=200 AND json.id~r/^\d+$/ (상태코드 200 및 ID가 숫자인지 확인)
         # [지표 3: Task Completion (과업 완료율)]
         # 원리: golden.csv의 success_criteria에 정의된 논리 조건(상태코드, 정규식 등)을 검사합니다.
         # 이유: 에이전트가 실제로 비즈니스 로직을 성공적으로 수행했는지 확인하기 위함입니다.
@@ -249,7 +236,7 @@ def test_evaluation(case):
     # STEP 4: 심층 품질 평가 (DeepEval + Ollama Judge)
     # ---------------------------------------------------------
     
-    # M1 Max 호스트의 Ollama 서버를 채점관(Judge)으로 활용합니다.
+    # 로컬 Ollama 서버의 qwen3-coder 모델을 심판(Judge)으로 설정합니다.
     judge = GPTModel(
         model="qwen3-coder:30b",
         base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1"
@@ -265,8 +252,6 @@ def test_evaluation(case):
         context=json.loads(case.get("context_ground_truth", "[]") or "[]"),
     )
 
-    # [지표 4: Answer Relevancy]
-    # [원리] 답변으로부터 질문을 역추론하여 원본 질문과의 의미적 유사도를 측정합니다.
     # [지표 4: Answer Relevancy (답변 적합성)]
     # 원리: 답변으로부터 질문을 역추론하여 원본 질문과의 의미적 유사도를 측정합니다.
     # 이유: 질문의 의도에 맞는 핵심적인 답변을 내놓는지 확인하여 동문서답을 방지합니다.
@@ -274,14 +259,10 @@ def test_evaluation(case):
 
     # RAG 유형일 경우 추가 지표 측정
     if target_category == "rag":
-        # [지표 5: Faithfulness]
-        # [원리] 답변의 모든 문장이 검색된 문서(Context)에 기반하는지 대조하여 환각을 탐지합니다.
         # [지표 5: Faithfulness (충실도)]
         # 원리: 답변의 모든 문장이 검색된 문서(Context)에 기반하는지 대조하여 환각을 탐지합니다.
         metrics.append(FaithfulnessMetric(threshold=0.9, model=judge))
         
-        # [지표 6: Contextual Recall]
-        # [원리] 운영자가 작성한 정답(Expected)의 핵심 사실이 검색된 문서에 포함되었는지 확인합니다.
         # [지표 6: Contextual Recall (검색 재현율)]
         # 원리: 운영자가 작성한 정답의 핵심 사실이 검색된 문서에 포함되어 있는지 확인합니다.
         metrics.append(ContextualRecallMetric(threshold=0.8, model=judge))
