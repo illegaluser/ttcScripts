@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # ==================================================================================
 # 파일명: doc_processor.py
 # 버전: 2.1 (Full Commented Version)
@@ -168,6 +166,7 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
     2-Pass Hybrid Pipeline을 구현한 핵심 함수입니다.
     PDF의 각 페이지를 순회하며 텍스트와 비주얼 요소를 분리하여 처리하고 다시 합칩니다.
     """
+    start_time = time.time()
     # PyMuPDF로 문서를 엽니다.
     doc = fitz.open(str(pdf_path))
     full_doc = []  # 전체 페이지의 변환 결과를 담을 리스트
@@ -190,19 +189,22 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
         # 따라서 PyMuPDF의 'find_tables' 기능을 이용해 표 영역 좌표(bbox)를 먼저 찾습니다.
         tables = page.find_tables()
         table_rects = [tab.bbox for tab in tables]
+        log(f"    [Step 1] Detected {len(table_rects)} tables.")
         
         for rect in table_rects:
             # 감지된 표 영역을 이미지로 잘라냅니다 (Crop).
             pix = page.get_pixmap(clip=rect)
             img_bytes = pix.tobytes("png")
             
-            log(f"    -> [Vision] Table detected at Y={rect[1]:.1f}, analyzing...")
+            v_start = time.time()
+            log(f"    -> [Vision:Table] Analyzing region at Y={rect[1]:.1f}...")
             
             # Vision 모델에게 "이미지만 보고 마크다운 표를 만들어달라"고 요청합니다.
             md_table = analyze_image_region(
                 img_bytes, 
                 "Convert this table image into a Markdown table format. Only output the table, no description."
             )
+            log(f"    <- [Vision:Table] Done ({time.time() - v_start:.2f}s)")
             
             # 결과 저장 (좌표 포함)
             page_content.append({
@@ -217,6 +219,9 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
         # get_text("dict") 모드는 페이지 내용을 블록 단위 구조체로 반환합니다.
         # blocks 리스트에는 텍스트 블록과 이미지 블록이 섞여 있습니다.
         blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]
+        
+        text_count = 0
+        image_count = 0
         
         for block in blocks:
             # 블록의 좌표(bbox)를 가져옵니다.
@@ -256,6 +261,7 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
                         "type": "text",
                         "content": text
                     })
+                    text_count += 1
 
             # ----------------------------------------------------------------
             # Case B: 이미지 블록 처리 (type=1)
@@ -271,13 +277,15 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
                 
                 img_bytes = block["image"]
                 
-                log(f"    -> [Vision] Image detected at Y={bbox.y0:.1f}, analyzing...")
+                v_start = time.time()
+                log(f"    -> [Vision:Image] Analyzing region at Y={bbox.y0:.1f}...")
                 
                 # Vision 모델에게 이미지 설명을 요청합니다.
                 desc = analyze_image_region(
                     img_bytes,
                     "Describe this image in detail. If it's a chart, summarize the data trends."
                 )
+                log(f"    <- [Vision:Image] Done ({time.time() - v_start:.2f}s)")
                 
                 # 이미지는 인용구(>) 형식으로 마크다운에 삽입하여 구분합니다.
                 page_content.append({
@@ -285,6 +293,9 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
                     "type": "image",
                     "content": f"\n> **[Image Analysis]**\n> {desc}\n"
                 })
+                image_count += 1
+
+        log(f"    [Step 2] Extracted {text_count} text blocks and {image_count} images (filtered).")
 
         # --------------------------------------------------------------------
         # Pass 2: 병합 (Merge & Sort)
@@ -297,8 +308,10 @@ def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
         page_md = f"## Page {page_num}\n\n"
         page_md += "\n".join([item["content"] for item in page_content])
         full_doc.append(page_md)
+        log(f"    [Step 3] Page {page_num} reconstruction complete.")
 
     doc.close()
+    log(f"[Hybrid] Finished: {pdf_path.name} (Elapsed: {time.time() - start_time:.2f}s)")
     
     # 전체 페이지 내용을 구분선으로 연결하여 반환합니다.
     title = pdf_path.name
@@ -376,6 +389,7 @@ def pptx_to_pdf(pptx_path: Path, out_dir: Path) -> Optional[Path]:
 
 def convert_one(src_path: Path) -> None:
     """단일 파일에 대해 파일 확장자를 확인하고 적절한 변환기를 호출합니다."""
+    start_time = time.time()
     ext = src_path.suffix.lower()
     
     # 1. PDF 처리 (Hybrid Vision 적용)
@@ -385,7 +399,7 @@ def convert_one(src_path: Path) -> None:
         if md:
             out = Path(RESULT_DIR) / f"{src_path.name}.md"
             write_text(out, md)
-            log(f"[Saved] {out}")
+            log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
         return
     
     # 2. PPTX 처리 (PDF 변환 -> Hybrid Vision 적용)
@@ -399,7 +413,7 @@ def convert_one(src_path: Path) -> None:
             if md:
                 out = Path(RESULT_DIR) / f"{src_path.name}.md"
                 write_text(out, md)
-                log(f"[Saved] {out}")
+                log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
         return
 
     # 3. 기타 텍스트 포맷 처리 (단순 추출)
@@ -408,7 +422,7 @@ def convert_one(src_path: Path) -> None:
         if md:
             out = Path(RESULT_DIR) / f"{src_path.name}.md"
             write_text(out, md)
-            log(f"[Saved] {out}")
+            log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
         return
     
     if ext in [".xlsx", ".xls"]:
@@ -416,7 +430,7 @@ def convert_one(src_path: Path) -> None:
         if md:
             out = Path(RESULT_DIR) / f"{src_path.name}.md"
             write_text(out, md)
-            log(f"[Saved] {out}")
+            log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
         return
     
     if ext == ".txt":
@@ -425,7 +439,7 @@ def convert_one(src_path: Path) -> None:
             md = f"# {src_path.name}\n\n{text.strip()}\n"
             out = Path(RESULT_DIR) / f"{src_path.name}.md"
             write_text(out, md)
-            log(f"[Saved] {out}")
+            log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
         return
 
 def convert_all() -> None:
@@ -514,6 +528,9 @@ def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) 
         return
         
     # 2. 결과 파일 순회 및 업로드
+    success_count = 0
+    fail_count = 0
+    
     for p in sorted(result_root.glob("*.md")):
         text = safe_read_text(p)
         if not text:
@@ -523,9 +540,12 @@ def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) 
         
         if ok:
             log(f"[Upload:OK] {p.name}")
+            success_count += 1
         else:
             log(f"[Upload:FAIL] {p.name} / {detail}")
+            fail_count += 1
             
+    log(f"=== [Hybrid Doc Processor] Upload Summary: Success={success_count}, Fail={fail_count} ===")
     log("=== [Hybrid Doc Processor] Upload Done ===")
 
 # ============================================================================
