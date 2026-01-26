@@ -194,6 +194,7 @@ def test_evaluation(case):
     # [동작] TARGET_TYPE(예: http)에 따라 사전에 정의된 어댑터를 동적으로 로드합니다.
     # [목적] 벤더마다 다른 API 규격을 CDM(Canonical Data Model)이라는 표준 형식으로 통일하여 
     #       이후의 평가 로직이 동일한 잣대로 동작하게 합니다.
+    # 등록된 어댑터 레지스트리에서 적절한 객체를 생성하여 호출합니다.
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY)
     result = adapter.invoke(input_text)
 
@@ -234,6 +235,9 @@ def test_evaluation(case):
         # [지표 3: Task Completion]
         # [원리] golden.csv의 success_criteria 컬럼에 정의된 논리식을 해석합니다.
         # [예시] status_code=200 AND json.id~r/^\d+$/ (상태코드 200 및 ID가 숫자인지 확인)
+        # [지표 3: Task Completion (과업 완료율)]
+        # 원리: golden.csv의 success_criteria에 정의된 논리 조건(상태코드, 정규식 등)을 검사합니다.
+        # 이유: 에이전트가 실제로 비즈니스 로직을 성공적으로 수행했는지 확인하기 위함입니다.
         passed = _evaluate_agent_criteria(case.get("success_criteria"), result)
         if trace:
             metric_name = METRIC_DISPLAY_NAMES.get("TaskCompletion", "TaskCompletion")
@@ -263,16 +267,23 @@ def test_evaluation(case):
 
     # [지표 4: Answer Relevancy]
     # [원리] 답변으로부터 질문을 역추론하여 원본 질문과의 의미적 유사도를 측정합니다.
+    # [지표 4: Answer Relevancy (답변 적합성)]
+    # 원리: 답변으로부터 질문을 역추론하여 원본 질문과의 의미적 유사도를 측정합니다.
+    # 이유: 질문의 의도에 맞는 핵심적인 답변을 내놓는지 확인하여 동문서답을 방지합니다.
     metrics = [AnswerRelevancyMetric(threshold=0.8, model=judge)]
 
     # RAG 유형일 경우 추가 지표 측정
     if target_category == "rag":
         # [지표 5: Faithfulness]
         # [원리] 답변의 모든 문장이 검색된 문서(Context)에 기반하는지 대조하여 환각을 탐지합니다.
+        # [지표 5: Faithfulness (충실도)]
+        # 원리: 답변의 모든 문장이 검색된 문서(Context)에 기반하는지 대조하여 환각을 탐지합니다.
         metrics.append(FaithfulnessMetric(threshold=0.9, model=judge))
         
         # [지표 6: Contextual Recall]
         # [원리] 운영자가 작성한 정답(Expected)의 핵심 사실이 검색된 문서에 포함되었는지 확인합니다.
+        # [지표 6: Contextual Recall (검색 재현율)]
+        # 원리: 운영자가 작성한 정답의 핵심 사실이 검색된 문서에 포함되어 있는지 확인합니다.
         metrics.append(ContextualRecallMetric(threshold=0.8, model=judge))
 
     # 각 지표 측정 및 Langfuse 기록
