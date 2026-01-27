@@ -3875,8 +3875,17 @@ pipeline {
     
     post {
         always {
+            // 1. 호스트 볼륨 백업 (선택 사항)
+            script {
+                sh """
+                mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER}
+                cp -r ${REPORT_DIR}/* /var/knowledges/qa_reports/${BUILD_NUMBER}/
+                """
+            }
+
+            // 2. HTML 리포트 게시
             publishHTML([
-                allowMissing: false,
+                allowMissing: true,
                 alwaysLinkToLastBuild: true,
                 keepAll: true,
                 reportDir: "${TEST_DIR}/playwright-report",
@@ -4238,29 +4247,32 @@ class LocatorResolver:
 
     def resolve(self, target: IntentTarget):
         """
-        전략 우선순위
-        1) role + name
-        2) label
-        3) text(부분일치)
-        4) placeholder
-        5) testid
-        6) selector
+        여러 가지 전략을 순차적으로 시도하여 요소를 찾습니다.
+        가장 정확도가 높고 유지보수가 쉬운 방법(Role+Name)부터 시도합니다.
         """
+        # 전략 1: 접근성 역할(Role)과 이름(Name)으로 찾기 (권장)
+        # 예: role="button", name="로그인"
         if target.role and target.name:
             loc = self.page.get_by_role(target.role, name=target.name)
             if self._try_visible(loc):
                 return loc
 
+        # 전략 2: 라벨(Label)로 찾기 
+        # 예: <label>이메일</label> <input>
         if target.label:
             loc = self.page.get_by_label(target.label)
             if self._try_visible(loc):
                 return loc
 
+        # 전략 3: 화면에 보이는 텍스트(Text)로 찾기 
+        # 예: <span>회원가입</span> (exact=False로 부분 일치 허용)
         if target.text:
             loc = self.page.get_by_text(target.text, exact=False)
             if self._try_visible(loc):
                 return loc
 
+        # 전략 4: 플레이스홀더(Placeholder)로 찾기 
+        # 예: <input placeholder="검색어 입력">
         if target.placeholder:
             loc = self.page.get_by_placeholder(target.placeholder)
             if self._try_visible(loc):
@@ -4276,6 +4288,7 @@ class LocatorResolver:
             if self._try_visible(loc):
                 return loc
 
+        # 모든 전략 실패 시 에러 발생 -> Self-Healing으로 넘어감
         raise RuntimeError(f"Target not resolved: {target.brief()}")
 
 # -----------------------------------------------------------------------------
@@ -4283,11 +4296,14 @@ class LocatorResolver:
 # -----------------------------------------------------------------------------
 def collect_accessibility_candidates(page) -> List[Dict[str, str]]:
     """
-    접근성 트리에서 role/name 후보를 수집한다.
-    - role과 name이 모두 존재하는 노드만 후보로 취급한다.
-    - 중복은 제거한다.
+    현재 페이지의 모든 접근성 트리(Accessibility Tree)를 스캔하여
+    '클릭하거나 입력할 수 있는' 모든 요소들의 목록을 수집합니다.
     """
-    snapshot = page.accessibility.snapshot()
+    try:
+        snapshot = page.accessibility.snapshot()
+    except:
+        return [] # 스냅샷 실패 시 빈 목록 반환
+        
     results: List[Dict[str, str]] = []
 
     def walk(node: Dict[str, Any]) -> None:
@@ -4317,9 +4333,6 @@ def filter_candidates_by_action(action: str, candidates: List[Dict[str, str]]) -
     """
     if action == "click":
         allowed = {"button", "link", "menuitem", "tab", "checkbox", "radio"}
-        return [c for c in candidates if c.get("role") in allowed]
-    if action == "fill":
-        allowed = {"textbox", "searchbox", "combobox"}
         return [c for c in candidates if c.get("role") in allowed]
     return candidates
 
@@ -4547,15 +4560,14 @@ class ZeroTouchAgent:
         append_jsonl(self.path_log, base)
 
     def _execute_action(self, page, resolver: LocatorResolver, step: Dict[str, Any]) -> None:
-        """
-        단일 step의 action을 실행한다.
-        - navigate/wait는 일반 실행이다.
-        - click/fill/check는 target을 해석하여 수행한다.
-        """
         action = step.get("action")
+        
+        # 네이버 등 포털 접속 시 networkidle 타임아웃 방지를 위해 domcontentloaded 사용
         if action == "navigate":
-            page.goto(step.get("value") or self.url, timeout=60000)
-            page.wait_for_load_state("networkidle")
+            target_url = step.get("value") or self.url
+            page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+            # 추가적으로 2초 정도 정적 대기 (안전장치)
+            page.wait_for_timeout(2000)
             return
 
         if action == "wait":
@@ -4770,7 +4782,25 @@ class ZeroTouchAgent:
 
     def run(self) -> None:
         """전체 실행 엔트리다."""
-        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "start"})
+        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "start", "headless": DEFAULT_HEADLESS})
+
+        scenario = self.plan_scenario()
+
+        rows, healed = self.execute(scenario)
+
+        # healed scenario 저장
+        write_json(self.path_healed, healed)
+
+        # report 저장
+        self.save_report(rows)
+
+        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "end"})
+
+        # [중요] 실행 결과 중 하나라도 'FAIL'이 있으면
+        # Jenkins가 빌드를 '실패(FAILURE)'로 처리할 수 있도록 Exit Code 1을 반환하며 종료합니다.
+        if any(r.get("status") == "FAIL" for r in rows):
+            log("Test FAILED: Exiting with status code 1.")
+            sys.exit(1)
 
         scenario = self.plan_scenario()
 
@@ -4854,7 +4884,11 @@ if __name__ == "__main__":
 
 ```groovy
 // =============================================================================
-// DSCORE-ZeroTouch-QA Jenkinsfile (v1.8)
+// DSCORE-ZeroTouch-QA Jenkinsfile (v2.5 - Stable)
+//
+// 변경 내역
+// - [Fix] CSP 보안 이슈 대응을 위해 빌드 설명을 단순 텍스트 링크로 변경
+// - [Fix] 파이썬 의존성 및 브라우저 자동 설치 보장
 //
 // 목적
 // - 사용자가 업로드한 SRS 파일을 기반으로 Zero-Touch QA 에이전트를 실행한다.
@@ -4876,12 +4910,14 @@ pipeline {
     parameters {
         string(
             name: 'TARGET_URL',
-            defaultValue: 'http://host.docker.internal:3000',
-            description: '테스트 대상 웹앱 URL'
+            defaultValue: 'https://www.naver.com',
+            description: '테스트 대상 웹앱 URL (http:// 또는 https:// 필수)'
         )
-        file(
-            name: 'SRS_FILE',
-            description: '자연어 요구사항 파일(.txt)'
+        // 텍스트 입력 방식 (안전함)
+        text(
+            name: 'SRS_TEXT',
+            description: '자연어 요구사항(SRS) 내용을 여기에 붙여넣으세요.',
+            defaultValue: ''
         )
         string(
             name: 'MODEL_NAME',
@@ -4936,6 +4972,7 @@ pipeline {
                         // - 에이전트 내부에서 HEAL_MODE, MAX_HEAL_ATTEMPTS를 읽는다.
                         // ---------------------------------------------------------
                         sh """
+                        export HEADLESS="${params.HEADLESS}"
                         export HEAL_MODE="${params.HEAL_MODE}"
                         export MAX_HEAL_ATTEMPTS="${params.MAX_HEAL_ATTEMPTS}"
                         export OLLAMA_HOST="${env.OLLAMA_HOST}"
@@ -4969,12 +5006,18 @@ pipeline {
                 reportName: 'Zero-Touch QA Report'
             ])
 
-            // -----------------------------------------------------------------
-            // Archive Artifacts
-            // - 핵심 산출물을 아카이빙한다.
-            // - fingerprint를 통해 빌드 간 추적성을 확보한다.
-            // -----------------------------------------------------------------
-            archiveArtifacts artifacts: "${REPORT_DIR}/*.json,${REPORT_DIR}/*.jsonl,${REPORT_DIR}/*.html,${REPORT_DIR}/*.png", fingerprint: true
+            // 3. Artifact 아카이빙 (모든 파일 포함)
+            archiveArtifacts(
+                artifacts: "qa_reports/**/*",
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
+
+            // 4. [Fix] 빌드 설명 단순화 (HTML 태그 제거)
+            script {
+                def reportUrl = "${BUILD_URL}Zero-Touch_20QA_20Report"
+                currentBuild.description = "Test Finished. Report: ${reportUrl}"
+            }
         }
     }
 }
@@ -5082,6 +5125,8 @@ Self-Healing으로 성공했으면 "의도한 기능이 작동"한 것으로 본
 
 **두 방식 병행:**
 
+        # 전략 5: CSS/XPath 선택자(Selector)로 찾기 (최후의 수단)
+        # 예: #main-content > div > button
 * 방식 A로 복잡한 핵심 테스트를 작성하고 버전 관리
 * 방식 B로 회귀 테스트/스모크 테스트를 자동화
 * 두 방식의 결과를 Jenkins에서 통합 리포팅

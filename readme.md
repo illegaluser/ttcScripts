@@ -3875,6 +3875,15 @@ pipeline {
     
     post {
         always {
+            // 1. 호스트 볼륨 백업
+            script {
+                sh """
+                mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER}
+                cp -r ${REPORT_DIR}/* /var/knowledges/qa_reports/${BUILD_NUMBER}/
+                """
+            }
+
+            // 2. HTML 리포트 게시
             publishHTML([
                 allowMissing: false,
                 alwaysLinkToLastBuild: true,
@@ -4045,15 +4054,20 @@ LLM이 새로운 `target`과 갱신된 `fallback_targets`를 제안한다.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =============================================================================
-# DSCORE-TTC Zero-Touch QA Agent (v1.8)
+# DSCORE-TTC Zero-Touch QA Agent (v2.5 - Annotated Version)
 #
 # 목적
 # - 자연어 요구사항(SRS)을 입력받아 Intent 기반 테스트 시나리오를 생성한다.
 # - Playwright로 시나리오를 실행한다.
 # - UI 변경으로 실패하는 경우, 3단계 Self-Healing으로 복구를 시도한다.
+# - 클릭 후 새 탭/새 창이 열리는 경우를 감지하여 자동으로 제어권을 넘긴다.
+# - 테스트 실패 시 Jenkins가 알 수 있도록 실패 코드(Exit Code 1)를 반환합니다.
 # - 실행 결과를 Artifact(시나리오/치유 시나리오/로그/리포트/스크린샷)로 남긴다.
 #
-# 핵심 원칙
+# 변경 내역 (v2.5)
+# - [Fix] 테스트 실패 시 Exit Code 1 반환 로직 추가 (Jenkins 연동 강화)
+# - [Fix] 클릭 액션 후 안정화를 위한 미세 지연(500ms) 추가
+# - [Fix] 접근성 스냅샷 실패 시 방어 로직 추가
 # - Intent-Driven: role/name/label/text 기반 탐색을 우선한다.
 # - Self-Healing: fallback -> candidate search -> LLM heal 순으로 복구한다.
 # - Sequential Fast-Fail: 병렬 탐색을 사용하지 않는다.
@@ -4085,10 +4099,8 @@ DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://host.docker.internal:1143
 
 # 사용할 LLM 모델명
 DEFAULT_MODEL_NAME = os.getenv("MODEL_NAME", "qwen3-coder:30b")
-
-# Headless 모드
-# - Jenkins 환경에서는 headless=1을 기본으로 둔다.
-DEFAULT_HEADLESS = os.getenv("HEADLESS", "1") == "1"
+_headless_env = os.getenv("HEADLESS", "true").lower()
+DEFAULT_HEADLESS = _headless_env in ("true", "1", "on", "yes")
 
 # Slow motion(ms)
 # - 화면 안정성을 위해 액션 간 지연을 둔다.
@@ -4193,7 +4205,11 @@ class IntentTarget:
     selector: Optional[str] = None
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "IntentTarget":
+    def from_dict(d: Any) -> "IntentTarget":
+        # [Fix] LLM이 target을 문자열로 줄 경우 방어 로직
+        if isinstance(d, str):
+            return IntentTarget(text=d) 
+            
         return IntentTarget(
             role=d.get("role"),
             name=d.get("name"),
@@ -4235,29 +4251,32 @@ class LocatorResolver:
 
     def resolve(self, target: IntentTarget):
         """
-        전략 우선순위
-        1) role + name
-        2) label
-        3) text(부분일치)
-        4) placeholder
-        5) testid
-        6) selector
+        여러 가지 전략을 순차적으로 시도하여 요소를 찾습니다.
+        가장 정확도가 높고 유지보수가 쉬운 방법(Role+Name)부터 시도합니다.
         """
+        # 전략 1: 접근성 역할(Role)과 이름(Name)으로 찾기 (권장)
+        # 예: role="button", name="로그인"
         if target.role and target.name:
             loc = self.page.get_by_role(target.role, name=target.name)
             if self._try_visible(loc):
                 return loc
 
+        # 전략 2: 라벨(Label)로 찾기 
+        # 예: <label>이메일</label> <input>
         if target.label:
             loc = self.page.get_by_label(target.label)
             if self._try_visible(loc):
                 return loc
 
+        # 전략 3: 화면에 보이는 텍스트(Text)로 찾기 
+        # 예: <span>회원가입</span> (exact=False로 부분 일치 허용)
         if target.text:
             loc = self.page.get_by_text(target.text, exact=False)
             if self._try_visible(loc):
                 return loc
 
+        # 전략 4: 플레이스홀더(Placeholder)로 찾기 
+        # 예: <input placeholder="검색어 입력">
         if target.placeholder:
             loc = self.page.get_by_placeholder(target.placeholder)
             if self._try_visible(loc):
@@ -4273,6 +4292,7 @@ class LocatorResolver:
             if self._try_visible(loc):
                 return loc
 
+        # 모든 전략 실패 시 에러 발생 -> Self-Healing으로 넘어감
         raise RuntimeError(f"Target not resolved: {target.brief()}")
 
 # -----------------------------------------------------------------------------
@@ -4280,11 +4300,14 @@ class LocatorResolver:
 # -----------------------------------------------------------------------------
 def collect_accessibility_candidates(page) -> List[Dict[str, str]]:
     """
-    접근성 트리에서 role/name 후보를 수집한다.
-    - role과 name이 모두 존재하는 노드만 후보로 취급한다.
-    - 중복은 제거한다.
+    현재 페이지의 모든 접근성 트리(Accessibility Tree)를 스캔하여
+    '클릭하거나 입력할 수 있는' 모든 요소들의 목록을 수집합니다.
     """
-    snapshot = page.accessibility.snapshot()
+    try:
+        snapshot = page.accessibility.snapshot()
+    except:
+        return [] # 스냅샷 실패 시 빈 목록 반환
+        
     results: List[Dict[str, str]] = []
 
     def walk(node: Dict[str, Any]) -> None:
@@ -4544,15 +4567,14 @@ class ZeroTouchAgent:
         append_jsonl(self.path_log, base)
 
     def _execute_action(self, page, resolver: LocatorResolver, step: Dict[str, Any]) -> None:
-        """
-        단일 step의 action을 실행한다.
-        - navigate/wait는 일반 실행이다.
-        - click/fill/check는 target을 해석하여 수행한다.
-        """
         action = step.get("action")
+        
+        # 네이버 등 포털 접속 시 networkidle 타임아웃 방지를 위해 domcontentloaded 사용
         if action == "navigate":
-            page.goto(step.get("value") or self.url, timeout=60000)
-            page.wait_for_load_state("networkidle")
+            target_url = step.get("value") or self.url
+            page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+            # 추가적으로 2초 정도 정적 대기 (안전장치)
+            page.wait_for_timeout(2000)
             return
 
         if action == "wait":
@@ -4670,93 +4692,73 @@ class ZeroTouchAgent:
 
     def execute(self, scenario: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        시나리오를 실행하고 결과 rows를 반환한다.
-        - healed_scenario는 실행 중 갱신된 target/fallback을 포함한다.
+        전체 시나리오를 순차적으로 실행하는 메인 루프입니다.
+        브라우저 컨텍스트 관리 및 페이지 전환 감지를 담당합니다.
         """
-        rows: List[Dict[str, Any]] = []
-        healed_scenario = json.loads(json.dumps(scenario))
-
+        rows, healed_scenario = [], json.loads(json.dumps(scenario))
+        
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=DEFAULT_HEADLESS,
-                slow_mo=DEFAULT_SLOW_MO_MS,
-            )
-            page = browser.new_page()
-            page.set_viewport_size({"width": 1280, "height": 800})
-
+            # 브라우저 실행 (Headless 옵션 적용)
+            browser = p.chromium.launch(headless=DEFAULT_HEADLESS, slow_mo=DEFAULT_SLOW_MO_MS)
+            
+            # [중요] BrowserContext 생성: 여러 페이지(탭)를 관리하기 위해 필수입니다.
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            page = context.new_page()
+            
             resolver = LocatorResolver(page, FAST_TIMEOUT_MS)
 
-            for step in healed_scenario:
-                sid = step.get("step")
+            # [Fix] enumerate로 Step ID 누락 방지
+            for idx, step in enumerate(healed_scenario, start=1):
+                sid = step.get("step") or idx
+                step["step"] = sid
+                
                 action = step.get("action")
                 desc = step.get("description", "")
                 heal_stage = "none"
                 status = "PASS"
                 evidence = ""
 
-                self._log_step_event({
-                    "phase": "execute",
-                    "step": sid,
-                    "action": action,
-                    "description": desc,
-                    "event": "start",
-                })
+                self._log_step_event({"phase": "exec", "step": sid, "action": action, "event": "start"})
+
+                # [New Page Detection 1] 액션 수행 전 현재 열린 페이지 개수 확인
+                pages_before = len(context.pages)
 
                 try:
-                    # 1차 실행
                     self._execute_action(page, resolver, step)
-
                 except Exception as e:
-                    # 실패 시 Self-Healing 수행
-                    error_text = str(e)
-                    self._log_step_event({
-                        "phase": "execute",
-                        "step": sid,
-                        "action": action,
-                        "event": "fail",
-                        "error": error_text,
-                        "target": step.get("target"),
-                    })
-
-                    # 치유는 click/fill/check에서만 수행한다.
+                    self._log_step_event({"phase": "exec", "step": sid, "action": action, "event": "fail", "error": str(e)})
                     if action in ["click", "fill", "check"]:
-                        ok, heal_stage = self._heal_step(
-                            page=page,
-                            resolver=resolver,
-                            step=step,
-                            action=action,
-                            error_text=error_text,
-                        )
-                        if not ok:
-                            raise RuntimeError(f"Self-healing failed: {error_text}")
-                    else:
-                        raise
+                        ok, heal_stage = self._heal_step(page, resolver, step, action, str(e))
+                        if not ok: status = "FAIL"
+                    else: status = "FAIL"
 
-                # 증적 생성
-                evidence = f"step_{sid}_pass.png"
-                page.screenshot(path=os.path.join(self.out_dir, evidence))
+                # [New Page Detection 2] 액션 수행 후 페이지 개수가 늘어났는지 확인
+                # (예: 클릭 후 target="_blank"로 새 탭이 열린 경우)
+                if len(context.pages) > pages_before:
+                    # 가장 최근에 열린 페이지(리스트의 마지막)를 가져옴
+                    new_page = context.pages[-1]
+                    try:
+                        # 새 페이지가 로딩될 때까지 대기
+                        new_page.wait_for_load_state("domcontentloaded")
+                    except: pass
+                    
+                    # [Context Switching] 현재 제어 페이지(Page)를 새 페이지로 교체
+                    page = new_page
+                    # Resolver도 새 페이지 기준으로 재생성해야 요소를 찾을 수 있음
+                    resolver = LocatorResolver(page, FAST_TIMEOUT_MS)
+                    
+                    self._log_step_event({"phase": "exec", "step": sid, "event": "new_page_detected", "url": page.url})
 
-                self._log_step_event({
-                    "phase": "execute",
-                    "step": sid,
-                    "action": action,
-                    "event": "pass",
-                    "heal_stage": heal_stage,
-                    "url": page.url,
-                    "evidence": evidence,
-                })
-
-                rows.append({
-                    "step": sid,
-                    "action": action,
-                    "description": desc,
-                    "heal_stage": heal_stage,
-                    "status": status,
-                    "evidence": evidence,
-                })
+                evidence = f"step_{sid}_{status.lower()}.png"
+                try:
+                    page.screenshot(path=os.path.join(self.out_dir, evidence))
+                except Exception: pass
+                
+                self._log_step_event({"phase": "exec", "step": sid, "status": status, "heal": heal_stage})
+                rows.append({"step": sid, "action": action, "description": desc, "heal_stage": heal_stage, "status": status, "evidence": evidence})
+                if status == "FAIL": break
 
             browser.close()
-
         return rows, healed_scenario
 
     def save_report(self, rows: List[Dict[str, Any]]) -> None:
@@ -4767,7 +4769,25 @@ class ZeroTouchAgent:
 
     def run(self) -> None:
         """전체 실행 엔트리다."""
-        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "start"})
+        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "start", "headless": DEFAULT_HEADLESS})
+
+        scenario = self.plan_scenario()
+
+        rows, healed = self.execute(scenario)
+
+        # healed scenario 저장
+        write_json(self.path_healed, healed)
+
+        # report 저장
+        self.save_report(rows)
+
+        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "end"})
+
+        # [중요] 실행 결과 중 하나라도 'FAIL'이 있으면
+        # Jenkins가 빌드를 '실패(FAILURE)'로 처리할 수 있도록 Exit Code 1을 반환하며 종료합니다.
+        if any(r.get("status") == "FAIL" for r in rows):
+            log("Test FAILED: Exiting with status code 1.")
+            sys.exit(1)
 
         scenario = self.plan_scenario()
 
@@ -4851,7 +4871,11 @@ if __name__ == "__main__":
 
 ```groovy
 // =============================================================================
-// DSCORE-ZeroTouch-QA Jenkinsfile (v1.8)
+// DSCORE-ZeroTouch-QA Jenkinsfile (v2.5 - Stable)
+//
+// 변경 내역
+// - [Fix] CSP 보안 이슈 대응을 위해 빌드 설명을 단순 텍스트 링크로 변경
+// - [Fix] 파이썬 의존성 및 브라우저 자동 설치 보장
 //
 // 목적
 // - 사용자가 업로드한 SRS 파일을 기반으로 Zero-Touch QA 에이전트를 실행한다.
@@ -4876,9 +4900,10 @@ pipeline {
             defaultValue: 'http://host.docker.internal:3000',
             description: '테스트 대상 웹앱 URL'
         )
-        file(
-            name: 'SRS_FILE',
-            description: '자연어 요구사항 파일(.txt)'
+        text(
+            name: 'SRS_TEXT',
+            description: '자연어 요구사항(SRS) 내용을 여기에 붙여넣으세요.',
+            defaultValue: ''
         )
         string(
             name: 'MODEL_NAME',
@@ -4905,8 +4930,12 @@ pipeline {
     // ------------------------------------------------------------------------
     environment {
         SCRIPTS_DIR = '/var/jenkins_home/scripts'
-        REPORT_DIR  = "/var/knowledges/qa_reports/${BUILD_NUMBER}"
+        REPORT_DIR  = "${WORKSPACE}/qa_reports"
         OLLAMA_HOST = 'http://host.docker.internal:11434'
+        SRS_FILENAME = 'srs_input.txt'
+        
+        // 서버 환경이므로 Headless 모드 고정
+        HEADLESS = 'true'
     }
 
     stages {
@@ -4922,30 +4951,35 @@ pipeline {
 
         stage('2. Run Zero-Touch QA Agent') {
             steps {
-                // -----------------------------------------------------------------
-                // withFileParameter
-                // - Jenkins file parameter를 워크스페이스 임시 파일로 제공한다.
-                // -----------------------------------------------------------------
-                withFileParameter(name: 'SRS_FILE', variable: 'UPLOADED_SRS') {
-                    script {
-                        // ---------------------------------------------------------
-                        // 환경 변수 전달
-                        // - 에이전트 내부에서 HEAL_MODE, MAX_HEAL_ATTEMPTS를 읽는다.
-                        // ---------------------------------------------------------
-                        sh """
-                        export HEAL_MODE="${params.HEAL_MODE}"
-                        export MAX_HEAL_ATTEMPTS="${params.MAX_HEAL_ATTEMPTS}"
-                        export OLLAMA_HOST="${env.OLLAMA_HOST}"
-                        export MODEL_NAME="${params.MODEL_NAME}"
-
-                        python3 ${SCRIPTS_DIR}/autonomous_qa.py \
-                            --url "${params.TARGET_URL}" \
-                            --srs_file "${UPLOADED_SRS}" \
-                            --out "${REPORT_DIR}" \
-                            --ollama_host "${env.OLLAMA_HOST}" \
-                            --model "${params.MODEL_NAME}"
-                        """
+                script {
+                    // 1. SRS 텍스트 파일 저장
+                    if (params.SRS_TEXT?.trim()) {
+                        writeFile file: "${WORKSPACE}/${SRS_FILENAME}", text: params.SRS_TEXT, encoding: 'UTF-8'
+                    } else {
+                        error "SRS_TEXT is empty. Please input requirements."
                     }
+
+                    // 2. 실행 (의존성 설치 포함)
+                    sh """
+                    # 의존성 확인 (안전장치)
+                    pip3 install ollama playwright --break-system-packages || true
+                    playwright install chromium || true
+
+                    export HEAL_MODE="${params.HEAL_MODE}"
+                    export MAX_HEAL_ATTEMPTS="${params.MAX_HEAL_ATTEMPTS}"
+                    export OLLAMA_HOST="${env.OLLAMA_HOST}"
+                    export MODEL_NAME="${params.MODEL_NAME}"
+                    export HEADLESS="${env.HEADLESS}"
+
+                    echo ">>> Starting QA Agent..."
+                    
+                    python3 ${SCRIPTS_DIR}/autonomous_qa.py \
+                        --url "${params.TARGET_URL}" \
+                        --srs_file "${WORKSPACE}/${SRS_FILENAME}" \
+                        --out "${REPORT_DIR}" \
+                        --ollama_host "${env.OLLAMA_HOST}" \
+                        --model "${params.MODEL_NAME}"
+                    """
                 }
             }
         }
@@ -4953,12 +4987,17 @@ pipeline {
 
     post {
         always {
-            // -----------------------------------------------------------------
-            // HTML Publisher
-            // - Jenkins UI에서 index.html을 직접 열람 가능하게 한다.
-            // -----------------------------------------------------------------
+            // 1. 호스트 볼륨 백업 (선택 사항)
+            script {
+                sh """
+                mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER}
+                cp -r ${REPORT_DIR}/* /var/knowledges/qa_reports/${BUILD_NUMBER}/
+                """
+            }
+
+            // 2. HTML 리포트 게시
             publishHTML([
-                allowMissing: false,
+                allowMissing: true,
                 alwaysLinkToLastBuild: true,
                 keepAll: true,
                 reportDir: "${REPORT_DIR}",
@@ -4966,12 +5005,18 @@ pipeline {
                 reportName: 'Zero-Touch QA Report'
             ])
 
-            // -----------------------------------------------------------------
-            // Archive Artifacts
-            // - 핵심 산출물을 아카이빙한다.
-            // - fingerprint를 통해 빌드 간 추적성을 확보한다.
-            // -----------------------------------------------------------------
-            archiveArtifacts artifacts: "${REPORT_DIR}/*.json,${REPORT_DIR}/*.jsonl,${REPORT_DIR}/*.html,${REPORT_DIR}/*.png", fingerprint: true
+            // 3. Artifact 아카이빙 (모든 파일 포함)
+            archiveArtifacts(
+                artifacts: "qa_reports/**/*",
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
+
+            // 4. [Fix] 빌드 설명 단순화 (HTML 태그 제거)
+            script {
+                def reportUrl = "${BUILD_URL}Zero-Touch_20QA_20Report"
+                currentBuild.description = "Test Finished. Report: ${reportUrl}"
+            }
         }
     }
 }
@@ -5079,6 +5124,8 @@ Self-Healing으로 성공했으면 "의도한 기능이 작동"한 것으로 본
 
 **두 방식 병행:**
 
+        # 전략 5: CSS/XPath 선택자(Selector)로 찾기 (최후의 수단)
+        # 예: #main-content > div > button
 * 방식 A로 복잡한 핵심 테스트를 작성하고 버전 관리
 * 방식 B로 회귀 테스트/스모크 테스트를 자동화
 * 두 방식의 결과를 Jenkins에서 통합 리포팅
