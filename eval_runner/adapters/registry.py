@@ -1,6 +1,7 @@
 from typing import Dict, Type
 from .base import BaseAdapter
 from .http_adapter import GenericHttpAdapter
+from .browser_adapter import BrowserUIAdapter
 
 class AdapterRegistry:
     _registry: Dict[str, Type[BaseAdapter]] = {}
@@ -20,3 +21,4 @@ class AdapterRegistry:
 
 # 기본 HTTP 어댑터 등록
 AdapterRegistry.register("http", GenericHttpAdapter)
+AdapterRegistry.register("browser", BrowserUIAdapter)
