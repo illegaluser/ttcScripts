@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode, BrowserConfig
 
 # 목적:
 # - Jenkins 파이프라인에서 웹/기술 블로그 URL을 받아 HTML을 가져온다.
@@ -47,23 +47,42 @@ def refine_any_tech_blog(html_content):
     - 결과: 코드 블록/본문은 최대한 보존하고, 클릭용 링크나 광고성 문구는 없어진 텍스트 문자열이 반환된다.
     """
     soup = BeautifulSoup(html_content, 'html.parser')
+    log(f"Refining HTML content (Raw size: {len(html_content)} bytes)")
     
-    # 1. 일반적인 본문 컨테이너 후보들 탐색 (우아한형제들, 네이버, 위키 등 공용)
+    # 1. 본문 후보 영역 탐색 - 가장 내용이 많은 곳을 선택 (Skelter Labs 등 현대적 레이아웃 대응)
     content_area = None
-    candidates = ['article', '.post-content', '.entry-content', '.content', 'main', '#content']
-    for selector in candidates:
-        content_area = soup.select_one(selector)
-        if content_area: break
+    max_text_len = 0
+    candidates = ['article', 'main', '.post-content', '.entry-content', '.content', '#content', 'section', '.post-body', '.prose']
     
+    for selector in candidates:
+        elements = soup.select(selector)
+        for el in elements:
+            # 단순 텍스트 길이를 비교하여 가장 본문다운 영역을 찾음
+            current_len = len(el.get_text(strip=True))
+            if current_len > max_text_len:
+                max_text_len = current_len
+                content_area = el
+    
+    if content_area:
+        log(f"Selected best content area (Length: {max_text_len} chars)")
+    else:
+        log("Warning: No specific content area found, falling back to <body>")
+        content_area = soup.body
+
     if not content_area:
-        content_area = soup.body # 최후의 수단
+        return ""
 
-    # 2. 확실한 노이즈 요소 물리적 제거
-    for unwanted in content_area.select('nav, footer, aside, .sidebar, .menu, .ads, script, style, header'):
+    # 2. 확실한 노이즈 요소 물리적 제거 (어떤 영역에서든 공통 적용)
+    unwanted_selectors = 'nav, footer, aside, .sidebar, .menu, .ads, script, style, header, .nav, .footer, .header, .bottom, .related, .comments'
+    removed_count = 0
+    for unwanted in content_area.select(unwanted_selectors):
         unwanted.decompose()
+        removed_count += 1
+    log(f"Removed {removed_count} noise elements.")
 
-    # 3. 텍스트 추출 (마크다운 형식과 유사하게 추출)
+    # 3. 텍스트 추출
     text = content_area.get_text(separator='\n')
+    log(f"Extracted text length: {len(text)} chars")
 
     # 4. 강력한 정규식 정제 (이경석 님의 핵심 요청: URL 제거)
     # (1) [문구](http...) 형태에서 URL만 삭제하고 문구만 남김
@@ -75,6 +94,7 @@ def refine_any_tech_blog(html_content):
     # (4) 자잘한 특수기호나 중복 빈 줄 정리
     text = re.sub(r'\n\s*\n', '\n\n', text)
     
+    log(f"Final cleaned text length: {len(text.strip())} chars")
     return text.strip()
 
 async def build_universal_knowledge(root_url):
@@ -98,13 +118,21 @@ async def build_universal_knowledge(root_url):
     """
     os.makedirs(RESULT_DIR, exist_ok=True)
     
+    # Docker/Jenkins 환경 최적화 브라우저 설정 (핵심: no-sandbox, disable-dev-shm-usage)
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=True,
+        extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    )
+
     # 에러를 방지하기 위해 필터 옵션을 비우고 원본을 가져오는 데 집중
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
+        stream=False,
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
     )
 
-    async with AsyncWebCrawler() as crawler:
+    async with AsyncWebCrawler(config=browser_config) as crawler:
         log(f"Phase 1: 타겟 분석 시작 - {root_url}")
         result = await crawler.arun(url=root_url, config=run_config)
         
@@ -137,7 +165,9 @@ async def build_universal_knowledge(root_url):
                     clean_text = refine_any_tech_blog(res.html)
                     
                     # 너무 짧은 데이터는 무시해 품질을 관리한다.
-                    if len(clean_text) < 300: continue # 너무 짧은 데이터는 무시
+                    if len(clean_text) < 300:
+                        log(f"[{i+1}/{len(urls_to_crawl)}] 무시됨: 텍스트가 너무 짧음 ({len(clean_text)}자)")
+                        continue
 
                     # 안전한 파일명 생성
                     safe_name = url.split("//")[-1].replace("/", "_").replace(".", "_")[:100]
@@ -147,7 +177,7 @@ async def build_universal_knowledge(root_url):
                         # 출처 URL을 파일 상단에 남겨, 추후 역추적이 가능하도록 한다.
                         f.write(f"# Source: {url}\n\n{clean_text}")
                     
-                    log(f"[{i+1}/{len(urls_to_crawl)}] 클린 지식 확보: {url}")
+                    log(f"[{i+1}/{len(urls_to_crawl)}] 클린 지식 확보 성공: {out_path}")
                 else:
                     log(f"[{i+1}/{len(urls_to_crawl)}] 건너뜀 (응답 없음)")
             except Exception as e:

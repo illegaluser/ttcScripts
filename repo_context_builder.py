@@ -2,6 +2,7 @@
 import argparse
 import os
 from pathlib import Path
+from datetime import datetime
 
 # 목적: readme.md의 DSCORE-Code-Knowledge-Sync(Job #4)에서 리포지토리 트리와 핵심 설정 파일을 Markdown으로 요약해 RAG/Dify 업로드용 컨텍스트를 만든다.
 # 원칙:
@@ -113,10 +114,10 @@ def main() -> int:
     """
     CLI 엔트리포인트.
     - --repo_root: 트리를 만들 리포지토리 루트 경로
-    - --out: 생성된 Markdown을 저장할 경로
+    - --out: 저장 경로 (파일명은 내부에서 context-yymmdd-.md로 자동 변경됨)
     - --max_key_file_bytes: KEY_FILES 개별 파일을 읽을 때의 최대 바이트 수 (기본 30KB)
     동작:
-    1) 트리 섹션을 추가
+    1) 현재 날짜(yymmdd)를 기반으로 파일명 생성
     2) KEY_FILES 중 존재하는 파일을 순회하며 본문 섹션을 추가
     3) 결과를 out 경로에 저장
     추가 설명:
@@ -135,7 +136,15 @@ def main() -> int:
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    out_path = Path(args.out).resolve()
+    
+    # [수정] 저장소 이름을 포함한 파일명 생성 (context_저장소이름.md)
+    target_filename = f"context_{repo_root.name}.md"
+    
+    out_arg = Path(args.out).resolve()
+    if out_arg.is_dir():
+        out_path = out_arg / target_filename
+    else:
+        out_path = out_arg.parent / target_filename
 
     parts = []
     # 헤더: 보고서 제목
@@ -162,6 +171,28 @@ def main() -> int:
         parts.append(safe_read_text(p, args.max_key_file_bytes))
         parts.append("```")
         parts.append("")
+
+    # (3) 추가 문서 섹션: 리포지토리 내의 모든 .md 파일을 찾아 내용을 첨부한다.
+    # - KEY_FILES에 이미 포함된 파일은 중복 방지를 위해 제외한다.
+    # - EXCLUDE_DIRS에 포함된 경로는 탐색하지 않는다.
+    additional_md_parts = []
+    for root, dirs, files in os.walk(repo_root):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for f in files:
+            if f.lower().endswith(".md"):
+                full_p = Path(root) / f
+                rel_p = full_p.relative_to(repo_root)
+                
+                # 이미 KEY_FILES에서 처리했거나, 현재 생성 중인 출력 파일인 경우 제외
+                if str(rel_p) in KEY_FILES or full_p == out_path:
+                    continue
+                
+                additional_md_parts.append(f"### {rel_p}\n\n```markdown\n{safe_read_text(full_p, args.max_key_file_bytes)}\n```\n")
+
+    if additional_md_parts:
+        parts.append("## Additional Documentation (.md files)")
+        parts.append("")
+        parts.extend(additional_md_parts)
 
     # 최종 Markdown 저장
     out_path.write_text("\n".join(parts), encoding="utf-8")

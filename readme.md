@@ -3224,7 +3224,14 @@ pipeline {
                     string(credentialsId: "dify-dataset-id", variable: "DIFY_DATASET_ID")
                 ]) {
                     echo "[Upload] Dify 지식베이스 전송 시작"
-                    sh "python3 ${SCRIPTS_DIR}/doc_processor.py upload \"$DIFY_DATASET_ID\" \"$DIFY_API_KEY\" \"$DIFY_DOC_FORM\""
+                    // [수정] doc_processor.py 규격 준수: upload <api_key> <dataset_id> <doc_form> <doc_language>
+                    sh """
+                    python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                        "${DIFY_API_KEY}" \
+                        "${DIFY_DATASET_ID}" \
+                        "${DIFY_DOC_FORM}" \
+                        "Korean"
+                    """
                 }
             }
         }

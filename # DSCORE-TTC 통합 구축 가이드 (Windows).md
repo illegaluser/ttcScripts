@@ -528,8 +528,11 @@ def upload_text_document(api_key: str, dataset_id: str, name: str, text: str, do
         "indexing_technique": "economy",
         "doc_form": doc_form,
         "doc_language": doc_language,
-        "process_rule": {"rules": {"remove_extra_spaces": True}, "remove_urls_emails": False},
-        "mode": "automatic",
+        "process_rule": {
+            "mode": "automatic",
+            "rules": {"remove_extra_spaces": True},
+            "remove_urls_emails": False
+        },
     }
     r = requests.post(url, headers={**dify_headers(api_key), "Content-Type": "application/json"}, json=payload, timeout=300)
     if r.status_code >= 400:
@@ -543,8 +546,11 @@ def upload_file_document(api_key: str, dataset_id: str, file_path: Path, doc_for
         "indexing_technique": "economy",
         "doc_form": doc_form,
         "doc_language": doc_language,
-        "process_rule": {"rules": {"remove_extra_spaces": True}, "remove_urls_emails": False},
-        "mode": "automatic",
+        "process_rule": {
+            "mode": "automatic",
+            "rules": {"remove_extra_spaces": True},
+            "remove_urls_emails": False
+        },
     }
     with file_path.open("rb") as f:
         files = {"file": (file_path.name, f), "data": (None, json.dumps(data))}
@@ -1237,10 +1243,10 @@ pipeline {
     stages {
         stage('Clone') {
             when { expression { params.REPO_URL != '' } }
-            steps { sh "rm -rf ${WORKSPACE_CODES}/* && git clone \"${params.REPO_URL}\" ${WORKSPACE_CODES}/repo" }
+            steps { sh "REPO_NAME=\$(basename \"${params.REPO_URL}\" .git) && rm -rf ${WORKSPACE_CODES}/* && git clone \"${params.REPO_URL}\" ${WORKSPACE_CODES}/\$REPO_NAME" }
         }
         stage('Build Context') {
-            steps { sh "python3 ${SCRIPTS_DIR}/repo_context_builder.py --repo_root ${WORKSPACE_CODES}/repo --out ${RESULT_DIR}/context.md" }
+            steps { sh "REPO_NAME=\$(basename \"${params.REPO_URL}\" .git) && rm -rf ${RESULT_DIR}/* && python3 ${SCRIPTS_DIR}/repo_context_builder.py --repo_root ${WORKSPACE_CODES}/\$REPO_NAME --out ${RESULT_DIR}" }
         }
         stage('Upload') {
             steps {

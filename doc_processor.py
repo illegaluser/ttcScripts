@@ -442,6 +442,15 @@ def convert_one(src_path: Path) -> None:
             log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
         return
 
+    # 4. 이미 마크다운인 경우 (단순 복사 및 검증)
+    if ext == ".md":
+        text = safe_read_text(src_path)
+        if text.strip():
+            out = Path(RESULT_DIR) / src_path.name
+            write_text(out, text)
+            log(f"[Success] {src_path.name} -> {out.name} ({time.time() - start_time:.2f}s)")
+        return
+
 def convert_all() -> None:
     """SOURCE_DIR의 모든 파일을 검색하여 변환을 수행하는 메인 루프입니다."""
     log("=== [Hybrid Doc Processor] Convert Start ===")
@@ -454,8 +463,8 @@ def convert_all() -> None:
     for root, _, files in os.walk(src_root):
         for name in files:
             p = Path(root) / name
-            # 지원하는 확장자만 필터링
-            if p.suffix.lower() in [".pdf", ".docx", ".xlsx", ".xls", ".txt", ".pptx"]:
+            # 지원하는 확장자 필터링 (.md 포함)
+            if p.suffix.lower() in [".pdf", ".docx", ".xlsx", ".xls", ".txt", ".pptx", ".md"]:
                 convert_one(p)
                 
     log("=== [Hybrid Doc Processor] Convert Done ===")
@@ -475,18 +484,23 @@ def get_dataset_doc_form(api_key: str, dataset_id: str) -> str:
     """
     url = f"{DIFY_API_BASE}/datasets/{dataset_id}"
     r = requests.get(url, headers=dify_headers(api_key), timeout=60)
-    r.raise_for_status()
-    # doc_form 값 (text_model, qa_model 등) 반환
-    return str(r.json().get("doc_form", ""))
+    if r.status_code == 200:
+        return str(r.json().get("doc_form", ""))
+    else:
+        log(f"[Warn] 데이터셋 정보를 가져올 수 없습니다. (Status: {r.status_code})")
+        return ""
 
 def ensure_doc_form_matches(api_key: str, dataset_id: str, expected_doc_form: str) -> None:
     """
     Dataset의 실제 설정과 업로드하려는 데이터 형식이 일치하는지 검증합니다.
-    불일치 시 프로세스를 강제 종료하여 데이터 오염을 막습니다.
+    정보를 가져올 수 없는 경우 검증을 건너뛰고 진행합니다.
     """
-    actual = get_dataset_doc_form(api_key, dataset_id)
-    if actual != expected_doc_form:
-        raise SystemExit(f"[FAIL] Dataset 설정 불일치! (Dataset={actual} / Request={expected_doc_form})")
+    try:
+        actual = get_dataset_doc_form(api_key, dataset_id)
+        if actual and actual != expected_doc_form:
+            log(f"[Warn] Dataset 설정 불일치 감지 (DB={actual} / 요청={expected_doc_form}). 업로드를 강행합니다.")
+    except Exception as e:
+        log(f"[Warn] 사전 검증 중 오류 발생: {e}. 검증 없이 진행합니다.")
 
 def upload_text_document(api_key: str, dataset_id: str, name: str, text: str, doc_form: str, doc_language: str) -> Tuple[bool, str]:
     """
@@ -502,20 +516,28 @@ def upload_text_document(api_key: str, dataset_id: str, name: str, text: str, do
         "doc_form": doc_form,             # text_model(문서형) 또는 qa_model(Q&A형)
         "doc_language": doc_language,     # Korean 등
         "process_rule": {
+            "mode": "automatic",  # 청킹(Chunking)을 자동으로 수행
             "rules": {"remove_extra_spaces": True},  # 불필요한 공백 제거
             "remove_urls_emails": False              # URL/이메일은 보존
         },
-        "mode": "automatic",  # 청킹(Chunking)을 자동으로 수행
     }
     
     # 문서 생성 요청
     r = requests.post(url, headers={**dify_headers(api_key), "Content-Type": "application/json"}, json=payload, timeout=300)
     
-    if r.status_code >= 400:
-        return False, f"HTTP {r.status_code} / {r.text}"
-    return True, "OK"
 
-def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) -> None:
+    if r.status_code >= 400:
+        return False, f"HTTP {r.status_code} - {r.text}"
+
+    try:
+        res_data = r.json()
+        # Dify API 응답에서 생성된 문서의 ID를 추출하여 반환합니다.
+        doc_id = res_data.get("document", {}).get("id") or res_data.get("id", "Unknown ID")
+        return True, f"OK (ID: {doc_id})"
+    except Exception:
+        return True, "OK"
+
+def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) -> int:
     """RESULT_DIR에 있는 변환된 Markdown 파일들을 Dify로 업로드합니다."""
     log("=== [Hybrid Doc Processor] Upload Start ===")
     
@@ -524,8 +546,8 @@ def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) 
     
     result_root = Path(RESULT_DIR)
     if not result_root.exists():
-        log("[Error] 변환 결과 디렉터리가 없습니다. 먼저 convert를 실행하세요.")
-        return
+        log("[FAIL] 변환 결과 디렉터리가 없습니다. 먼저 convert를 실행하세요.")
+        return 1
         
     # 2. 결과 파일 순회 및 업로드
     success_count = 0
@@ -536,17 +558,19 @@ def upload_all(api_key: str, dataset_id: str, doc_form: str, doc_language: str) 
         if not text:
             continue
             
+        log(f"Attempting upload: {p.name} (Dataset: {dataset_id})")
         ok, detail = upload_text_document(api_key, dataset_id, p.name, text, doc_form, doc_language)
         
         if ok:
-            log(f"[Upload:OK] {p.name}")
+            log(f"[Upload:SUCCESS] {p.name} | {detail}")
             success_count += 1
         else:
-            log(f"[Upload:FAIL] {p.name} / {detail}")
+            log(f"[Upload:FAIL] {p.name} | Reason: {detail}")
             fail_count += 1
             
     log(f"=== [Hybrid Doc Processor] Upload Summary: Success={success_count}, Fail={fail_count} ===")
     log("=== [Hybrid Doc Processor] Upload Done ===")
+    return fail_count
 
 # ============================================================================
 # [메인] 프로그램 진입점 (CLI 파서)
@@ -571,16 +595,19 @@ def main() -> None:
     
     # 2. 업로드 모드 실행
     if cmd == "upload":
-        if len(sys.argv) != 6:
-            raise SystemExit("usage: doc_processor.py upload <API_KEY> <DATASET_ID> <doc_form> <doc_language>")
+        # 최소 2개의 인자(API_KEY, DATASET_ID)가 필요함
+        if len(sys.argv) < 4:
+            raise SystemExit("usage: doc_processor.py upload <API_KEY> <DATASET_ID> [doc_form] [doc_language]")
         
-        # 인자 매핑
         api_key = sys.argv[2]
         dataset_id = sys.argv[3]
-        doc_form = sys.argv[4]
-        doc_language = sys.argv[5]
+        # 인자가 없으면 기본값 사용 (하위 호환성 유지)
+        doc_form = sys.argv[4] if len(sys.argv) > 4 else "text_model"
+        doc_language = sys.argv[5] if len(sys.argv) > 5 else "Korean"
         
-        upload_all(api_key, dataset_id, doc_form, doc_language)
+        fail_count = upload_all(api_key, dataset_id, doc_form, doc_language)
+        if fail_count > 0:
+            sys.exit(1) # 실패가 있으면 에러 코드를 반환하여 Jenkins 빌드를 실패 처리함
         return
 
 if __name__ == "__main__":

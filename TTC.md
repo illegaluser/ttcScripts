@@ -822,12 +822,12 @@ def upload_text_document(api_key: str, dataset_id: str, name: str, text: str, do
         "doc_form": doc_form,
         "doc_language": doc_language,
         "process_rule": {
+            "mode": "automatic",  # 자동 청크 분할
             "rules": {
                 "remove_extra_spaces": True,  # 불필요한 공백 제거
             },
             "remove_urls_emails": False,  # URL/이메일 유지
         },
-        "mode": "automatic",  # 자동 청크 분할
     }
     
     r = requests.post(
@@ -863,12 +863,12 @@ def upload_file_document(api_key: str, dataset_id: str, file_path: Path, doc_for
         "doc_form": doc_form,
         "doc_language": doc_language,
         "process_rule": {
+            "mode": "automatic",
             "rules": {
                 "remove_extra_spaces": True,
             },
             "remove_urls_emails": False,
         },
-        "mode": "automatic",
     }
     
     # multipart/form-data 형식으로 파일과 메타데이터 전송
@@ -2936,10 +2936,13 @@ pipeline {
                 echo "[Clone] Git 레포지토리 클론 시작: ${params.REPO_URL}"
                 sh '''
                 set -e
+                # localhost 입력 시 컨테이너 내부 통신용 주소(gitlab)로 자동 변환
+                INTERNAL_URL=$(echo "${params.REPO_URL}" | sed 's/localhost/gitlab/g')
+                REPO_NAME=$(basename "${INTERNAL_URL}" .git)
                 # 기존 디렉터리 삭제
                 rm -rf ${WORKSPACE_CODES}/*
                 # Git 클론
-                git clone "${REPO_URL}" ${WORKSPACE_CODES}/repo
+                git clone "${INTERNAL_URL}" ${WORKSPACE_CODES}/$REPO_NAME
                 echo "[Clone] 완료"
                 '''
             }
@@ -2949,16 +2952,21 @@ pipeline {
         // Stage 2: 코드 컨텍스트 빌드
         // - repo_context_builder.py 실행
         // - 디렉터리 트리 + README/package.json 등 주요 파일 내용 추출
-        // - context.md 파일 생성
+        // - context-yymmdd-.md 파일 생성 (스크립트 내부 자동 처리)
         // ====================================================================
         stage('2. Build Context') {
             steps {
                 echo "[Build] 레포지토리 컨텍스트 생성 시작"
                 sh '''
                 set -e
+                # URL 변환 로직 동일 적용
+                INTERNAL_URL=$(echo "${params.REPO_URL}" | sed 's/localhost/gitlab/g')
+                REPO_NAME=$(basename "${INTERNAL_URL}" .git)
+                # 이전 빌드 파일 삭제 (Dify 중복 업로드 방지)
+                rm -rf ${RESULT_DIR}/*
                 python3 ${SCRIPTS_DIR}/repo_context_builder.py \
-                    --repo_root ${WORKSPACE_CODES}/repo \
-                    --out ${RESULT_DIR}/context.md
+                    --repo_root ${WORKSPACE_CODES}/$REPO_NAME \
+                    --out ${RESULT_DIR}
                 echo "[Build] 완료"
                 '''
             }
@@ -3224,7 +3232,13 @@ pipeline {
                     string(credentialsId: "dify-dataset-id", variable: "DIFY_DATASET_ID")
                 ]) {
                     echo "[Upload] Dify 지식베이스 전송 시작"
-                    sh "python3 ${SCRIPTS_DIR}/doc_processor.py upload \"$DIFY_DATASET_ID\" \"$DIFY_API_KEY\" \"$DIFY_DOC_FORM\""
+                    sh """
+                    python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                        "${DIFY_API_KEY}" \
+                        "${DIFY_DATASET_ID}" \
+                        "${DIFY_DOC_FORM}" \
+                        "Korean"
+                    """
                 }
             }
         }
