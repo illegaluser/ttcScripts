@@ -169,31 +169,21 @@ class LocatorResolver:
             return False
 
     def resolve(self, target: IntentTarget):
-        # 0. Selector (Playwright 직접 셀렉터가 제공된 경우 최우선)
-        if target.selector:
-            loc = self.page.locator(target.selector)
-            if self._try_visible(loc): return loc
-
-        # 1. Role + Name (유연한 매칭 적용)
+        # 1. Role + Name (가장 정확한 방법)
         if target.role and target.name:
-            loc = self.page.get_by_role(target.role, name=target.name, exact=False)
+            loc = self.page.get_by_role(target.role, name=target.name)
             if self._try_visible(loc): return loc
-            
-            # [추가] 이름이 안 맞더라도 해당 Role이 페이지에 하나뿐이라면 선택 (구글/네이버 검색창 대응)
-            loc_role_only = self.page.get_by_role(target.role)
-            if loc_role_only.count() == 1 and self._try_visible(loc_role_only):
-                return loc_role_only
 
         # 2. 유연한 텍스트 기반 탐색 (Name, Text, Label, Title, Placeholder 중 하나라도 있으면 시도)
         search_term = target.name or target.text or target.label or target.title
         if search_term:
-            # 구글/네이버 대응을 위해 Placeholder와 Title 탐색 순위 상향
+            # Label, Title, Placeholder, Text 순으로 부분 일치 탐색
             for method in [self.page.get_by_label, self.page.get_by_title, 
                            self.page.get_by_placeholder, self.page.get_by_text]:
                 loc = method(search_term, exact=False)
                 if self._try_visible(loc): return loc
             
-            # [Fallback] 검색어가 'q'나 'input' 같은 단순 문자열일 경우 CSS 선택자로 간주
+            # [Fallback] CSS 선택자로 간주하여 마지막 시도
             try:
                 loc = self.page.locator(search_term)
                 if self._try_visible(loc): return loc
@@ -367,7 +357,6 @@ class ZeroTouchAgent:
                 elif action == "double_click": code.append(f"        {loc}.first.dblclick()")
                 elif action == "hover": code.append(f"        {loc}.first.hover()")
                 elif action == "fill": code.append(f"        {loc}.first.fill('{value}')")
-                elif action == "press_sequential": code.append(f"        {loc}.first.press_sequential('{value}', delay=100)")
                 elif action == "select_option": code.append(f"        {loc}.first.select_option(value='{value}')")
                 elif action == "scroll": code.append(f"        {loc}.first.scroll_into_view_if_needed()")
                 elif action == "assert_visible": code.append(f"        {loc}.first.wait_for(state='visible')")
@@ -391,7 +380,6 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
 - hover: 마우스 오버 (target)
 - fill: 텍스트 입력 (target, value=text)
 - select_option: 드롭다운 선택 (target, value=option_value)
-- press_sequential: 순차적 키 입력 (target, value=text) - fill이 안될 때 사용
 - check: 체크박스 체크 (target)
 - press_key: 키보드 입력 (value="Enter" 등)
 - scroll: 해당 요소가 보이게 스크롤 (target)
@@ -404,7 +392,6 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
 [규칙]
 1. target은 객체 형태 {{"role": "...", "name": "..."}}를 권장함.
 2. Google/Naver 검색창은 보통 role="combobox"임.
-3. Google/Naver 검색어 입력 시 봇 탐지 방지를 위해 반드시 action="press_sequential"을 사용한다.
 4. Google 검색 실행은 action="press_key", value="Enter" 사용.
 5. fallback_targets 2개 이상 포함.
 6. 출력은 JSON 배열만.
@@ -455,7 +442,6 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 target = IntentTarget.from_dict(target_data)
                 loc = resolver.resolve(target)
                 loc.first.focus(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(200)
                 loc.first.press(key_name)
             else:
                 page.keyboard.press(key_name)
@@ -465,7 +451,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         # 3. 요소 타겟팅이 필요한 액션들
         target_actions = [
             "click", "double_click", "hover", "fill", "check", 
-            "select_option", "scroll", "assert_text", "assert_visible", "press_sequential"
+            "select_option", "scroll", "assert_text", "assert_visible"
         ]
         
         if action in target_actions:
@@ -486,19 +472,11 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             # (2) 입력 및 선택
             elif action == "fill":
                 loc.first.focus(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(100)
                 loc.first.fill(str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
             elif action == "check":
                 loc.first.check(timeout=DEFAULT_TIMEOUT_MS)
             elif action == "select_option":
                 loc.first.select_option(value=str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
-            
-            # (2.5) 순차 입력 (실제 키보드 타이핑 시뮬레이션)
-            elif action == "press_sequential":
-                loc.first.focus(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(100)
-                loc.first.press_sequential(str(value or ""), delay=100, timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(500)
 
             # (3) 스크롤
             elif action == "scroll":
@@ -510,6 +488,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 loc.first.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
             elif action == "assert_text":
                 expected = str(value or "")
+                loc.first.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
                 actual = loc.first.inner_text()
                 if expected not in actual:
                     raise AssertionError(f"Text mismatch. Expected '{expected}' in '{actual}'")
@@ -628,7 +607,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 except Exception as e:
                     self._log_step_event({"phase": "exec", "step": sid, "action": action, "event": "fail", "error": str(e)})
                     # Assertion 실패는 Healing 대상이 아니지만, 요소를 못 찾은 경우는 Healing 시도
-                    if action in ["click", "fill", "check", "hover", "select_option", "assert_text", "assert_visible", "press_sequential"]:
+                    if action in ["click", "fill", "check", "hover", "select_option", "assert_text", "assert_visible", "press_key"]:
                         ok, heal_stage = self._heal_step(page, resolver, step, action, str(e))
                         if not ok: status = "FAIL"
                     else: status = "FAIL"
