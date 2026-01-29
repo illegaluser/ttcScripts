@@ -169,12 +169,17 @@ class LocatorResolver:
             return False
 
     def resolve(self, target: IntentTarget):
-        # 1. Role + Name (가장 정확한 방법)
+        # 0. Selector (Playwright 직접 셀렉터가 제공된 경우 최우선)
+        if target.selector:
+            loc = self.page.locator(target.selector)
+            if self._try_visible(loc): return loc
+
+        # 1. Role + Name (유연한 매칭 적용)
         if target.role and target.name:
-            loc = self.page.get_by_role(target.role, name=target.name)
+            loc = self.page.get_by_role(target.role, name=target.name, exact=False)
             if self._try_visible(loc): return loc
             
-            # [추가] 이름이 완전히 일치하지 않아도 해당 Role이 페이지에 하나뿐이라면 선택 (구글 검색창 대응)
+            # [추가] 이름이 안 맞더라도 해당 Role이 페이지에 하나뿐이라면 선택 (구글/네이버 검색창 대응)
             loc_role_only = self.page.get_by_role(target.role)
             if loc_role_only.count() == 1 and self._try_visible(loc_role_only):
                 return loc_role_only
@@ -449,6 +454,8 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             if target_data:
                 target = IntentTarget.from_dict(target_data)
                 loc = resolver.resolve(target)
+                loc.first.focus(timeout=DEFAULT_TIMEOUT_MS)
+                page.wait_for_timeout(200)
                 loc.first.press(key_name)
             else:
                 page.keyboard.press(key_name)
@@ -458,7 +465,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         # 3. 요소 타겟팅이 필요한 액션들
         target_actions = [
             "click", "double_click", "hover", "fill", "check", 
-            "select_option", "scroll", "assert_text", "assert_visible"
+            "select_option", "scroll", "assert_text", "assert_visible", "press_sequential"
         ]
         
         if action in target_actions:
@@ -478,7 +485,8 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             
             # (2) 입력 및 선택
             elif action == "fill":
-                loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
+                loc.first.focus(timeout=DEFAULT_TIMEOUT_MS)
+                page.wait_for_timeout(100)
                 loc.first.fill(str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
             elif action == "check":
                 loc.first.check(timeout=DEFAULT_TIMEOUT_MS)
@@ -487,7 +495,8 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             
             # (2.5) 순차 입력 (실제 키보드 타이핑 시뮬레이션)
             elif action == "press_sequential":
-                loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
+                loc.first.focus(timeout=DEFAULT_TIMEOUT_MS)
+                page.wait_for_timeout(100)
                 loc.first.press_sequential(str(value or ""), delay=100, timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(500)
 
