@@ -3122,9 +3122,9 @@ pipeline {
                     sh '''
                     set -e
                     python3 ${SCRIPTS_DIR}/gitlab_issue_creator.py \
-                        --gitlab-api-base "${GITLAB_API_BASE}" \
+                        --gitlab-host-url "http://gitlab:8929" \
                         --gitlab-token "${GITLAB_TOKEN}" \
-                        --project-path "${GITLAB_PROJECT_PATH}" \
+                        --gitlab-project "${params.GITLAB_PROJECT_PATH}" \
                         --input "${WORK_DIR}/llm_analysis.jsonl" \
                         --output "${WORK_DIR}/gitlab_issues_created.json"
                     '''

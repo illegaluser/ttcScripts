@@ -1282,7 +1282,7 @@ pipeline {
         stage('Export') {
             steps {
                 withCredentials([string(credentialsId: 'sonarqube-token', variable: 'TOK')]) {
-                    sh "python3 ${SCRIPTS_DIR}/sonar_issue_exporter.py --sonar-host-url \"${SONAR_HOST}\" --sonar-public-url \"${SONAR_PUB}\" --sonar-token \"$TOK\" --project-key \"${params.SONAR_PROJECT_KEY}\" --output \"${WORK_DIR}/sonar_issues.json\""
+                    sh "python3 ${SCRIPTS_DIR}/gitlab_issue_creator.py --gitlab-host-url \"http://gitlab:8929\" --gitlab-token \"\$G_TOK\" --gitlab-project \"${params.GITLAB_PROJECT_PATH}\" --input \"${WORK_DIR}/llm_analysis.jsonl\" --output \"${WORK_DIR}/gitlab_issues_created.json\""
                 }
             }
         }
@@ -1297,6 +1297,7 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: 'gitlab-access-token', variable: 'G_TOK')]) {
                     sh "python3 ${SCRIPTS_DIR}/gitlab_issue_creator.py --gitlab-api-base \"${GITLAB_API}\" --gitlab-token \"$G_TOK\" --project-path \"${params.GITLAB_PROJECT_PATH}\" --input \"${WORK_DIR}/llm_analysis.jsonl\" --output \"${WORK_DIR}/gitlab_issues_created.json\""
+                    sh "python3 ${SCRIPTS_DIR}/gitlab_issue_creator.py --gitlab-host-url \"http://gitlab:8929\" --gitlab-token \"\$G_TOK\" --gitlab-project \"${params.GITLAB_PROJECT_PATH}\" --input \"${WORK_DIR}/llm_analysis.jsonl\" --output \"${WORK_DIR}/gitlab_issues_created.json\""
                 }
             }
         }
