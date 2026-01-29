@@ -157,7 +157,7 @@ class LocatorResolver:
         if target.text:
             loc = self.page.get_by_text(target.text, exact=False)
             if self._try_visible(loc): return loc
-            # [Fallback] 텍스트로 찾지 못한 경우, 문자열을 CSS 선택자로 간주하여 재시도
+            # [Fallback] 텍스트로 찾지 못한 경우, 문자열을 CSS 선택자로 간주하여 재시도 (Google 검색창 등 대응)
             try:
                 loc = self.page.locator(target.text)
                 if self._try_visible(loc): return loc
@@ -463,6 +463,13 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 locale="ko-KR"
             )
             page = context.new_page()
+            
+            # [Stealth] 봇 감지 우회를 위한 스크립트 주입
+            # navigator.webdriver 속성을 제거하여 자동화 도구임을 숨깁니다.
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            # 추가적인 봇 탐지 방지 헤더 설정
+            context.set_extra_http_headers({"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"})
+
             resolver = LocatorResolver(page, FAST_TIMEOUT_MS)
 
             for idx, step in enumerate(healed_scenario, start=1):
