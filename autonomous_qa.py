@@ -157,6 +157,11 @@ class LocatorResolver:
         if target.text:
             loc = self.page.get_by_text(target.text, exact=False)
             if self._try_visible(loc): return loc
+            # [Fallback] 텍스트로 찾지 못한 경우, 문자열을 CSS 선택자로 간주하여 재시도
+            try:
+                loc = self.page.locator(target.text)
+                if self._try_visible(loc): return loc
+            except: pass
         if target.testid:
             loc = self.page.locator(f"[data-testid='{target.testid}']")
             if self._try_visible(loc): return loc
@@ -257,7 +262,7 @@ def build_html_report(rows: List[Dict[str, Any]]) -> str:
 
 class ZeroTouchAgent:
     def __init__(self, url: str, srs_text: str, out_dir: str, ollama_host: str, model: str):
-        self.url = url
+        self.url = sanitize_url(url)
         self.srs_text = srs_text
         self.out_dir = out_dir
         self.ollama_host = ollama_host
@@ -339,7 +344,13 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             return
         if action == "press_key":
             key_name = str(value or "Enter")
-            page.keyboard.press(key_name)
+            target_data = step.get("target")
+            if target_data:
+                target = IntentTarget.from_dict(target_data)
+                loc = resolver.resolve(target)
+                loc.first.press(key_name)
+            else:
+                page.keyboard.press(key_name)
             page.wait_for_timeout(1000)
             return
 
