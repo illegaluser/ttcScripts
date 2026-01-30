@@ -404,9 +404,12 @@ class ZeroTouchAgent:
             "        )",
             f"        context = browser.new_context(viewport={{'width': 1920, 'height': 1080}}, user_agent='{REAL_USER_AGENT}', locale='ko-KR')",
             "        page = context.new_page()",
-            "        # Full Stealth suite to bypass reCAPTCHA and bot detection",
+            "        # Enhanced Stealth suite to bypass reCAPTCHA and bot detection",
             "        page.add_init_script(\"\"\"",
-            "            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});",
+            "            // Suppress navigator.webdriver",
+            "            Object.defineProperty(navigator, 'webdriver', {get: () => false});",
+            "            delete Object.getPrototypeOf(navigator).webdriver;",
+            "            ",
             "            window.chrome = { runtime: {} };",
             "            const originalQuery = window.navigator.permissions.query;",
             "            window.navigator.permissions.query = (parameters) => (",
@@ -417,13 +420,22 @@ class ZeroTouchAgent:
             "            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });",
             "            Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });",
             "            ",
-            "            // Mask WebGL Vendor/Renderer",
-            "            const getParameter = WebGLRenderingContext.prototype.getParameter;",
-            "            WebGLRenderingContext.prototype.getParameter = function(parameter) {",
-            "                if (parameter === 37445) return 'Intel Inc.';",
-            "                if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';",
-            "                return getParameter.apply(this, arguments);",
+            "            // Mask WebGL and WebGL2 Vendor/Renderer",
+            "            const maskWebGL = (proto) => {",
+            "                const getParameter = proto.getParameter;",
+            "                proto.getParameter = function(parameter) {",
+            "                    if (parameter === 37445) return 'Intel Inc.';",
+            "                    if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';",
+            "                    return getParameter.apply(this, arguments);",
+            "                };",
             "            };",
+            "            maskWebGL(WebGLRenderingContext.prototype);",
+            "            maskWebGL(WebGL2RenderingContext.prototype);",
+            "            ",
+            "            // Fix Headless window properties",
+            "            Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });",
+            "            Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });",
+            "            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });",
             "            ",
             "            // Add Canvas Fingerprinting protection",
             "            const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;",
@@ -432,10 +444,6 @@ class ZeroTouchAgent:
             "                imageData.data[0] = imageData.data[0] + (Math.random() > 0.5 ? 1 : -1);",
             "                return imageData;",
             "            };",
-            "            ",
-            "            // Suppress Notification and Chrome Runtime checks",
-            "            delete Object.getPrototypeOf(navigator).webdriver;",
-            "            window.chrome = { runtime: {} };",
             "            ",
             "            // Add fake hardware info",
             "            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });",
@@ -775,11 +783,11 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         rows, healed_scenario = [], json.loads(json.dumps(scenario))
         
         with sync_playwright() as p:
-            # 에이전트 실행 시에도 자동화 플래그 제거
+            # 에이전트 실행 시에도 자동화 플래그 제거 및 스텔스 인자 추가
             browser = p.chromium.launch(
                 headless=DEFAULT_HEADLESS, 
                 slow_mo=DEFAULT_SLOW_MO_MS,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-infobars']
             )
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
@@ -788,9 +796,12 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             )
             page = context.new_page()
             
-            # [Enhanced Stealth] 봇 감지 우회를 위한 스크립트 주입
+            # [Enhanced Stealth] 봇 감지 우회를 위한 스크립트 주입 (Headless 대응 강화)
             page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                // Suppress navigator.webdriver
+                Object.defineProperty(navigator, 'webdriver', {get: () => false});
+                delete Object.getPrototypeOf(navigator).webdriver;
+                
                 window.chrome = { runtime: {} };
                 const originalQuery = window.navigator.permissions.query;
                 window.navigator.permissions.query = (parameters) => (
@@ -801,13 +812,22 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
                 
-                // Mask WebGL Vendor/Renderer (Google often checks this)
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) return 'Intel Inc.';
-                    if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
-                    return getParameter.apply(this, arguments);
+                // Mask WebGL and WebGL2 Vendor/Renderer
+                const maskWebGL = (proto) => {
+                    const getParameter = proto.getParameter;
+                    proto.getParameter = function(parameter) {
+                        if (parameter === 37445) return 'Intel Inc.';
+                        if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+                        return getParameter.apply(this, arguments);
+                    };
                 };
+                maskWebGL(WebGLRenderingContext.prototype);
+                maskWebGL(WebGL2RenderingContext.prototype);
+                
+                // Fix Headless window properties
+                Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+                Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+                Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
                 
                 // Canvas Fingerprinting protection
                 const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
@@ -816,10 +836,6 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     imageData.data[0] = imageData.data[0] + (Math.random() > 0.5 ? 1 : -1);
                     return imageData;
                 };
-
-                // Suppress Notification and Chrome Runtime checks
-                delete Object.getPrototypeOf(navigator).webdriver;
-                window.chrome = { runtime: {} };
                 
                 // Add fake hardware info
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
