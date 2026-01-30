@@ -397,47 +397,65 @@ class ZeroTouchAgent:
             "",
             "def run_regression():",
             "    with sync_playwright() as p:",
-            "        # Disable automation flags that reCAPTCHA detects",
+            "        # Extreme Stealth: Disable internal automation flags that reCAPTCHA detects",
             "        browser = p.chromium.launch(",
             "            headless=False, ",
-            "            args=['--disable-blink-features=AutomationControlled', '--no-sandbox']",
+            "            args=[",
+            "                '--disable-blink-features=AutomationControlled',",
+            "                '--no-sandbox',",
+            "                '--disable-infobars',",
+            "                '--window-position=0,0',",
+            "                '--ignore-certificate-errors',",
+            "                '--ignore-certificate-errors-spki-list',",
+            "                '--disable-extensions'",
+            "            ]",
             "        )",
             f"        context = browser.new_context(viewport={{'width': 1920, 'height': 1080}}, user_agent='{REAL_USER_AGENT}', locale='ko-KR')",
             "        page = context.new_page()",
-            "        # Enhanced Stealth suite to bypass reCAPTCHA and bot detection",
+            "        # Ultimate Stealth suite to bypass reCAPTCHA and bot detection",
             "        page.add_init_script(\"\"\"",
-            "            // Suppress navigator.webdriver",
-            "            Object.defineProperty(navigator, 'webdriver', {get: () => false});",
-            "            delete Object.getPrototypeOf(navigator).webdriver;",
+            "            // 1. Hide automation signs",
+            "            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});",
+            "            if (Object.getPrototypeOf(navigator).hasOwnProperty('webdriver')) {",
+            "                delete Object.getPrototypeOf(navigator).webdriver;",
+            "            }",
             "            ",
-            "            window.chrome = { runtime: {} };",
-            "            const originalQuery = window.navigator.permissions.query;",
+            "            // 2. Mock Chrome runtime with full properties",
+            "            window.chrome = {",
+            "                runtime: {},",
+            "                app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, getDetails: () => {}, getIsInstalled: () => false },",
+            "                csi: () => {},",
+            "                loadTimes: () => {}",
+            "            };",
+            "            ",
+            "            // 3. Fix Permissions query",
             "            window.navigator.permissions.query = (parameters) => (",
             "                parameters.name === 'notifications' ?",
             "                Promise.resolve({ state: Notification.permission }) :",
             "                originalQuery(parameters)",
             "            );",
-            "            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });",
+            "            ",
+            "            // 4. Mock Plugins and MimeTypes",
+            "            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });",
+            "            Object.defineProperty(navigator, 'mimeTypes', { get: () => [1, 2, 3, 4, 5], configurable: true });",
             "            Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });",
+            "            Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });",
+            "            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });",
             "            ",
-            "            // Mask WebGL and WebGL2 Vendor/Renderer",
-            "            const maskWebGL = (proto) => {",
-            "                const getParameter = proto.getParameter;",
-            "                proto.getParameter = function(parameter) {",
-            "                    if (parameter === 37445) return 'Intel Inc.';",
-            "                    if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';",
-            "                    return getParameter.apply(this, arguments);",
-            "                };",
+            "            // 5. Mask WebGL Vendor/Renderer",
+            "            const getParameter = WebGLRenderingContext.prototype.getParameter;",
+            "            WebGLRenderingContext.prototype.getParameter = function(parameter) {",
+            "                if (parameter === 37445) return 'Intel Inc.';",
+            "                if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';",
+            "                return getParameter.apply(this, arguments);",
             "            };",
-            "            maskWebGL(WebGLRenderingContext.prototype);",
-            "            maskWebGL(WebGL2RenderingContext.prototype);",
             "            ",
-            "            // Fix Headless window properties",
+            "            // 6. Fix Headless window properties",
             "            Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });",
             "            Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });",
-            "            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });",
+            "            Object.defineProperty(window, 'devicePixelRatio', { get: () => 1 });",
             "            ",
-            "            // Add Canvas Fingerprinting protection",
+            "            // 7. Add Canvas Fingerprinting protection",
             "            const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;",
             "            CanvasRenderingContext2D.prototype.getImageData = function (x, y, w, h) {",
             "                const imageData = originalGetImageData.apply(this, arguments);",
@@ -445,7 +463,7 @@ class ZeroTouchAgent:
             "                return imageData;",
             "            };",
             "            ",
-            "            // Add fake hardware info",
+            "            // 8. Add fake hardware info",
             "            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });",
             "            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });",
             "        \"\"\")",
@@ -462,11 +480,11 @@ class ZeroTouchAgent:
             
             if action == "navigate":
                 code.append(f"        page.goto('{value or self.url}', wait_until='domcontentloaded')")
-                code.append("        page.wait_for_timeout(random.randint(2000, 4000))")
+                code.append("        page.wait_for_timeout(random.randint(3000, 6000))")
                 code.append("        # CAPTCHA Detection")
                 code.append("        if 'google.com/sorry' in page.url or 'captcha' in page.content().lower():")
                 code.append("            print('!! CAPTCHA detected. Please solve it manually.')")
-                code.append("            page.wait_for_timeout(30000)")
+                code.append("            page.wait_for_timeout(60000)")
             elif action == "go_back": code.append("        page.go_back()")
             elif action == "go_forward": code.append("        page.go_forward()")
             elif action == "wait": code.append(f"        page.wait_for_timeout({value or 1500})")
@@ -488,7 +506,7 @@ class ZeroTouchAgent:
                     code.append(f"        {loc}.first.fill('')")
                     code.append(f"        for char in '{value}':")
                     code.append(f"            {loc}.first.press(char)")
-                    code.append(f"            page.wait_for_timeout(random.randint(150, 350))")
+                    code.append(f"            page.wait_for_timeout(random.randint(200, 800))")
                 elif action == "select_option": code.append(f"        {loc}.first.select_option(value='{value}')")
                 elif action == "scroll": code.append(f"        {loc}.first.scroll_into_view_if_needed()")
                 elif action == "assert_visible": code.append(f"        {loc}.first.wait_for(state='visible')")
@@ -641,7 +659,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 # 안정성을 위해 입력 전 클릭하여 포커스 확보
                 self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(random.randint(400, 800))
                 target_el.press(key_name)
             else:
                 page.keyboard.press(key_name)
@@ -682,12 +700,12 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 # 안정성을 위해 입력 전 클릭하여 포커스 확보
                 self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(300)
+                page.wait_for_timeout(random.randint(500, 1000))
                 # Human-like typing: Clear first, then type with manual loop
                 target_el.fill("")
                 for char in str(value or ""):
                     target_el.press(char)
-                    page.wait_for_timeout(random.randint(150, 350))
+                    page.wait_for_timeout(random.randint(200, 800))
             elif action == "check":
                 self._capture_selector(loc.first, step)
                 loc.first.check(timeout=DEFAULT_TIMEOUT_MS)
@@ -783,11 +801,17 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         rows, healed_scenario = [], json.loads(json.dumps(scenario))
         
         with sync_playwright() as p:
-            # 에이전트 실행 시에도 자동화 플래그 제거 및 스텔스 인자 추가
+            # 에이전트 실행 시에도 자동화 플래그 제거 및 스텔스 인자 강화
             browser = p.chromium.launch(
                 headless=DEFAULT_HEADLESS, 
                 slow_mo=DEFAULT_SLOW_MO_MS,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-infobars']
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                    '--disable-infobars',
+                    '--window-position=0,0',
+                    '--disable-extensions'
+                ]
             )
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
@@ -796,40 +820,51 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             )
             page = context.new_page()
             
-            # [Enhanced Stealth] 봇 감지 우회를 위한 스크립트 주입 (Headless 대응 강화)
+            # [Enhanced Stealth] 봇 감지 우회를 위한 스크립트 주입
             page.add_init_script("""
-                // Suppress navigator.webdriver
-                Object.defineProperty(navigator, 'webdriver', {get: () => false});
-                delete Object.getPrototypeOf(navigator).webdriver;
+                // 1. Hide automation signs
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                if (Object.getPrototypeOf(navigator).hasOwnProperty('webdriver')) {
+                    delete Object.getPrototypeOf(navigator).webdriver;
+                }
                 
-                window.chrome = { runtime: {} };
-                const originalQuery = window.navigator.permissions.query;
+                // 2. Mock Chrome runtime with full properties
+                window.chrome = {
+                    runtime: {},
+                    app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, getDetails: () => {}, getIsInstalled: () => false },
+                    csi: () => {},
+                    loadTimes: () => {}
+                };
+                
+                // 3. Fix Permissions query
                 window.navigator.permissions.query = (parameters) => (
                     parameters.name === 'notifications' ?
                     Promise.resolve({ state: Notification.permission }) :
                     originalQuery(parameters)
                 );
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                
+                // 4. Mock Plugins and MimeTypes
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
+                Object.defineProperty(navigator, 'mimeTypes', { get: () => [1, 2, 3, 4, 5], configurable: true });
                 Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+                Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
                 
-                // Mask WebGL and WebGL2 Vendor/Renderer
-                const maskWebGL = (proto) => {
-                    const getParameter = proto.getParameter;
-                    proto.getParameter = function(parameter) {
-                        if (parameter === 37445) return 'Intel Inc.';
-                        if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
-                        return getParameter.apply(this, arguments);
-                    };
+                // 5. Mask WebGL Vendor/Renderer
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) return 'Intel Inc.';
+                    if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+                    return getParameter.apply(this, arguments);
                 };
-                maskWebGL(WebGLRenderingContext.prototype);
-                maskWebGL(WebGL2RenderingContext.prototype);
                 
-                // Fix Headless window properties
+                // 6. Fix Headless window properties
                 Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
                 Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+                Object.defineProperty(window, 'devicePixelRatio', { get: () => 1 });
                 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
                 
-                // Canvas Fingerprinting protection
+                // 7. Add Canvas Fingerprinting protection
                 const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
                 CanvasRenderingContext2D.prototype.getImageData = function (x, y, w, h) {
                     const imageData = originalGetImageData.apply(this, arguments);
@@ -837,7 +872,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     return imageData;
                 };
                 
-                // Add fake hardware info
+                // 8. Add fake hardware info
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
                 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
             """)
