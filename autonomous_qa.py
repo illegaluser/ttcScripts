@@ -397,7 +397,11 @@ class ZeroTouchAgent:
             "",
             "def run_regression():",
             "    with sync_playwright() as p:",
-            "        browser = p.chromium.launch(headless=False)",
+            "        # Disable automation flags that reCAPTCHA detects",
+            "        browser = p.chromium.launch(",
+            "            headless=False, ",
+            "            args=['--disable-blink-features=AutomationControlled', '--no-sandbox']",
+            "        )",
             f"        context = browser.new_context(viewport={{'width': 1920, 'height': 1080}}, user_agent='{REAL_USER_AGENT}', locale='ko-KR')",
             "        page = context.new_page()",
             "        # Full Stealth suite to bypass reCAPTCHA and bot detection",
@@ -420,6 +424,18 @@ class ZeroTouchAgent:
             "                if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';",
             "                return getParameter.apply(this, arguments);",
             "            };",
+            "            ",
+            "            // Add Canvas Fingerprinting protection",
+            "            const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;",
+            "            CanvasRenderingContext2D.prototype.getImageData = function (x, y, w, h) {",
+            "                const imageData = originalGetImageData.apply(this, arguments);",
+            "                imageData.data[0] = imageData.data[0] + (Math.random() > 0.5 ? 1 : -1);",
+            "                return imageData;",
+            "            };",
+            "            ",
+            "            // Suppress Notification and Chrome Runtime checks",
+            "            delete Object.getPrototypeOf(navigator).webdriver;",
+            "            window.chrome = { runtime: {} };",
             "            ",
             "            // Add fake hardware info",
             "            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });",
@@ -759,7 +775,12 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         rows, healed_scenario = [], json.loads(json.dumps(scenario))
         
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=DEFAULT_HEADLESS, slow_mo=DEFAULT_SLOW_MO_MS)
+            # 에이전트 실행 시에도 자동화 플래그 제거
+            browser = p.chromium.launch(
+                headless=DEFAULT_HEADLESS, 
+                slow_mo=DEFAULT_SLOW_MO_MS,
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
+            )
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent=REAL_USER_AGENT,
@@ -787,6 +808,18 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
                     return getParameter.apply(this, arguments);
                 };
+                
+                // Canvas Fingerprinting protection
+                const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+                CanvasRenderingContext2D.prototype.getImageData = function (x, y, w, h) {
+                    const imageData = originalGetImageData.apply(this, arguments);
+                    imageData.data[0] = imageData.data[0] + (Math.random() > 0.5 ? 1 : -1);
+                    return imageData;
+                };
+
+                // Suppress Notification and Chrome Runtime checks
+                delete Object.getPrototypeOf(navigator).webdriver;
+                window.chrome = { runtime: {} };
                 
                 // Add fake hardware info
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
