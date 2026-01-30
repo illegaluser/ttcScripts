@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import random
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -284,7 +285,7 @@ def filter_candidates_by_action(action: str, candidates: List[Dict[str, str]]) -
     if action in ["click", "double_click", "hover"]:
         allowed = {"button", "link", "menuitem", "tab", "checkbox", "radio", "img"}
         return [c for c in candidates if c.get("role") in allowed]
-    if action in ["fill", "press_sequential"]:
+    if action in ["fill"]:
         allowed = {"textbox", "searchbox", "combobox", "spinbutton", "textarea"}
         return [c for c in candidates if c.get("role") in allowed]
     return candidates
@@ -391,15 +392,39 @@ class ZeroTouchAgent:
         """성공한 시나리오를 바탕으로 독립 실행 가능한 Playwright 스크립트를 생성합니다."""
         code = [
             "import time",
+            "import random",
             "from playwright.sync_api import sync_playwright",
             "",
             "def run_regression():",
             "    with sync_playwright() as p:",
             "        browser = p.chromium.launch(headless=False)",
-            f"        context = browser.new_context(viewport={{'width': 1920, 'height': 1080}}, user_agent='{REAL_USER_AGENT}')",
+            f"        context = browser.new_context(viewport={{'width': 1920, 'height': 1080}}, user_agent='{REAL_USER_AGENT}', locale='ko-KR')",
             "        page = context.new_page()",
-            "        # Stealth script to bypass bot detection",
-            "        page.add_init_script(\"Object.defineProperty(navigator, 'webdriver', {get: () => undefined})\")",
+            "        # Full Stealth suite to bypass reCAPTCHA and bot detection",
+            "        page.add_init_script(\"\"\"",
+            "            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});",
+            "            window.chrome = { runtime: {} };",
+            "            const originalQuery = window.navigator.permissions.query;",
+            "            window.navigator.permissions.query = (parameters) => (",
+            "                parameters.name === 'notifications' ?",
+            "                Promise.resolve({ state: Notification.permission }) :",
+            "                originalQuery(parameters)",
+            "            );",
+            "            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });",
+            "            Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });",
+            "            ",
+            "            // Mask WebGL Vendor/Renderer",
+            "            const getParameter = WebGLRenderingContext.prototype.getParameter;",
+            "            WebGLRenderingContext.prototype.getParameter = function(parameter) {",
+            "                if (parameter === 37445) return 'Intel Inc.';",
+            "                if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';",
+            "                return getParameter.apply(this, arguments);",
+            "            };",
+            "            ",
+            "            // Add fake hardware info",
+            "            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });",
+            "            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });",
+            "        \"\"\")",
             ""
         ]
 
@@ -413,12 +438,19 @@ class ZeroTouchAgent:
             
             if action == "navigate":
                 code.append(f"        page.goto('{value or self.url}', wait_until='domcontentloaded')")
-                code.append("        page.wait_for_timeout(2000)")
+                code.append("        page.wait_for_timeout(random.randint(2000, 4000))")
+                code.append("        # CAPTCHA Detection")
+                code.append("        if 'google.com/sorry' in page.url or 'captcha' in page.content().lower():")
+                code.append("            print('!! CAPTCHA detected. Please solve it manually.')")
+                code.append("            page.wait_for_timeout(30000)")
             elif action == "go_back": code.append("        page.go_back()")
             elif action == "go_forward": code.append("        page.go_forward()")
             elif action == "wait": code.append(f"        page.wait_for_timeout({value or 1500})")
             elif action == "press_key":
+                code.append("        # Random delay before key press")
+                code.append("        page.wait_for_timeout(random.randint(300, 700))")
                 if target_data:
+                    code.append("        page.wait_for_timeout(300)")
                     loc_code = self._get_locator_code(target_data)
                     code.append(f"        {loc_code}.first.press('{value or 'Enter'}')")
                 else: code.append(f"        page.keyboard.press('{value or 'Enter'}')")
@@ -428,8 +460,11 @@ class ZeroTouchAgent:
                 elif action == "double_click": code.append(f"        {loc}.first.dblclick()")
                 elif action == "hover": code.append(f"        {loc}.first.hover()")
                 elif action == "fill":
-                    # 리그레션 스크립트에서는 결정론적 실행을 위해 직접 fill 수행
-                    code.append(f"        {loc}.first.fill('{value}')")
+                    code.append(f"        {loc}.first.click()")
+                    code.append(f"        {loc}.first.fill('')")
+                    code.append(f"        for char in '{value}':")
+                    code.append(f"            {loc}.first.press(char)")
+                    code.append(f"            page.wait_for_timeout(random.randint(150, 350))")
                 elif action == "select_option": code.append(f"        {loc}.first.select_option(value='{value}')")
                 elif action == "scroll": code.append(f"        {loc}.first.scroll_into_view_if_needed()")
                 elif action == "assert_visible": code.append(f"        {loc}.first.wait_for(state='visible')")
@@ -591,7 +626,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
 
         # 3. 요소 타겟팅이 필요한 액션들
         target_actions = [
-            "click", "double_click", "hover", "fill", "check", 
+            "click", "double_click", "hover", "fill", "check",
             "select_option", "scroll", "assert_text", "assert_visible"
         ]
         
@@ -623,8 +658,12 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 # 안정성을 위해 입력 전 클릭하여 포커스 확보
                 self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(200)
-                target_el.fill(str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
+                page.wait_for_timeout(300)
+                # Human-like typing: Clear first, then type with manual loop
+                target_el.fill("")
+                for char in str(value or ""):
+                    target_el.press(char)
+                    page.wait_for_timeout(random.randint(150, 350))
             elif action == "check":
                 self._capture_selector(loc.first, step)
                 loc.first.check(timeout=DEFAULT_TIMEOUT_MS)
@@ -728,8 +767,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             )
             page = context.new_page()
             
-            # [Stealth] 봇 감지 우회를 위한 스크립트 주입
-            # navigator.webdriver 속성을 제거하여 자동화 도구임을 숨깁니다.
+            # [Enhanced Stealth] 봇 감지 우회를 위한 스크립트 주입
             page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 window.chrome = { runtime: {} };
@@ -741,6 +779,18 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 );
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+                
+                // Mask WebGL Vendor/Renderer (Google often checks this)
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) return 'Intel Inc.';
+                    if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+                    return getParameter.apply(this, arguments);
+                };
+                
+                // Add fake hardware info
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
             """)
             # 추가적인 봇 탐지 방지 헤더 설정
             context.set_extra_http_headers({"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"})
