@@ -123,8 +123,8 @@ def sanitize_url(url: str) -> str:
 @dataclass
 class IntentTarget:
     """
-    UI 요소를 '의도(Intent)' 기반으로 찾기 위한 데이터 모델.
-    고정된 ID 대신 역할(Role), 이름(Name), 텍스트 등을 복합적으로 활용함.
+    UI 요소를 '의도(Intent)' 기반으로 찾기 위한 데이터 모델입니다.
+    고정된 ID 대신 역할(Role), 이름(Name), 텍스트 등을 복합적으로 활용하여 UI 변경에 강한 탐색을 지원합니다.
     """
     role: Optional[str] = None
     name: Optional[str] = None
@@ -180,8 +180,8 @@ class IntentTarget:
 
 class LocatorResolver:
     """
-    IntentTarget 정보를 바탕으로 실제 브라우저 내의 Playwright Locator를 찾아주는 클래스.
-    여러 탐색 전략을 순차적으로 시도하는 'Sequential Fast-Fail' 방식을 사용함.
+    IntentTarget 정보를 바탕으로 실제 브라우저 내의 Playwright Locator를 찾아주는 핵심 클래스입니다.
+    여러 탐색 전략을 순차적으로 시도하며, 실패 시 빠르게 다음 전략으로 넘어가는 방식을 사용합니다.
     """
     def __init__(self, page, fast_timeout_ms: int):
         self.page = page
@@ -197,7 +197,7 @@ class LocatorResolver:
 
     def resolve(self, target: IntentTarget):
         """
-        가장 정확한 방법(Role+Name)부터 유연한 방법(Text, Selector) 순으로 요소를 탐색.
+        우선순위에 따라 요소를 탐색합니다: 0.직접 셀렉터 -> 1.역할+이름 -> 2.텍스트/라벨 -> 3.플레이스홀더
         """
         # 0. Selector (Playwright 직접 셀렉터가 제공된 경우 최우선)
         if target.selector:
@@ -568,8 +568,11 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         append_jsonl(self.path_log, base)
 
     def _capture_selector(self, loc, step: Dict[str, Any]) -> None:
-        """성공적으로 찾은 요소의 고유한 CSS Selector를 추출하여 리그레션 테스트에서 재사용할 수 있게 함"""
-        """성공적으로 찾은 요소의 고유 셀렉터를 추출하여 시나리오에 저장합니다."""
+        """
+        성공적으로 찾은 요소의 고유한 CSS Selector를 추출하여 시나리오에 저장합니다.
+        이 정보는 나중에 생성되는 리그레션 스크립트에서 '의도 기반 탐색' 없이 즉시 요소를 타겟팅하는 데 사용됩니다.
+        특히 네이버/구글의 동적 ID(fdr- 등)를 감지하여 제외하는 지능형 경로 생성 로직이 포함되어 있습니다.
+        """
         try:
             if loc.count() == 0: return
             selector = loc.first.evaluate("""el => {
@@ -615,9 +618,8 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
 
     def _execute_action(self, page, resolver: LocatorResolver, step: Dict[str, Any]) -> None:
         """
-        Playwright를 사용하여 실제 브라우저 액션을 수행.
-        [확장된 액션 실행기]
-        다양한 브라우저 동작을 처리합니다.
+        Playwright를 사용하여 실제 브라우저 액션을 수행하는 실행기입니다.
+        단순 클릭/입력 외에도 리캡챠 우회를 위한 '인간다운 입력(Human-like typing)' 로직이 포함되어 있습니다.
         """
         action = step.get("action")
         value = step.get("value")
@@ -656,7 +658,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     inner = loc.first.locator("input, textarea, [contenteditable='true']").first
                     if inner.count() > 0: target_el = inner
 
-                # 안정성을 위해 입력 전 클릭하여 포커스 확보
+                # [중요] 안정성을 위해 입력 전 클릭하여 포커스를 확보하고 셀렉터를 박제합니다.
                 self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(random.randint(400, 800))
@@ -697,11 +699,11 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     inner = loc.first.locator("input, textarea, [contenteditable='true']").first
                     if inner.count() > 0: target_el = inner
                 
-                # 안정성을 위해 입력 전 클릭하여 포커스 확보
+                # [중요] 리캡챠 우회를 위한 인간다운 입력 시뮬레이션
                 self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(random.randint(500, 1000))
-                # Human-like typing: Clear first, then type with manual loop
+                # 기존 내용을 비우고, 글자마다 랜덤한 지연 시간을 두어 타이핑합니다.
                 target_el.fill("")
                 for char in str(value or ""):
                     target_el.press(char)

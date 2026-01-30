@@ -33,13 +33,13 @@ def log(msg: str) -> None:
 
 def refine_any_tech_blog(html_content):
     """
-    기술 블로그 본문만 남기고 소음을 최대한 제거한다.
-    - 1단계: article/.post-content/.entry-content/main 등 “본문”으로 추정되는 컨테이너를 우선 찾는다.
-      * 실패 시 body 전체를 사용해도 HTML 파싱이 중단되지 않게 한다.
-    - 2단계: nav/footer/sidebar/menu/ads/script/style/header처럼 본문과 무관한 요소는 통째로 제거한다.
-      * “decompose”를 써서 내용이 출력에 끼어들지 않도록 완전히 없앤다.
-    - 3단계: get_text(separator='\\n')로 텍스트를 뽑아 마크다운과 비슷한 줄바꿈을 유지한다.
-    - 4단계: 정규식으로 남은 URL/잡다한 표기를 제거한다.
+    HTML에서 본문 텍스트만 추출하고 광고, 메뉴 등 노이즈를 제거하는 핵심 정제 함수입니다.
+    
+    1. 본문 후보 영역 탐색: article, main 등 본문일 확률이 높은 태그를 우선 탐색합니다.
+    2. 노이즈 제거: nav, footer, sidebar 등 본문과 상관없는 UI 요소를 물리적으로 삭제(decompose)합니다.
+    3. 텍스트 추출: 줄바꿈을 유지하며 순수 텍스트만 뽑아냅니다.
+    4. 정규식 정제: 텍스트 내에 포함된 URL, 위키 편집 기호 등을 삭제하여 지식의 순도를 높입니다.
+    
       * [문구](http...)에서 링크만 제거하고 문구는 살린다.
       * 노출된 http://... 문자열은 모두 비운다.
       * 위키에서 흔한 [편집], [1] 같은 표기는 없애 깔끔하게 만든다.
@@ -49,7 +49,7 @@ def refine_any_tech_blog(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     log(f"Refining HTML content (Raw size: {len(html_content)} bytes)")
     
-    # 1. 본문 후보 영역 탐색 - 가장 내용이 많은 곳을 선택 (Skelter Labs 등 현대적 레이아웃 대응)
+    # [Step 1] 본문 후보 영역 탐색 - 텍스트 길이가 가장 긴 영역을 본문으로 간주합니다.
     content_area = None
     max_text_len = 0
     candidates = ['article', 'main', '.post-content', '.entry-content', '.content', '#content', 'section', '.post-body', '.prose']
@@ -72,7 +72,7 @@ def refine_any_tech_blog(html_content):
     if not content_area:
         return ""
 
-    # 2. 확실한 노이즈 요소 물리적 제거 (어떤 영역에서든 공통 적용)
+    # [Step 2] 확실한 노이즈 요소 제거 - 본문 내부에 섞인 네비게이션이나 광고 요소를 삭제합니다.
     unwanted_selectors = 'nav, footer, aside, .sidebar, .menu, .ads, script, style, header, .nav, .footer, .header, .bottom, .related, .comments'
     removed_count = 0
     for unwanted in content_area.select(unwanted_selectors):
@@ -80,7 +80,7 @@ def refine_any_tech_blog(html_content):
         removed_count += 1
     log(f"Removed {removed_count} noise elements.")
 
-    # 3. 텍스트 추출
+    # [Step 3] 텍스트 추출 - 개행 문자를 구분자로 사용하여 문단 구조를 유지합니다.
     text = content_area.get_text(separator='\n')
     log(f"Extracted text length: {len(text)} chars")
 

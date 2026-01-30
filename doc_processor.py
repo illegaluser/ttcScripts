@@ -115,10 +115,10 @@ def write_text(path: Path, content: str) -> None:
 
 def analyze_image_region(image_bytes: bytes, prompt: str) -> str:
     """
-    이미지 바이너리 데이터를 받아 Ollama Vision 모델에게 분석을 요청합니다.
+    이미지 데이터를 Ollama Vision 모델(Llama 3.2 Vision)에게 보내 분석 결과를 받습니다.
+    표(Table)나 차트처럼 텍스트 추출이 어려운 영역을 처리하는 데 사용됩니다.
     
     Args:
-        image_bytes: 분석할 이미지의 원본 바이트 데이터 (PNG/JPEG 등)
         prompt: Vision 모델에게 지시할 명령어 (예: "이 표를 마크다운으로 바꿔줘")
         
     Returns:
@@ -163,8 +163,10 @@ def analyze_image_region(image_bytes: bytes, prompt: str) -> str:
 
 def pdf_to_markdown_hybrid(pdf_path: Path) -> str:
     """
-    2-Pass Hybrid Pipeline을 구현한 핵심 함수입니다.
-    PDF의 각 페이지를 순회하며 텍스트와 비주얼 요소를 분리하여 처리하고 다시 합칩니다.
+    텍스트 추출과 비전 분석을 결합한 하이브리드 변환 엔진입니다.
+    1. 일반 텍스트는 PyMuPDF로 빠르게 추출합니다.
+    2. 표와 이미지는 캡처하여 Ollama Vision으로 정밀 분석합니다.
+    3. 모든 요소를 원래 문서의 좌표(Y축) 순서대로 재배치하여 읽기 순서를 복원합니다.
     """
     start_time = time.time()
     # PyMuPDF로 문서를 엽니다.

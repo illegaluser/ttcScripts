@@ -4070,20 +4070,18 @@ LLM이 새로운 `target`과 갱신된 `fallback_targets`를 제안한다.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =============================================================================
-# DSCORE-TTC Zero-Touch QA Agent (v2.7 - Full Action Set)
+# [프로젝트] DSCORE-TTC Zero-Touch QA Agent (v2.7 - Full Action Set)
 #
-# 목적
-# - 자연어 요구사항(SRS)을 입력받아 Intent 기반 테스트 시나리오를 생성한다.
-# - Playwright로 시나리오를 실행한다.
-# - UI 변경으로 실패하는 경우, 3단계 Self-Healing으로 복구를 시도한다.
-# - 클릭 후 새 탭/새 창이 열리는 경우를 감지하여 자동으로 제어권을 넘긴다.
-# - 테스트 실패 시 Jenkins가 알 수 있도록 실패 코드(Exit Code 1)를 반환합니다.
-# - 실행 결과를 Artifact(시나리오/치유 시나리오/로그/리포트/스크린샷)로 남긴다.
+# [변경 내역 v2.7]
+# - [Feature] 기능 테스트 필수 액션 대거 추가
+#   (hover, double_click, select_option, scroll, assert_text, assert_visible, go_back/forward)
+# - [Update] LLM 프롬프트에 새로운 액션 목록 반영
 #
-# 변경 내역 v2.7
-# - [Feature] 기능 테스트 필수 액션 대거 추가 (hover, double_click, scroll, assert_text 등)
-# - [Feature] 리그레션 테스트용 독립 실행 스크립트(regression_test.py) 자동 생성
-# - [Fix] 구글/네이버 등 포털의 봇 탐지 및 CAPTCHA 대응 로직 강화
+# [개요]
+#  - 사용자가 자연어(SRS)로 작성한 테스트 요구사항을 입력받아 자동으로 수행하는 AI 에이전트입니다.
+#  - Playwright를 통해 브라우저를 제어하며, 실패 시 스스로 복구(Self-Healing)합니다.
+#  - 클릭 후 새 탭/새 창이 열리는 경우를 감지하여 자동으로 제어권을 넘깁니다.
+#  - 테스트 실패 시 Jenkins가 알 수 있도록 실패 코드(Exit Code 1)를 반환합니다.
 # - Intent-Driven: role/name/label/text 기반 탐색을 우선한다.
 # - Self-Healing: fallback -> candidate search -> LLM heal 순으로 복구한다.
 # - Sequential Fast-Fail: 병렬 탐색을 사용하지 않는다.
@@ -4198,19 +4196,7 @@ def similarity(a: str, b: str) -> float:
     """문자열 유사도를 계산한다. (0.0 ~ 1.0)"""
     if not a or not b:
         return 0.0
-    a_low, b_low = a.lower(), b.lower()
-    # 단순 유사도 외에 포함 관계(Contains) 점수 가산
-    ratio = SequenceMatcher(None, a_low, b_low).ratio()
-    if a_low in b_low or b_low in a_low:
-        ratio = max(ratio, 0.85) # 포함되어 있으면 높은 점수 부여
-    return ratio
-
-def sanitize_url(url: str) -> str:
-    """URL에 프로토콜이 없으면 https://를 자동으로 추가합니다."""
-    url = url.strip()
-    if not url.startswith(("http://", "https://")):
-        return f"https://{url}"
-    return url
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 # -----------------------------------------------------------------------------
 # [Model] Intent Target 정의
@@ -4234,34 +4220,16 @@ class IntentTarget:
 
     @staticmethod
     def from_dict(d: Any) -> "IntentTarget":
+        # [Fix] LLM이 target을 문자열로 줄 경우 방어 로직
         if isinstance(d, str):
-            import re
-            # Playwright 셀렉터 형태(role=..., [name=...])인 경우 selector로 우선 처리
-            if d.startswith(("role=", "id=", "text=", "label=", "placeholder=", "title=")) or "[" in d:
-                return IntentTarget(selector=d)
-
-            # "key=value" 형태의 문자열 파싱
-            kv_pairs = re.findall(r'(\w+)=([^\s=]+(?:[\s][^\s=]+)*)(?=\s+\w+=|$)', d)
-            if kv_pairs:
-                data = {k: v.strip().strip('"').strip("'") for k, v in kv_pairs}
-                return IntentTarget(
-                    role=data.get("role"),
-                    name=data.get("name"),
-                    label=data.get("label"),
-                    text=data.get("text"),
-                    placeholder=data.get("placeholder"),
-                    title=data.get("title"),
-                    testid=data.get("testid"),
-                    selector=data.get("selector"),
-                )
             return IntentTarget(text=d) 
+            
         return IntentTarget(
             role=d.get("role"),
             name=d.get("name"),
             label=d.get("label"),
             text=d.get("text"),
             placeholder=d.get("placeholder"),
-            title=d.get("title"),
             testid=d.get("testid"),
             selector=d.get("selector"),
         )
@@ -4398,7 +4366,8 @@ def rank_candidates(query: str, target_role: Optional[str], candidates: List[Dic
     scored: List[Dict[str, Any]] = []
     for c in candidates:
         s = similarity(query, c.get("name", ""))
-        if target_role and c.get("role") == target_role: s = max(s, 0.6) # Role이 같으면 언어가 달라도 높은 점수 부여
+        if target_role and c.get("role") == target_role:
+            s += 0.10
         scored.append({"role": c.get("role", ""), "name": c.get("name", ""), "score": round(s, 3)})
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored
@@ -4535,86 +4504,22 @@ class ZeroTouchAgent:
     """
 
     def __init__(self, url: str, srs_text: str, out_dir: str, ollama_host: str, model: str):
-        self.url = sanitize_url(url)
+        self.url = url
         self.srs_text = srs_text
         self.out_dir = out_dir
         self.ollama_host = ollama_host
         self.model = model
+
         ensure_dir(out_dir)
+
+        # 표준 산출물 경로
         self.path_scenario = os.path.join(out_dir, "test_scenario.json")
         self.path_healed = os.path.join(out_dir, "test_scenario.healed.json")
         self.path_log = os.path.join(out_dir, "run_log.jsonl")
         self.path_report = os.path.join(out_dir, "index.html")
+
+        # Ollama 클라이언트 초기화
         self.client = ollama.Client(host=ollama_host)
-
-    def _get_locator_code(self, target_dict: Any) -> str:
-        """IntentTarget 데이터를 Playwright 코드 문자열로 변환합니다."""
-        if not target_dict: return "page"
-        t = IntentTarget.from_dict(target_dict)
-        if t.role and t.name:
-            return f'page.get_by_role("{t.role}", name="{t.name}")'
-        if t.label:
-            return f'page.get_by_label("{t.label}")'
-        if t.placeholder:
-            return f'page.get_by_placeholder("{t.placeholder}")'
-        if t.title:
-            return f'page.get_by_title("{t.title}")'
-        if t.testid:
-            return f'page.locator("[data-testid=\'{t.testid}\']")'
-        if t.selector:
-            return f'page.locator("{t.selector}")'
-        if t.text:
-            return f'page.get_by_text("{t.text}", exact=False)'
-        return "page"
-
-    def generate_regression_script(self, scenario: List[Dict[str, Any]]) -> str:
-        """성공한 시나리오를 바탕으로 독립 실행 가능한 Playwright 스크립트를 생성합니다."""
-        code = [
-            "import time",
-            "from playwright.sync_api import sync_playwright",
-            "",
-            "def run_regression():",
-            "    with sync_playwright() as p:",
-            "        browser = p.chromium.launch(headless=False)",
-            f"        context = browser.new_context(viewport={{'width': 1920, 'height': 1080}}, user_agent='{REAL_USER_AGENT}')",
-            "        page = context.new_page()",
-            "        # Stealth script to bypass bot detection",
-            "        page.add_init_script(\"Object.defineProperty(navigator, 'webdriver', {get: () => undefined})\")",
-            ""
-        ]
-
-        for step in scenario:
-            action = step.get("action")
-            value = step.get("value")
-            target_data = step.get("target")
-            desc = step.get("description", action)
-            
-            code.append(f"        # Step {step.get('step')}: {desc}")
-            
-            if action == "navigate":
-                code.append(f"        page.goto('{value or self.url}', wait_until='domcontentloaded')")
-                code.append("        page.wait_for_timeout(2000)")
-            elif action == "go_back": code.append("        page.go_back()")
-            elif action == "go_forward": code.append("        page.go_forward()")
-            elif action == "wait": code.append(f"        page.wait_for_timeout({value or 1500})")
-            elif action == "press_key":
-                if target_data: code.append(f"        {self._get_locator_code(target_data)}.first.press('{value or 'Enter'}')")
-                else: code.append(f"        page.keyboard.press('{value or 'Enter'}')")
-            else:
-                loc = self._get_locator_code(target_data)
-                if action == "click": code.append(f"        {loc}.first.click()")
-                elif action == "double_click": code.append(f"        {loc}.first.dblclick()")
-                elif action == "hover": code.append(f"        {loc}.first.hover()")
-                elif action == "fill": code.append(f"        {loc}.first.fill('{value}')")
-                elif action == "press_sequential": code.append(f"        {loc}.first.press_sequential('{value}', delay=100)")
-                elif action == "select_option": code.append(f"        {loc}.first.select_option(value='{value}')")
-                elif action == "scroll": code.append(f"        {loc}.first.scroll_into_view_if_needed()")
-                elif action == "assert_visible": code.append(f"        {loc}.first.wait_for(state='visible')")
-                elif action == "assert_text": code.append(f"        assert '{value}' in {loc}.first.inner_text()")
-            code.append("        page.wait_for_timeout(500)\n")
-
-        code.extend(["        print('Regression test passed!')", "        browser.close()", "", "if __name__ == '__main__':", "    run_regression()"])
-        return "\n".join(code)
 
     def plan_scenario(self) -> List[Dict[str, Any]]:
         """
@@ -4623,35 +4528,29 @@ class ZeroTouchAgent:
         - 출력은 JSON 배열만 허용한다.
         """
         log(f"Plan: model={self.model}")
-        # [Update] LLM에게 알려줄 액션 목록 확장
         prompt = f"""
-QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
-[SRS] {self.srs_text}
-[URL] {self.url}
-[Action List]
-- navigate: URL 이동 (value=url)
-- click: 클릭 (target)
-- double_click: 더블 클릭 (target)
-- hover: 마우스 오버 (target)
-- fill: 텍스트 입력 (target, value=text)
-- select_option: 드롭다운 선택 (target, value=option_value)
-- press_sequential: 순차적 키 입력 (target, value=text) - fill이 안될 때 사용
-- check: 체크박스 체크 (target)
-- press_key: 키보드 입력 (value="Enter" 등)
-- scroll: 해당 요소가 보이게 스크롤 (target)
-- assert_text: 요소 내 텍스트 검증 (target, value=expected_text)
-- assert_visible: 요소 노출 여부 검증 (target)
-- go_back: 뒤로 가기
-- go_forward: 앞으로 가기
-- wait: 대기 (value=ms)
+당신은 QA 엔지니어다.
+아래 SRS를 Playwright 실행 가능한 테스트 시나리오(JSON 배열)로 변환하라.
 
-[규칙]
-1. target은 객체 형태 {{"role": "...", "name": "..."}}를 권장함.
-2. Google/Naver 검색창은 보통 role="combobox"임.
-3. Google/Naver 검색어 입력 시 봇 탐지 방지를 위해 반드시 action="press_sequential"을 사용한다.
-4. Google 검색 실행은 action="press_key", value="Enter" 사용.
-5. fallback_targets 2개 이상 포함.
-6. 출력은 JSON 배열만.
+[SRS]
+{self.srs_text}
+
+[Target URL]
+{self.url}
+
+[작성 규칙]
+1. step.action은 navigate|click|fill|check|wait 중 하나다.
+2. click/fill/check는 target을 Intent 기반(role+name, label, text)으로 작성한다.
+3. click/fill step에는 fallback_targets를 2개 이상 포함한다.
+4. 각 주요 동작 후에는 check step을 포함한다.
+5. 출력은 JSON 배열만 허용한다.
+
+[Step 예시]
+[
+  {{"step": 1, "action": "navigate", "value": "{self.url}", "description": "메인 페이지 접속"}},
+  {{"step": 2, "action": "click", "target": {{"role": "button", "name": "로그인"}}, "fallback_targets":[{{"text":"로그인"}}, {{"role":"link","name":"로그인"}}], "description":"로그인 버튼 클릭"}},
+  {{"step": 3, "action": "check", "target": {{"text": "로그인"}}, "description":"로그인 화면 요소 확인"}}
+]
 """.strip()
 
         res = self.client.chat(
@@ -4682,97 +4581,37 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         append_jsonl(self.path_log, base)
 
     def _execute_action(self, page, resolver: LocatorResolver, step: Dict[str, Any]) -> None:
-        """
-        [확장된 액션 실행기]
-        다양한 브라우저 동작을 처리합니다.
-        """
         action = step.get("action")
-        value = step.get("value")
         
-        # 1. 페이지 탐색 및 히스토리
+        # 네이버 등 포털 접속 시 networkidle 타임아웃 방지를 위해 domcontentloaded 사용
         if action == "navigate":
-            target_url = value or self.url
-            target_url = sanitize_url(target_url)
+            target_url = step.get("value") or self.url
             page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+            # 추가적으로 2초 정도 정적 대기 (안전장치)
             page.wait_for_timeout(2000)
             return
-        if action == "go_back":
-            page.go_back()
-            page.wait_for_timeout(1000)
-            return
-        if action == "go_forward":
-            page.go_forward()
-            page.wait_for_timeout(1000)
-            return
 
-        # 2. 대기 및 키보드
         if action == "wait":
-            page.wait_for_timeout(int(value or 1500))
-            return
-        if action == "press_key":
-            key_name = str(value or "Enter")
-            target_data = step.get("target")
-            if target_data:
-                target = IntentTarget.from_dict(target_data)
-                loc = resolver.resolve(target)
-                loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
-                loc.first.press(key_name)
-            else:
-                page.keyboard.press(key_name)
-            page.wait_for_timeout(1000)
+            ms = int(step.get("value", 1500))
+            page.wait_for_timeout(ms)
             return
 
-        # 3. 요소 타겟팅이 필요한 액션들
-        target_actions = [
-            "click", "double_click", "hover", "fill", "check", 
-            "select_option", "scroll", "assert_text", "assert_visible"
-        ]
-        
-        if action in target_actions:
-            target = IntentTarget.from_dict(step.get("target") or {})
+        if action in ["click", "fill", "check"]:
+            target_dict = step.get("target") or {}
+            target = IntentTarget.from_dict(target_dict)
             loc = resolver.resolve(target)
-            
-            # (1) 마우스 조작
+
             if action == "click":
                 loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(500)
-            elif action == "double_click":
-                loc.first.dblclick(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(500)
-            elif action == "hover":
-                loc.first.hover(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(500)
-            
-            # (2) 입력 및 선택
-            elif action == "fill":
-                loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
-                loc.first.fill(str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
-            elif action == "check":
-                loc.first.check(timeout=DEFAULT_TIMEOUT_MS)
-            elif action == "select_option":
-                loc.first.select_option(value=str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
-            
-            # (2.5) 순차 입력 (실제 키보드 타이핑 시뮬레이션)
-            elif action == "press_sequential":
-                loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
-                loc.first.press_sequential(str(value or ""), delay=100, timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(500)
+                return
 
-            # (3) 스크롤
-            elif action == "scroll":
-                loc.first.scroll_into_view_if_needed(timeout=DEFAULT_TIMEOUT_MS)
-                
-            # (4) 검증 (Assertion) - 실패 시 에러 발생
-            elif action == "assert_visible":
-                # 단순히 현재 보이는지가 아니라, 나타날 때까지 대기하도록 수정
+            if action == "fill":
+                loc.first.fill(str(step.get("value", "")), timeout=DEFAULT_TIMEOUT_MS)
+                return
+
+            if action == "check":
                 loc.first.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
-            elif action == "assert_text":
-                expected = str(value or "")
-                actual = loc.first.inner_text()
-                if expected not in actual:
-                    raise AssertionError(f"Text mismatch. Expected '{expected}' in '{actual}'")
-            
-            return
+                return
 
         raise RuntimeError(f"Unsupported action: {action}")
 
@@ -4789,17 +4628,19 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         반환
         - (성공 여부, 적용된 heal_stage)
         """
-        target_data = step.get("target")
-        t = IntentTarget.from_dict(target_data)
-        original_target_dict = t.__dict__
-
-        # Healing을 위한 핵심 쿼리 추출
-        query = t.name or t.text or t.label or t.title or ""
-        if not query and t.selector:
-            # 셀렉터 문자열에서 이름 추출 시도 (예: role=textbox[name='Search'] -> Search)
-            import re
-            m = re.search(r"name='\"['\"]", t.selector)
-            query = m.group(1) if m else t.selector
+        # ---------------------------------------------------------------------
+        # Heal Attempt 1..MAX_HEAL_ATTEMPTS
+        # - 각 attempt는 아래 순서로 처리한다.
+        #   1) Deterministic Fallback
+        #   2) Candidate Search
+        #   3) LLM Heal (HEAL_MODE=on일 때만)
+        # ---------------------------------------------------------------------
+        original_target = step.get("target") or {}
+        query = (
+            (original_target.get("name") or "")
+            or (original_target.get("text") or "")
+            or (original_target.get("label") or "")
+        )
 
         for attempt in range(1, MAX_HEAL_ATTEMPTS + 1):
             # 1) Deterministic Fallback
@@ -4816,7 +4657,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             try:
                 candidates = collect_accessibility_candidates(page)
                 candidates = filter_candidates_by_action(action, candidates)
-                ranked = rank_candidates(query, t.role, candidates)
+                ranked = rank_candidates(query, original_target.get("role"), candidates)
                 if ranked:
                     top = ranked[0]
                     step["target"] = {"role": top["role"], "name": top["name"]}
@@ -4833,11 +4674,11 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 try:
                     candidates = collect_accessibility_candidates(page)
                     candidates = filter_candidates_by_action(action, candidates)
-                    ranked = rank_candidates(query, t.role, candidates)
+                    ranked = rank_candidates(query, original_target.get("role"), candidates)
 
                     heal_prompt = build_llm_heal_prompt(
                         action=action,
-                        failed_target=original_target_dict,
+                        failed_target=original_target,
                         error_text=error_text,
                         page_url=page.url,
                         ranked_candidates=ranked,
@@ -4850,7 +4691,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     heal_obj = json.loads(extract_json_object(res["message"]["content"]))
 
                     # LLM이 제안한 target/fallback을 step에 반영한다.
-                    step["target"] = heal_obj.get("target") or target_data
+                    step["target"] = heal_obj.get("target") or step.get("target") or original_target
                     step["fallback_targets"] = heal_obj.get("fallback_targets") or step.get("fallback_targets") or []
 
                     # 반영 후 실행을 재시도한다.
@@ -4860,7 +4701,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     error_text = str(e)
 
         # 모든 복구 실패
-        step["target"] = target_data
+        step["target"] = original_target
         return False, "heal_failed"
 
     def execute(self, scenario: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -4943,15 +4784,13 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
     def run(self) -> None:
         """전체 실행 엔트리다."""
         append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "start", "headless": DEFAULT_HEADLESS})
-        scenario = self.plan_scenario()
-        rows, healed = self.execute(scenario)
-        write_json(self.path_healed, healed)
 
-        # [추가] 리그레션 스크립트 생성 및 저장
-        regression_script = self.generate_regression_script(healed)
-        with open(os.path.join(self.out_dir, "regression_test.py"), "w", encoding="utf-8") as f:
-            f.write(regression_script)
-        log(f"Regression script generated: regression_test.py")
+        scenario = self.plan_scenario()
+
+        rows, healed = self.execute(scenario)
+
+        # healed scenario 저장
+        write_json(self.path_healed, healed)
 
         # report 저장
         self.save_report(rows)
@@ -4963,6 +4802,19 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         if any(r.get("status") == "FAIL" for r in rows):
             log("Test FAILED: Exiting with status code 1.")
             sys.exit(1)
+
+        scenario = self.plan_scenario()
+
+        rows, healed = self.execute(scenario)
+
+        # healed scenario 저장
+        write_json(self.path_healed, healed)
+
+        # report 저장
+        self.save_report(rows)
+
+        append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "end"})
+
 
 # -----------------------------------------------------------------------------
 # [Entry Point] CLI 인자 처리

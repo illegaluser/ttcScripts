@@ -11,6 +11,7 @@ The Zero-Touch QA Agent is an autonomous testing system that converts natural la
    - Fallback targets
    - Candidate search
    - LLM-based healing
+3. **Anti-Bot & reCAPTCHA Bypass**: Advanced stealth settings and human-like interaction patterns
 3. **Multi-browser Support**: Uses Playwright for cross-browser testing
 4. **Regression Script Generation**: Creates standalone Playwright scripts for future use
 5. **Detailed Reporting**: Generates HTML reports with screenshots and execution details
@@ -68,8 +69,6 @@ The Zero-Touch QA Agent is an autonomous testing system that converts natural la
 4. `hover`: Hover over element
 5. `fill`: Fill text into input field
 6. `select_option`: Select option from dropdown
-7. `press_sequential`: Type text character by character
-8. `check`: Check checkbox
 9. `press_key`: Press keyboard key
 10. `scroll`: Scroll element into view
 11. `assert_text`: Verify text content
@@ -123,7 +122,7 @@ The system implements comprehensive error handling:
 
 ## Stealth Features
 
-- Removes `navigator.webdriver` property to avoid bot detection
+clude randomized delays (200ms - 1000ms) to mimic real user behavior.
 - Sets appropriate user agent and locale
 - Uses realistic viewport sizes
 - Adds extra HTTP headers to mimic real user behavior
