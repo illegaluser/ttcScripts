@@ -30,17 +30,24 @@ from playwright.sync_api import sync_playwright
 # =============================================================================
 # 1. 환경 설정 (Configuration)
 # =============================================================================
-
+# Ollama 서버 주소 (컨테이너 내부에서 호스트의 Ollama에 접근하기 위한 주소)
 DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
+# 시나리오 생성 및 치유에 사용할 LLM 모델명
 DEFAULT_MODEL_NAME = os.getenv("MODEL_NAME", "qwen3-coder:30b")
+# 브라우저 실행 모드 (서버 환경인 Jenkins에서는 기본적으로 True)
 _headless_env = os.getenv("HEADLESS", "true").lower()
 DEFAULT_HEADLESS = _headless_env in ("true", "1", "on", "yes")
+# 액션 간 지연 시간 (눈으로 확인하거나 페이지 안정화를 위해 사용)
 DEFAULT_SLOW_MO_MS = int(os.getenv("SLOW_MO_MS", "500"))
+# 요소 탐색 및 액션 수행 시의 최대 대기 시간
 DEFAULT_TIMEOUT_MS = int(os.getenv("DEFAULT_TIMEOUT_MS", "30000"))
+# Resolver에서 여러 전략을 빠르게 시도할 때 사용하는 짧은 타임아웃
 FAST_TIMEOUT_MS = int(os.getenv("FAST_TIMEOUT_MS", "2000"))
 HEAL_MODE = os.getenv("HEAL_MODE", "on")
 MAX_HEAL_ATTEMPTS = int(os.getenv("MAX_HEAL_ATTEMPTS", "2"))
+# 자가 치유 시 LLM에게 전달할 주변 요소 후보의 개수
 CANDIDATE_TOP_N = int(os.getenv("CANDIDATE_TOP_N", "8"))
+# 봇 탐지 우회를 위한 실제 브라우저와 유사한 User-Agent
 REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 # =============================================================================
@@ -48,12 +55,15 @@ REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 # =============================================================================
 
 def now_iso() -> str:
+    """현재 시간을 ISO 8601 형식으로 반환 (로그 기록용)"""
     return datetime.now().isoformat(timespec="seconds")
 
 def log(msg: str) -> None:
+    """Jenkins 콘솔 출력에 즉시 나타나도록 flush 옵션을 사용하여 로그 출력"""
     print(f"[AutoQA] {msg}", flush=True)
 
 def ensure_dir(path: str) -> None:
+    """결과 리포트 및 스크린샷을 저장할 디렉터리가 없으면 생성"""
     try:
         os.makedirs(path, exist_ok=True)
     except Exception as e:
@@ -61,14 +71,17 @@ def ensure_dir(path: str) -> None:
         sys.exit(1)
 
 def write_json(path: str, obj: Any) -> None:
+    """객체를 JSON 파일로 저장 (시나리오 보관용)"""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
+    """구조화된 로그를 위해 JSONL(JSON Lines) 형식으로 파일 끝에 추가"""
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 def extract_json_array(text: str) -> str:
+    """LLM의 자유로운 텍스트 응답 속에서 [ ... ] 형태의 JSON 배열만 추출"""
     t = text.strip().replace("```json", "").replace("```", "").strip()
     start = t.find("[")
     end = t.rfind("]")
@@ -77,6 +90,7 @@ def extract_json_array(text: str) -> str:
     return t[start:end + 1]
 
 def extract_json_object(text: str) -> str:
+    """LLM 응답 속에서 { ... } 형태의 단일 JSON 객체만 추출 (자가 치유 시 사용)"""
     t = text.strip().replace("```json", "").replace("```", "").strip()
     start = t.find("{")
     end = t.rfind("}")
@@ -85,6 +99,7 @@ def extract_json_object(text: str) -> str:
     return t[start:end + 1]
 
 def similarity(a: str, b: str) -> float:
+    """두 문자열 사이의 유사도를 0~1 사이로 계산. 포함 관계일 경우 가산점 부여"""
     if not a or not b: return 0.0
     a_low, b_low = a.lower(), b.lower()
     # 단순 유사도 외에 포함 관계(Contains) 점수 가산
@@ -106,6 +121,10 @@ def sanitize_url(url: str) -> str:
 
 @dataclass
 class IntentTarget:
+    """
+    UI 요소를 '의도(Intent)' 기반으로 찾기 위한 데이터 모델.
+    고정된 ID 대신 역할(Role), 이름(Name), 텍스트 등을 복합적으로 활용함.
+    """
     role: Optional[str] = None
     name: Optional[str] = None
     label: Optional[str] = None
@@ -117,6 +136,7 @@ class IntentTarget:
 
     @staticmethod
     def from_dict(d: Any) -> "IntentTarget":
+        """딕셔너리 또는 'role=button name=로그인' 형태의 문자열로부터 객체 생성"""
         if isinstance(d, str):
             import re
             # Playwright 셀렉터 형태(role=..., [name=...])인 경우 selector로 우선 처리
@@ -150,6 +170,7 @@ class IntentTarget:
         )
 
     def brief(self) -> str:
+        """로그 출력용 요약 문자열"""
         return f"role={self.role}, name={self.name}, text={self.text}, label={self.label}"
 
 # =============================================================================
@@ -157,11 +178,16 @@ class IntentTarget:
 # =============================================================================
 
 class LocatorResolver:
+    """
+    IntentTarget 정보를 바탕으로 실제 브라우저 내의 Playwright Locator를 찾아주는 클래스.
+    여러 탐색 전략을 순차적으로 시도하는 'Sequential Fast-Fail' 방식을 사용함.
+    """
     def __init__(self, page, fast_timeout_ms: int):
         self.page = page
         self.fast_timeout_ms = fast_timeout_ms
 
     def _try_visible(self, locator) -> bool:
+        """요소가 실제로 화면에 보이는지 짧은 시간 동안 확인"""
         try:
             locator.first.wait_for(state="visible", timeout=self.fast_timeout_ms)
             return True
@@ -169,17 +195,23 @@ class LocatorResolver:
             return False
 
     def resolve(self, target: IntentTarget):
+        """
+        가장 정확한 방법(Role+Name)부터 유연한 방법(Text, Selector) 순으로 요소를 탐색.
+        """
         # 0. Selector (Playwright 직접 셀렉터가 제공된 경우 최우선)
         if target.selector:
             loc = self.page.locator(target.selector).filter(visible=True)
             if self._try_visible(loc): return loc
 
-        # 1. Role + Name (가시적 요소 우선 매칭)
+        # 1. Role + Name (접근성 기반 탐색)
+        # exact=False를 사용하여 공백이나 부분 일치에도 대응할 수 있도록 함 (예: '로그인'으로 '로그인 버튼' 찾기)
         if target.role and target.name:
             loc = self.page.get_by_role(target.role, name=target.name, exact=False).filter(visible=True)
+            # exact=False를 사용하여 공백이나 부분 일치에 대응합니다.
+            loc = self.page.get_by_role(target.role, name=target.name, exact=False)
             if self._try_visible(loc): return loc
             
-            # [추가] 이름이 안 맞더라도 해당 Role의 가시적 요소가 하나뿐이라면 선택 (지역화 대응)
+            # [Fallback] 이름이 안 맞더라도 해당 Role(예: combobox)이 페이지에 하나뿐이라면 그것을 선택
             loc_role_only = self.page.get_by_role(target.role).filter(visible=True)
             if loc_role_only.count() == 1 and self._try_visible(loc_role_only):
                 return loc_role_only
@@ -197,19 +229,23 @@ class LocatorResolver:
             for method in [self.page.get_by_label, self.page.get_by_title, 
                            self.page.get_by_placeholder, self.page.get_by_text]:
                 loc = method(search_term, exact=False).filter(visible=True)
+                loc = method(search_term, exact=False)
                 if self._try_visible(loc): return loc
             
             # [Fallback] 검색어가 'q'나 'input' 같은 단순 문자열일 경우 CSS 선택자로 간주
             try:
                 loc = self.page.locator(search_term).filter(visible=True)
+                loc = self.page.locator(search_term)
                 if self._try_visible(loc): return loc
             except: pass
 
         if target.testid:
             loc = self.page.locator(f"[data-testid='{target.testid}']").filter(visible=True)
+            loc = self.page.locator(f"[data-testid='{target.testid}']")
             if self._try_visible(loc): return loc
         if target.placeholder:
             loc = self.page.get_by_placeholder(target.placeholder).filter(visible=True)
+            loc = self.page.get_by_placeholder(target.placeholder)
             if self._try_visible(loc): return loc
         raise RuntimeError(f"Target not resolved: {target.brief()}")
 
@@ -218,6 +254,10 @@ class LocatorResolver:
 # =============================================================================
 
 def collect_accessibility_candidates(page) -> List[Dict[str, str]]:
+    """
+    현재 페이지의 접근성 트리(Accessibility Tree)를 스캔하여 모든 제어 가능한 요소 수집.
+    자가 치유 시 '주변에 어떤 요소들이 있는지' LLM에게 알려주기 위한 용도.
+    """
     try:
         snapshot = page.accessibility.snapshot()
     except:
@@ -240,12 +280,17 @@ def collect_accessibility_candidates(page) -> List[Dict[str, str]]:
     return list(dedup.values())
 
 def filter_candidates_by_action(action: str, candidates: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """수행하려는 액션에 적합한 역할(Role)을 가진 요소들만 필터링 (예: 클릭 시 버튼/링크만)"""
     if action in ["click", "double_click", "hover"]:
         allowed = {"button", "link", "menuitem", "tab", "checkbox", "radio", "img"}
+        return [c for c in candidates if c.get("role") in allowed]
+    if action in ["fill", "press_sequential"]:
+        allowed = {"textbox", "searchbox", "combobox", "spinbutton", "textarea"}
         return [c for c in candidates if c.get("role") in allowed]
     return candidates
 
 def rank_candidates(query: str, target_role: Optional[str], candidates: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """수집된 후보 요소들을 검색어와의 유사도 및 역할 일치 여부에 따라 점수화하여 정렬"""
     scored: List[Dict[str, Any]] = []
     for c in candidates:
         s = similarity(query, c.get("name", ""))
@@ -255,6 +300,7 @@ def rank_candidates(query: str, target_role: Optional[str], candidates: List[Dic
     return scored
 
 def build_llm_heal_prompt(action: str, failed_target: Dict[str, Any], error_text: str, page_url: str, ranked_candidates: List[Dict[str, Any]]) -> str:
+    """LLM에게 현재 실패 상황과 주변 요소 목록을 전달하여 새로운 셀렉터를 제안받기 위한 프롬프트 생성"""
     candidates_json = json.dumps(ranked_candidates[:CANDIDATE_TOP_N], ensure_ascii=False, indent=2)
     return f"""
 [Self-Healing Request]
@@ -272,6 +318,7 @@ def build_llm_heal_prompt(action: str, failed_target: Dict[str, Any], error_text
 """.strip()
 
 def build_html_report(rows: List[Dict[str, Any]]) -> str:
+    """테스트 결과를 한눈에 볼 수 있는 단일 HTML 리포트 생성"""
     html = """<html><head><meta charset="utf-8"/><style>
   body { font-family: Arial, sans-serif; margin: 18px; }
   table { border-collapse: collapse; width: 100%; }
@@ -301,6 +348,10 @@ def build_html_report(rows: List[Dict[str, Any]]) -> str:
 # =============================================================================
 
 class ZeroTouchAgent:
+    """
+    자연어 요구사항(SRS)으로부터 시나리오를 계획(Plan)하고,
+    실행(Execute)하며, 실패 시 치유(Heal)하는 전체 과정을 관리하는 메인 에이전트.
+    """
     def __init__(self, url: str, srs_text: str, out_dir: str, ollama_host: str, model: str):
         self.url = sanitize_url(url)
         self.srs_text = srs_text
@@ -318,6 +369,9 @@ class ZeroTouchAgent:
         """IntentTarget 데이터를 Playwright 코드 문자열로 변환합니다."""
         if not target_dict: return "page"
         t = IntentTarget.from_dict(target_dict)
+        # 리그레션 스크립트에서는 특정된 셀렉터를 최우선으로 사용 (의도 기반 탐색 배제)
+        if t.selector:
+            return f'page.locator("{t.selector}")'
         if t.role and t.name:
             return f'page.get_by_role("{t.role}", name="{t.name}", exact=False)'
         if t.label:
@@ -328,13 +382,12 @@ class ZeroTouchAgent:
             return f'page.get_by_title("{t.title}")'
         if t.testid:
             return f'page.locator("[data-testid=\'{t.testid}\']")'
-        if t.selector:
-            return f'page.locator("{t.selector}")'
         if t.text:
             return f'page.get_by_text("{t.text}", exact=False)'
         return "page"
 
     def generate_regression_script(self, scenario: List[Dict[str, Any]]) -> str:
+        """성공한 시나리오(박제된 셀렉터 포함)를 바탕으로 AI 없이 실행 가능한 독립 파이썬 스크립트 생성"""
         """성공한 시나리오를 바탕으로 독립 실행 가능한 Playwright 스크립트를 생성합니다."""
         code = [
             "import time",
@@ -365,24 +418,36 @@ class ZeroTouchAgent:
             elif action == "go_forward": code.append("        page.go_forward()")
             elif action == "wait": code.append(f"        page.wait_for_timeout({value or 1500})")
             elif action == "press_key":
-                if target_data: code.append(f"        {self._get_locator_code(target_data)}.first.press('{value or 'Enter'}')")
+                if target_data:
+                    loc_code = self._get_locator_code(target_data)
+                    code.append(f"        {loc_code}.first.press('{value or 'Enter'}')")
                 else: code.append(f"        page.keyboard.press('{value or 'Enter'}')")
             else:
                 loc = self._get_locator_code(target_data)
                 if action == "click": code.append(f"        {loc}.first.click()")
                 elif action == "double_click": code.append(f"        {loc}.first.dblclick()")
                 elif action == "hover": code.append(f"        {loc}.first.hover()")
-                elif action == "fill": code.append(f"        {loc}.first.fill('{value}')")
+                elif action == "fill":
+                    # 리그레션 스크립트에서는 결정론적 실행을 위해 직접 fill 수행
+                    code.append(f"        {loc}.first.fill('{value}')")
                 elif action == "select_option": code.append(f"        {loc}.first.select_option(value='{value}')")
                 elif action == "scroll": code.append(f"        {loc}.first.scroll_into_view_if_needed()")
                 elif action == "assert_visible": code.append(f"        {loc}.first.wait_for(state='visible')")
                 elif action == "assert_text": code.append(f"        assert '{value}' in {loc}.first.inner_text()")
             code.append("        page.wait_for_timeout(500)\n")
 
-        code.extend(["        print('Regression test passed!')", "        browser.close()", "", "if __name__ == '__main__':", "    run_regression()"])
+        code.extend([
+            "        print('Regression test passed!')",
+            "        page.wait_for_timeout(10000)",
+            "        browser.close()",
+            "",
+            "if __name__ == '__main__':",
+            "    run_regression()"
+        ])
         return "\n".join(code)
 
     def plan_scenario(self) -> List[Dict[str, Any]]:
+        """LLM을 호출하여 자연어 SRS를 구조화된 JSON 테스트 시나리오로 변환"""
         log(f"Plan: model={self.model}")
         # [Update] LLM에게 알려줄 액션 목록 확장
         prompt = f"""
@@ -420,17 +485,66 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         return scenario
 
     def _log_step_event(self, payload: Dict[str, Any]) -> None:
+        """각 단계의 시작, 성공, 실패 이벤트를 타임스탬프와 함께 기록"""
         base = {"ts": now_iso()}
         base.update(payload)
         append_jsonl(self.path_log, base)
 
+    def _capture_selector(self, loc, step: Dict[str, Any]) -> None:
+        """성공적으로 찾은 요소의 고유한 CSS Selector를 추출하여 리그레션 테스트에서 재사용할 수 있게 함"""
+        """성공적으로 찾은 요소의 고유 셀렉터를 추출하여 시나리오에 저장합니다."""
+        try:
+            if loc.count() == 0: return
+            selector = loc.first.evaluate("""el => {
+                const isDynamic = (id) => {
+                    if (!id) return true;
+                    // 동적 ID 판별: 너무 길거나, 숫자가 너무 많거나, 특정 패턴(fdr-, u_)인 경우
+                    if (id.length > 25) return true;
+                    if ((id.match(/\\d/g) || []).length > 6) return true;
+                    if (id.startsWith('fdr-') || id.startsWith('u_')) return true;
+                    if (/^[0-9a-f-]+$/.test(id) && id.includes('-')) return true;
+                    return false;
+                };
+                const testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
+                if (testid) return `[data-testid="${testid}"]`;
+                if (el.id && !isDynamic(el.id)) return '#' + el.id;
+
+                const parts = [];
+                while (el && el.nodeType === Node.ELEMENT_NODE) {
+                    let sel = el.nodeName.toLowerCase();
+                    if (el.id && !isDynamic(el.id)) { // 고정 ID가 있으면 즉시 반환
+                                          
+                        sel += '#' + el.id;
+                        parts.unshift(sel);
+                        break;
+                    } else {
+                        let sibling = el, nth = 1;
+                        while (sibling = sibling.previousElementSibling) {
+                            if (sibling.nodeName.toLowerCase() == sel) nth++;
+                        }
+                        if (nth != 1) sel += `:nth-of-type(${nth})`;
+                    } // ID가 없으면 부모로 올라가며 경로 생성
+                    parts.unshift(sel);
+                    el = el.parentNode;
+                }
+                return parts.join(' > ');
+            }""")
+            if isinstance(step.get("target"), dict):
+                step["target"]["selector"] = selector
+            else:
+                step["target"] = {"selector": selector, "text": str(step.get("target", ""))}
+        except:
+            pass
+
     def _execute_action(self, page, resolver: LocatorResolver, step: Dict[str, Any]) -> None:
         """
+        Playwright를 사용하여 실제 브라우저 액션을 수행.
         [확장된 액션 실행기]
         다양한 브라우저 동작을 처리합니다.
         """
         action = step.get("action")
         value = step.get("value")
+        target_data = step.get("target")
         
         # 1. 페이지 탐색 및 히스토리
         if action == "navigate":
@@ -465,6 +579,8 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     inner = loc.first.locator("input, textarea, [contenteditable='true']").first
                     if inner.count() > 0: target_el = inner
 
+                # 안정성을 위해 입력 전 클릭하여 포커스 확보
+                self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(200)
                 target_el.press(key_name)
@@ -476,7 +592,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         # 3. 요소 타겟팅이 필요한 액션들
         target_actions = [
             "click", "double_click", "hover", "fill", "check", 
-            "select_option", "scroll", "assert_text", "assert_visible", "press_sequential"
+            "select_option", "scroll", "assert_text", "assert_visible"
         ]
         
         if action in target_actions:
@@ -485,12 +601,15 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
             
             # (1) 마우스 조작
             if action == "click":
+                self._capture_selector(loc.first, step)
                 loc.first.click(timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(500)
             elif action == "double_click":
+                self._capture_selector(loc.first, step)
                 loc.first.dblclick(timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(500)
             elif action == "hover":
+                self._capture_selector(loc.first, step)
                 loc.first.hover(timeout=DEFAULT_TIMEOUT_MS)
                 page.wait_for_timeout(500)
             
@@ -500,36 +619,31 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                 if target.role == "combobox":
                     inner = loc.first.locator("input, textarea, [contenteditable='true']").first
                     if inner.count() > 0: target_el = inner
-
+                
+                # 안정성을 위해 입력 전 클릭하여 포커스 확보
+                self._capture_selector(target_el, step)
                 target_el.click(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(100)
+                page.wait_for_timeout(200)
                 target_el.fill(str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
             elif action == "check":
+                self._capture_selector(loc.first, step)
                 loc.first.check(timeout=DEFAULT_TIMEOUT_MS)
             elif action == "select_option":
+                self._capture_selector(loc.first, step)
                 loc.first.select_option(value=str(value or ""), timeout=DEFAULT_TIMEOUT_MS)
-            
-            # (2.5) 순차 입력 (실제 키보드 타이핑 시뮬레이션)
-            elif action == "press_sequential":
-                target_el = loc.first
-                if target.role == "combobox":
-                    inner = loc.first.locator("input, textarea, [contenteditable='true']").first
-                    if inner.count() > 0: target_el = inner
-
-                target_el.click(timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(100)
-                target_el.press_sequential(str(value or ""), delay=100, timeout=DEFAULT_TIMEOUT_MS)
-                page.wait_for_timeout(500)
 
             # (3) 스크롤
             elif action == "scroll":
+                self._capture_selector(loc.first, step)
                 loc.first.scroll_into_view_if_needed(timeout=DEFAULT_TIMEOUT_MS)
                 
             # (4) 검증 (Assertion) - 실패 시 에러 발생
             elif action == "assert_visible":
+                self._capture_selector(loc.first, step)
                 # 단순히 현재 보이는지가 아니라, 나타날 때까지 대기하도록 수정
                 loc.first.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
             elif action == "assert_text":
+                self._capture_selector(loc.first, step)
                 expected = str(value or "")
                 loc.first.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
                 actual = loc.first.inner_text()
@@ -541,6 +655,12 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         raise RuntimeError(f"Unsupported action: {action}")
 
     def _heal_step(self, page, resolver, step, action, error_text) -> Tuple[bool, str]:
+        """
+        테스트 실패 시 3단계 복구 시도:
+        1. Fallback: 시나리오에 정의된 예비 타겟 시도
+        2. Candidate: 접근성 트리 기반 유사 요소 탐색
+        3. LLM: AI에게 현재 상황을 물어보고 해결책 제안받기
+        """
         target_data = step.get("target")
         t = IntentTarget.from_dict(target_data)
         original_target_dict = t.__dict__
@@ -590,11 +710,13 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         return False, "heal_failed"
 
     def save_report(self, rows: List[Dict[str, Any]]) -> None:
+        """수행 결과 데이터를 HTML 파일로 저장"""
         html = build_html_report(rows)
         with open(self.path_report, "w", encoding="utf-8") as f:
             f.write(html)
 
     def execute(self, scenario: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """시나리오의 각 단계를 순차적으로 실행하며 페이지 전환 및 캡차 발생 여부 감시"""
         rows, healed_scenario = [], json.loads(json.dumps(scenario))
         
         with sync_playwright() as p:
@@ -655,6 +777,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                         if not ok: status = "FAIL"
                     else: status = "FAIL"
 
+                # 액션 수행 후 새 탭이나 새 창이 열렸는지 확인하여 제어권 전환
                 if len(context.pages) > pages_before:
                     new_page = context.pages[-1]
                     try: new_page.wait_for_load_state("domcontentloaded")
@@ -663,6 +786,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
                     resolver = LocatorResolver(page, FAST_TIMEOUT_MS)
                     self._log_step_event({"phase": "exec", "step": sid, "event": "new_page_detected", "url": page.url})
 
+                # 각 단계 완료 후 증적 스크린샷 저장
                 evidence = f"step_{sid}_{status.lower()}.png"
                 try: page.screenshot(path=os.path.join(self.out_dir, evidence))
                 except Exception: pass
@@ -675,6 +799,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         return rows, healed_scenario
 
     def run(self) -> None:
+        """에이전트 실행 메인 엔트리: 계획 -> 실행 -> 리포트 저장"""
         append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "start", "headless": DEFAULT_HEADLESS})
         scenario = self.plan_scenario()
         rows, healed = self.execute(scenario)
@@ -690,6 +815,7 @@ QA 엔지니어다. SRS를 Playwright 시나리오(JSON 배열)로 변환하라.
         self.save_report(rows)
         append_jsonl(self.path_log, {"ts": now_iso(), "phase": "run", "status": "end"})
 
+        # 하나라도 실패하면 Jenkins 빌드를 실패로 처리하기 위해 종료 코드 1 반환
         if any(r.get("status") == "FAIL" for r in rows):
             log("Test FAILED: Exiting with status code 1.")
             sys.exit(1)
