@@ -3126,7 +3126,9 @@ pipeline {
                         --gitlab-token "${GITLAB_TOKEN}" \
                         --gitlab-project "${params.GITLAB_PROJECT_PATH}" \
                         --input "${WORK_DIR}/llm_analysis.jsonl" \
-                        --output "${WORK_DIR}/gitlab_issues_created.json"
+                        --output "${WORK_DIR}/gitlab_issues_created.json" \
+                        --sonar-host-url "${SONAR_HOST_URL}" \
+                        --sonar-public-url "${SONAR_PUBLIC_URL}"
                     '''
                 }
             }
