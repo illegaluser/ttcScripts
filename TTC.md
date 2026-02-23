@@ -2965,7 +2965,7 @@ pipeline {
                 # 이전 빌드 파일 삭제 (Dify 중복 업로드 방지)
                 rm -rf ${RESULT_DIR}/*
                 python3 ${SCRIPTS_DIR}/repo_context_builder.py \
-                    --repo_root ${WORKSPACE_CODES}/$REPO_NAME \
+                    --repo_root ${WORKSPACE_CODES}/repo \
                     --out ${RESULT_DIR}
                 echo "[Build] 완료"
                 '''
@@ -3134,7 +3134,9 @@ pipeline {
                         --gitlab-token "${GITLAB_TOKEN}" \
                         --project-path "${GITLAB_PROJECT_PATH}" \
                         --input "${WORK_DIR}/llm_analysis.jsonl" \
-                        --output "${WORK_DIR}/gitlab_issues_created.json"
+                        --output "${WORK_DIR}/gitlab_issues_created.json" \
+                        --sonar-host-url "${SONAR_HOST_URL}" \
+                        --sonar-public-url "${SONAR_PUBLIC_URL}"
                     '''
                 }
             }
