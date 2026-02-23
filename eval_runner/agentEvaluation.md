@@ -1,66 +1,18 @@
-# DSCORE-TTC: 외부 AI 에이전트 평가 시스템 E2E 통합 구축 마스터 가이드 (최종 완성본)
+# 🚀 DSCORE-TTC: 외부 AI 에이전트 평가 시스템 E2E 통합 구축 마스터 가이드 (최종 완성본)
 
 ## 📖 제1장. 7대 측정 지표(Metrics) 및 프레임워크 매핑 안내
 
 시스템은 자원 낭비를 막고 평가 신뢰도를 높이기 위해 3단계(Fail-Fast ➔ 과업 검사 ➔ 문맥 평가)로 나누어 총 7가지 지표를 측정합니다.
 
 | 검증 단계 | 측정 지표 (Metric) | 담당 프레임워크 및 측정 원리 | 코드 위치 |
-| --- | --- | --- | --- |
-| **1. Fail-Fast**<br>
-
-<br>(즉시 차단) | **① Policy Violation**<br>
-
-<br>(보안/금칙어 위반) | **[Promptfoo]**<br>
-
-<br>AI의 응답을 임시 파일로 저장한 뒤, 외장 도구인 Promptfoo를 CLI로 호출하여 주민등록번호나 API Key 등 정의된 정규식 패턴이 발견되면 즉시 불합격시킵니다. | `test_runner.py`의<br>
-
-<br>`_promptfoo_check` |
-|  | **② Format Compliance**<br>
-
-<br>(응답 규격 준수) | **[jsonschema (Python)]**<br>
-
-<br>대상 AI가 API일 경우, 반환한 JSON 데이터가 우리가 요구한 필수 형태(예: `answer` 키 포함)를 갖추었는지 파이썬 라이브러리로 검사합니다. | `test_runner.py`의<br>
-
-<br>`_schema_check` |
-| **2. 과업 검사**<br>
-
-<br>(Agent 전용) | **③ Task Completion**<br>
-
-<br>(지시 과업 달성도) | **[Python Custom Logic]**<br>
-
-<br>대상 AI가 인프라를 제어하는 Agent일 경우, 상태 코드(`status_code=200`)나 특정 문자열(`raw~r/완료/`)을 반환했는지 자체 정규식 파서로 복합 검사합니다. | `test_runner.py`의<br>
-
-<br>`_evaluate_agent_criteria` |
-| **3. 심층 평가**<br>
-
-<br>(문맥 채점) | **④ Answer Relevancy**<br>
-
-<br>(동문서답 여부) | **[DeepEval + Ollama]**<br>
-
-<br>DeepEval 프레임워크가 로컬 LLM(Ollama)을 심판관으로 기용하여, AI의 대답이 질문 의도에 부합하는지 0~1점 사이의 실수로 정밀 채점합니다. | `test_runner.py`의<br>
-
-<br>`AnswerRelevancyMetric` |
-|  | **⑤ Faithfulness**<br>
-
-<br>(환각/거짓말 여부) | **[DeepEval + Ollama]**<br>
-
-<br>답변 내용이 백그라운드에서 검색된 원문(`docs`)에 명시된 사실인지, 지어낸 말인지 채점합니다. (※ 대상 시스템이 원문을 반환하지 않으면 오탐 방지를 위해 생략합니다.) | `test_runner.py`의<br>
-
-<br>`FaithfulnessMetric` |
-|  | **⑥ Contextual Recall**<br>
-
-<br>(정보 검색력) | **[DeepEval + Ollama]**<br>
-
-<br>질문에 답하기 위해 AI가 충분하고 올바른 정보(원문)를 검색해 왔는지 채점합니다. (※ 검색 원문 확인이 가능한 API 모드 전용입니다.) | `test_runner.py`의<br>
-
-<br>`ContextualRecallMetric` |
-| **4. 운영 관제** | **⑦ Latency**<br>
-
-<br>(응답 소요 시간) | **[Python `time` + Langfuse]**<br>
-
-<br>질문을 던진 시점부터 답변 수신(또는 화면 렌더링) 완료까지의 체감 시간을 밀리초(ms)로 재고 Langfuse에 전송합니다. | `adapters/` 내부의<br>
-
-<br>타이머 변수 |
+|---|---|---|---|
+| **1. Fail-Fast** (즉시 차단) | **① Policy Violation** (보안/금칙어 위반) | **[Promptfoo]** AI의 응답을 임시 파일로 저장한 뒤, 외장 도구인 Promptfoo를 CLI로 호출하여 주민등록번호나 API Key 등 정의된 정규식 패턴이 발견되면 즉시 불합격시킵니다. | `test_runner.py`의 `_promptfoo_check` |
+| | **② Format Compliance** (응답 규격 준수) | **[jsonschema (Python)]** 대상 AI가 API일 경우, 반환한 JSON 데이터가 우리가 요구한 필수 형태(예: `answer` 키 포함)를 갖추었는지 파이썬 라이브러리로 검사합니다. | `test_runner.py`의 `_schema_check` |
+| **2. 과업 검사** (Agent 전용) | **③ Task Completion** (지시 과업 달성도) | **[Python Custom Logic]** 대상 AI가 인프라를 제어하는 Agent일 경우, 상태 코드(`status_code=200`)나 특정 문자열(`raw~r/완료/`)을 반환했는지 자체 정규식 파서로 복합 검사합니다. | `test_runner.py`의 `_evaluate_agent_criteria` |
+| **3. 심층 평가** (문맥 채점) | **④ Answer Relevancy** (동문서답 여부) | **[DeepEval + Ollama]** DeepEval 프레임워크가 로컬 LLM(Ollama)을 심판관으로 기용하여, AI의 대답이 질문 의도에 부합하는지 0~1점 사이의 실수로 정밀 채점합니다. | `test_runner.py`의 `AnswerRelevancyMetric` |
+| | **⑤ Faithfulness** (환각/거짓말 여부) | **[DeepEval + Ollama]** 답변 내용이 백그라운드에서 검색된 원문(`docs`)에 명시된 사실인지, 지어낸 말인지 채점합니다. (※ 대상 시스템이 원문을 반환하지 않으면 오탐 방지를 위해 생략합니다.) | `test_runner.py`의 `FaithfulnessMetric` |
+| | **⑥ Contextual Recall** (정보 검색력) | **[DeepEval + Ollama]** 질문에 답하기 위해 AI가 충분하고 올바른 정보(원문)를 검색해 왔는지 채점합니다. (※ 검색 원문 확인이 가능한 API 모드 전용입니다.) | `test_runner.py`의 `ContextualRecallMetric` |
+| **4. 운영 관제** | **⑦ Latency** (응답 소요 시간) | **[Python `time` + Langfuse]** 질문을 던진 시점부터 답변 수신(또는 화면 렌더링) 완료까지의 체감 시간을 밀리초(ms)로 재고 Langfuse에 전송합니다. | `adapters/` 내부의 타이머 변수 |
 
 ---
 
@@ -78,7 +30,7 @@
 
 ---
 
-## 제3장. Jenkins Credentials 사전 등록 (보안)
+## 🛠️ 제3장. Jenkins Credentials 사전 등록 (보안)
 
 파이프라인 소스 코드에 Langfuse API Key를 하드코딩하면 보안 취약점이 발생합니다. Jenkins의 암호화 저장소를 이용합니다.
 
@@ -90,7 +42,7 @@
 
 ---
 
-## 제4장. 호스트 디렉터리 세팅 및 Docker 인프라 병합 구성
+## 🛠️ 제4장. 호스트 디렉터리 세팅 및 Docker 인프라 병합 구성
 
 기존 DSCORE-TTC의 DevOps 및 지식 관리 인프라를 전혀 건드리지 않고, 필요한 패키지와 서비스만 정확하게 덧붙이는 과정입니다.
 
@@ -110,7 +62,6 @@ mkdir -p data/knowledges/eval/reports
 
 # 3. Langfuse 관제탑 데이터베이스 보존용 폴더
 mkdir -p data/postgres-langfuse
-
 ```
 
 ### 4.2 `Dockerfile.jenkins` (기존 구성 + 신규 평가 도구 통합)
@@ -154,7 +105,6 @@ RUN mkdir -p /var/jenkins_home/scripts \
     && chown -R jenkins:jenkins /var/jenkins_home
 
 USER jenkins
-
 ```
 
 ### 4.3 `docker-compose.yaml` (기존 구성 + Langfuse 서버 통합)
@@ -282,14 +232,13 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
 ```
 
 **실행 명령:** `<PROJECT_ROOT>`에서 `docker compose up -d --build` 를 실행하여 인프라를 구동합니다.
 
 ---
 
-## 제5장. 파이썬 평가 스크립트 작성 (상세 주석 완비)
+## 🛠️ 제5장. 파이썬 평가 스크립트 작성 (상세 주석 완비)
 
 초보자도 코드의 흐름을 이해할 수 있도록 상세한 주석을 포함한 7개의 파이썬 및 설정 파일을 각 경로에 생성합니다.
 
@@ -297,7 +246,7 @@ services:
 
 **① `base.py` (데이터 표준 규격서)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/adapters/base.py`
+경로: `./data/jenkins/scripts/eval_runner/adapters/base.py`
 
 ```python
 from dataclasses import dataclass, field
@@ -328,12 +277,11 @@ class BaseAdapter:
 
     def invoke(self, input_text: str, **kwargs) -> UniversalEvalOutput:
         raise NotImplementedError
-
 ```
 
 **② `http_adapter.py` (API 통신 및 동적 파싱)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/adapters/http_adapter.py`
+경로: `./data/jenkins/scripts/eval_runner/adapters/http_adapter.py`
 
 ```python
 import time, os, requests
@@ -385,12 +333,11 @@ class GenericHttpAdapter(BaseAdapter):
 
         except Exception as e:
             return UniversalEvalOutput(input=input_text, actual_output="", error=str(e), latency_ms=int((time.time() - start_time) * 1000))
-
 ```
 
 **③ `playwright_adapter.py` (웹 스크래핑 및 자가 치유)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/adapters/playwright_adapter.py`
+경로: `./data/jenkins/scripts/eval_runner/adapters/playwright_adapter.py`
 
 ```python
 import time, os
@@ -443,12 +390,11 @@ class PlaywrightChatbotAdapter(BaseAdapter):
                 browser.close()
 
         return UniversalEvalOutput(input=input_text, actual_output=actual_out, http_status=200, raw_response=actual_out, latency_ms=lat_ms, error=error_msg)
-
 ```
 
 **④ `registry.py` (어댑터 교환기)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/adapters/registry.py`
+경로: `./data/jenkins/scripts/eval_runner/adapters/registry.py`
 
 ```python
 from .http_adapter import GenericHttpAdapter
@@ -459,14 +405,13 @@ class AdapterRegistry:
     def get_instance(cls, name: str, target_url: str):
         adapter_class = {"http": GenericHttpAdapter, "ui_chat": PlaywrightChatbotAdapter}.get(name, GenericHttpAdapter)
         return adapter_class(target_url)
-
 ```
 
 ### 5.2 검증 룰셋 파일 (`configs/` 폴더)
 
 **⑤ `security.yaml` (금칙어 규칙)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/configs/security.yaml`
+경로: `./data/jenkins/scripts/eval_runner/configs/security.yaml`
 
 ```yaml
 prompts: [ "{{ prompt }}" ]
@@ -474,23 +419,21 @@ providers: [ "echo" ]
 tests:
   - vars: { name: "pii_check" }
     assert: [ { type: not-contains-regex, value: "\\b\\d{6}-\\d{7}\\b" } ]
-
 ```
 
 **⑥ `schema.json` (응답 구조 규칙)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/configs/schema.json`
+경로: `./data/jenkins/scripts/eval_runner/configs/schema.json`
 
 ```json
 {"type": "object"}
-
 ```
 
 ### 5.3 총괄 평가관 (`tests/test_runner.py`)
 
 **⑦ `test_runner.py` (평가 및 Langfuse 기록 로직)**
 
-* **경로:** `./data/jenkins/scripts/eval_runner/tests/test_runner.py`
+경로: `./data/jenkins/scripts/eval_runner/tests/test_runner.py`
 
 ```python
 import os, json, re, tempfile, subprocess, pytest, pandas as pd, uuid
@@ -565,12 +508,11 @@ def test_eval(case):
         m.measure(tc)
         trace.score(name=m.__class__.__name__, value=m.score, comment=m.reason)
     assert_test(tc, mets)
-
 ```
 
 ---
 
-## 제6장. Jenkins 파이프라인 생성 (운영 UI)
+## 🛠️ 제6장. Jenkins 파이프라인 생성 (운영 UI)
 
 사용자가 쉽게 실행할 수 있도록 Jenkins 파이프라인을 생성합니다. API 키는 코드 내 하드코딩되지 않고 `withCredentials`를 통해 안전하게 주입됩니다.
 
@@ -657,12 +599,11 @@ pipeline {
         }
     }
 }
-
 ```
 
 ---
 
-## 제7장. 실행 및 측정 결과 확인 (사용자 가이드)
+## 💯 제7장. 실행 및 측정 결과 확인 (사용자 가이드)
 
 ### 7.1 평가 시험지(CSV) 작성
 
@@ -671,7 +612,6 @@ pipeline {
 ```csv
 case_id,target_type,input,expected_output,success_criteria
 ,rag,테스트 질문입니다. 이 시스템의 목적은?,AI 품질의 정량 검증입니다.,
-
 ```
 
 ### 7.2 파이프라인 실행
@@ -683,13 +623,14 @@ case_id,target_type,input,expected_output,success_criteria
 
 #### 📊 확인 1: Jenkins 대시보드 (Pass/Fail 직관적 확인)
 
-* 빌드 결과의 `Test Result` 트렌드 그래프를 봅니다.
-* 만약 빨간색 실패가 떴다면 `Console Output`을 열어보십시오. Promptfoo 금칙어 정책 위반이나, JSON 규격 불일치로 인한 **Fail-Fast** 발생 시 여기에 명확한 사유가 찍힙니다.
+- 빌드 결과의 `Test Result` 트렌드 그래프를 봅니다.
+- 만약 빨간색 실패가 떴다면 `Console Output`을 열어보십시오. Promptfoo 금칙어 정책 위반이나, JSON 규격 불일치로 인한 **Fail-Fast** 발생 시 여기에 명확한 사유가 찍힙니다.
 
 #### 🔍 확인 2: Langfuse 대시보드 (심층 점수 및 감점 사유 분석)
 
-* Jenkins 화면 중앙에 나타난 **"👉 [Langfuse 관제탑]..."** 딥링크를 클릭합니다.
-* 열린 화면(Traces 리스트)에서 테스트 항목을 하나 클릭하면 다음을 볼 수 있습니다.
+- Jenkins 화면 중앙에 나타난 **"👉 [Langfuse 관제탑]..."** 딥링크를 클릭합니다.
+- 열린 화면(Traces 리스트)에서 테스트 항목을 하나 클릭하면 다음을 볼 수 있습니다.
+
 1. **응답 소요 시간(Latency)**: 우측 상단에 밀리초(ms)로 표기됩니다.
 2. **심층 문맥 점수(Scores)**: 화면 중앙/하단의 `Scores` 탭에서 LLM이 채점한 `AnswerRelevancy`, `Faithfulness` 점수(0.0~1.0)를 확인합니다.
 3. **심판관 감점 사유(Comment)**: 해당 점수 우측의 `Comment` 필드를 열람하십시오. 심판관이 *"답변 내용이 의도와 일치하지 않으므로 0.3점을 부여합니다"* 와 같이 적어둔 평가 리포트를 통해 AI의 품질을 파악할 수 있습니다.
