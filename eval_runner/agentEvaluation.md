@@ -1,4 +1,4 @@
-# DSCORE-TTC: 외부 AI 에이전트 평가 시스템 E2E 통합 구축 마스터 매뉴얼 (최종판)
+# DSCORE-TTC: 외부 AI 에이전트 평가 시스템 E2E 통합 구축 마스터 매뉴얼
 
 ## 제1장. 10대 측정 지표(Metrics) 및 프레임워크 매핑 안내
 
@@ -111,7 +111,7 @@ networks:
 
 services:
   # ==========================================
-  # [기존] SonarQube & GitLab Stack
+  # SonarQube & GitLab Stack
   # ==========================================
   postgres-sonar:
     image: postgres:15-alpine
@@ -171,7 +171,7 @@ services:
     restart: unless-stopped
 
   # ==========================================
-  # [신규] Langfuse AI 평가 관제 스택
+  # Langfuse AI 평가 관제 스택
   # ==========================================
   db-langfuse:
     image: postgres:15-alpine
@@ -204,7 +204,7 @@ services:
     restart: unless-stopped
 
   # ==========================================
-  # [수정] 통합 평가 환경이 빌드된 Jenkins
+  # 통합 평가 환경이 빌드된 Jenkins
   # ==========================================
   jenkins:
     build:
