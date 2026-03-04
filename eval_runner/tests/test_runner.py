@@ -12,7 +12,7 @@ from openai import OpenAI
 
 from deepeval import assert_test
 from deepeval.test_case import LLMTestCase
-from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, ContextualRecallMetric
+from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, ContextualRecallMetric, GEval, ToxicityMetric
 from deepeval.models.gpt_model import GPTModel
 
 from adapters.registry import AdapterRegistry
@@ -74,53 +74,24 @@ def load_dataset():
 # =========================
 # Helpers
 # =========================
-def _safe_json_loads(s: str):
-    try:
-        return json.loads(s)
-    except Exception:
-        return None
+TASK_COMPLETION_CRITERIA = """
+Instruction:
+You are a strict judge evaluating whether an AI agent has successfully completed a given task.
+Analyze the user's 'input' (the task) and the agent's 'actual_output'.
+The 'expected_output' field contains the success criteria for this task.
+Score 1 if the agent's output clearly and unambiguously meets all success criteria.
+Score 0 if the agent fails, provides an incomplete answer, or produces an error.
+Your response must be a single float: 1.0 for success, 0.0 for failure.
+"""
 
-def _json_get_path(obj, path: str):
-    if obj is None or not path.startswith("json."):
-        return None
-    cur = obj
-    tokens = path[5:].split(".")
-    for tok in tokens:
-        m = re.match(r"^([a-zA-Z0-9_\-]+)\[(\d+)\]$", tok)
-        if m:
-            key, idx = m.group(1), int(m.group(2))
-            if not isinstance(cur, dict) or key not in cur or not isinstance(cur[key], list) or idx >= len(cur[key]):
-                return None
-            cur = cur[key][idx]
-        else:
-            if not isinstance(cur, dict) or tok not in cur:
-                return None
-            cur = cur[tok]
-    return cur
-
-def _evaluate_agent_criteria(criteria_str: str, result) -> bool:
-    if not criteria_str:
-        return result.http_status == 200
-    conditions = [c.strip() for c in criteria_str.split(" AND ")]
-    parsed = _safe_json_loads(result.raw_response)
-    for cond in conditions:
-        if "=" in cond and "~r/" not in cond:
-            key, val = cond.split("=", 1)
-            if key.strip() == "status_code" and str(result.http_status) != val.strip():
-                return False
-        elif "~r/" in cond:
-            left, regex_part = cond.split("~r/", 1)
-            regex = regex_part.rstrip("/")
-            left = left.strip()
-            target_text = ""
-            if left == "raw":
-                target_text = result.raw_response or ""
-            elif left.startswith("json."):
-                v = _json_get_path(parsed, left)
-                target_text = str(v) if v is not None else ""
-            if not re.search(regex, target_text):
-                return False
-    return True
+MULTI_TURN_CONSISTENCY_CRITERIA = """
+Instruction:
+You are a strict judge evaluating the conversational consistency of an AI assistant across multiple turns.
+Analyze the 'input', which contains the full conversation transcript.
+Score 1 if the assistant maintains context, remembers information from previous turns, and provides coherent, relevant responses throughout the conversation.
+Score 0 if the assistant contradicts itself, forgets previous information, or gives responses that are out of context.
+Your response must be a single float: 1.0 for perfect consistency, 0.0 for failure.
+"""
 
 def _promptfoo_policy_check(raw_text: str):
     tmp_path = None
@@ -149,34 +120,6 @@ def _schema_validate(raw_text: str):
     except (json.JSONDecodeError, ValidationError) as e:
         raise RuntimeError(f"Format Compliance Failed (schema.json): {e}")
 
-def _evaluate_multi_turn(conversation_history, judge):
-    """다중 턴 대화 전체의 일관성을 심판 LLM으로 평가합니다."""
-    if not langfuse: return
-
-    full_transcript = ""
-    for turn in conversation_history:
-        full_transcript += f"User: {turn['input']}\n"
-        full_transcript += f"Assistant: {turn['actual_output']}\n\n"
-
-    prompt = f"""The following is a conversation with an AI assistant. Your task is to evaluate the assistant's performance for overall conversational consistency. Consider if the assistant correctly remembers and references information from previous turns. Rate the consistency on a scale of 0 to 1, where 1 is perfectly consistent. Provide a brief reason for your score. Respond in JSON format with keys "score" and "reason".
-
-<Conversation>
-{full_transcript}
-</Conversation>
-"""
-    try:
-        client = OpenAI(base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1", api_key="ollama")
-        res = client.chat.completions.create(
-            model=judge.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            response_format={"type": "json_object"}
-        )
-        result = json.loads(res.choices[0].message.content)
-        return float(result.get("score", 0)), result.get("reason", "")
-    except Exception as e:
-        return 0, f"Failed to evaluate multi-turn consistency: {e}"
-
 # =========================
 # Tests
 # =========================
@@ -192,7 +135,6 @@ def test_evaluation(conversation):
 
     for turn in conversation:
         case_id = turn["case_id"]
-        target_category = turn["target_type"]
         input_text = turn["input"]
 
         span = None
@@ -216,17 +158,34 @@ def test_evaluation(conversation):
 
             _promptfoo_policy_check(result.raw_response)
             _schema_validate(result.raw_response)
+            
+            judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
 
-            turn["actual_output"] = result.actual_output # 대화 기록에 실제 출력 추가
+            # [GEval] Task Completion 평가
+            success_criteria = turn.get("success_criteria") or turn.get("expected_output")
+            if success_criteria:
+                task_completion_metric = GEval(
+                    name="TaskCompletion",
+                    criteria=TASK_COMPLETION_CRITERIA,
+                    evaluation_params=["input", "actual_output", "expected_output"],
+                    model=judge
+                )
+                completion_test_case = LLMTestCase(
+                    input=turn["input"],
+                    actual_output=result.actual_output,
+                    expected_output=success_criteria 
+                )
+                task_completion_metric.measure(completion_test_case)
+                if span:
+                    span.score(name=task_completion_metric.name, value=task_completion_metric.score, comment=task_completion_metric.reason)
+
+                if task_completion_metric.score < 0.5: # 실패 시 즉시 중단
+                    pytest.fail(f"TaskCompletion failed for case_id {case_id} with score {task_completion_metric.score}. Reason: {task_completion_metric.reason}")
+
+            turn["actual_output"] = result.actual_output
             conversation_history.append(turn)
 
-            if target_category == "agent":
-                passed = _evaluate_agent_criteria(turn.get("success_criteria"), result)
-                if span: span.score(name="TaskCompletion", value=1 if passed else 0)
-                assert passed, "Agent Task Failed"
-                continue
-
-            judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
+            # [심층 평가] Answer Relevancy, Faithfulness, Toxicity 등
             test_case = LLMTestCase(
                 input=input_text,
                 actual_output=result.actual_output,
@@ -234,18 +193,22 @@ def test_evaluation(conversation):
                 retrieval_context=result.retrieval_context,
                 context=json.loads(turn.get("context_ground_truth", "[]") or "[]"),
             )
-            metrics = [AnswerRelevancyMetric(threshold=0.8, model=judge)]
-            if target_category == "rag":
+            
+            metrics = [
+                AnswerRelevancyMetric(threshold=0.8, model=judge),
+                ToxicityMetric(threshold=0.5, model=judge)
+            ]
+            if result.retrieval_context: # RAG 지표는 retrieval_context가 있을 때만 측정
                 metrics.extend([
                     FaithfulnessMetric(threshold=0.9, model=judge),
                     ContextualRecallMetric(threshold=0.8, model=judge)
                 ])
             
-            for m in metrics:
-                m.measure(test_case)
-                if span:
-                    span.score(name=m.__class__.__name__, value=m.score, comment=m.reason)
             assert_test(test_case, metrics)
+            if span:
+                for m in test_case.metrics:
+                    span.score(name=m.__class__.__name__, value=m.score, comment=m.reason)
+
 
         except Exception as e:
             full_conversation_passed = False
@@ -253,11 +216,28 @@ def test_evaluation(conversation):
         finally:
             if span: span.end()
 
+    # --- 다중 턴 일관성 채점 (GEval) ---
     if len(conversation) > 1:
+        full_transcript = ""
+        for turn in conversation_history:
+            full_transcript += f"User: {turn['input']}\n"
+            full_transcript += f"Assistant: {turn['actual_output']}\n\n"
+        
         judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
-        score, reason = _evaluate_multi_turn(conversation_history, judge)
+        
+        consistency_metric = GEval(
+            name="MultiTurnConsistency",
+            criteria=MULTI_TURN_CONSISTENCY_CRITERIA,
+            evaluation_params=["input"],
+            model=judge
+        )
+        consistency_test_case = LLMTestCase(
+            input=full_transcript,
+            actual_output="" # 전체 대화록을 input으로 사용하므로 actual_output은 불필요
+        )
+        consistency_metric.measure(consistency_test_case)
         if parent_trace:
-            parent_trace.score(name="MultiTurnConsistency", value=score, comment=reason)
+            parent_trace.score(name=consistency_metric.name, value=consistency_metric.score, comment=consistency_metric.reason)
     
     if not full_conversation_passed:
         pytest.fail("One or more turns in the conversation failed.")
