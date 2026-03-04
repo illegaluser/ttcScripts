@@ -1,8 +1,8 @@
 # DSCORE-TTC: 외부 AI 에이전트 평가 시스템 E2E 통합 구축 마스터 매뉴얼
 
-## 제1장. 10대 측정 지표(Metrics) 및 프레임워크 매핑 안내
+## 제1장. 11대 측정 지표(Metrics) 및 프레임워크 매핑 안내
 
-본 시스템은 리소스 낭비를 막고 평가의 신뢰도를 높이기 위해 3단계(즉시 차단 -> 과업 검사 -> 문맥 평가)로 나누어 총 10가지 지표를 측정합니다.
+본 시스템은 리소스 낭비를 막고 평가의 신뢰도를 높이기 위해 4단계(즉시 차단 -> 과업 검사 -> 문맥 평가 -> 연속성 평가)로 나누어 총 11가지 지표를 측정합니다.
 
 | 검증 단계 | 측정 지표 (Metric) | 담당 프레임워크 및 측정 원리 | 코드 위치 |
 |---|---|---|---|
@@ -14,8 +14,23 @@
 | | **⑥ Faithfulness** (환각/거짓말 여부) | **[DeepEval + Ollama]** 답변 내용이 백그라운드에서 검색된 원문(`docs`)에 명시된 사실인지, 아니면 AI가 지어낸 말인지 채점합니다. (※ 원문이 없으면 오탐 방지를 위해 생략됩니다.) | `test_runner.py`의 `FaithfulnessMetric` |
 | | **⑦ Contextual Recall** (정보 검색력) | **[DeepEval + Ollama]** 질문에 답하기 위해 AI가 필수적인 정보(원문)를 올바르게 검색해 왔는지 채점합니다. (※ API 모드에서만 작동합니다.) | `test_runner.py`의 `ContextualRecallMetric` |
 | | **⑧ Contextual Precision** (검색 정밀도) | **[DeepEval + Ollama]** 검색해 온 원문(`docs`) 안에 쓸데없는 쓰레기 정보(노이즈)가 얼마나 섞여 있는지 채점합니다. (※ API 모드에서만 작동합니다.) | `test_runner.py`의 `ContextualPrecisionMetric` |
-| **4. 운영 관제** | **⑨ Latency** (응답 소요 시간) | **[Python `time` + Langfuse]** 어댑터가 질문을 던진 시점부터 답변 텍스트 수신(또는 웹 렌더링) 완료까지의 시간을 파이썬 타이머로 재고, 이를 Langfuse에 전송합니다. | `adapters/` 내부 타이머 변수 |
-| | **⑩ Token Usage** (토큰 비용) | **[Python + Langfuse]** API 통신 시 소모된 프롬프트/완성 토큰 수를 추출하여 기록합니다. (※ API에 usage 필드가 없으면 빈 데이터로 넘어가며 에러 없이 생략됩니다.) | `http_adapter.py` 및 `test_runner.py` |
+| **4. 다중 턴 평가** | **⑨ Multi-turn Consistency** (다중 턴 일관성) | **[Python + Ollama]** 여러 번의 질문-답변이 오가는 대화가 끝난 뒤, 전체 대화 기록을 심판관 LLM에게 전달하여 맥락을 유지하고 있는지, 동문서답을 하는지 등 종합적 일관성을 0~1점 사이로 채점합니다. | `test_runner.py`의 `_evaluate_multi_turn` |
+| **5. 운영 관제** | **⑩ Latency** (응답 소요 시간) | **[Python `time` + Langfuse]** 어댑터가 질문을 던진 시점부터 답변 텍스트 수신(또는 웹 렌더링) 완료까지의 시간을 파이썬 타이머로 재고, 이를 Langfuse에 전송합니다. | `adapters/` 내부 타이머 변수 |
+| | **⑪ Token Usage** (토큰 비용) | **[Python + Langfuse]** API 통신 시 소모된 프롬프트/완성 토큰 수를 추출하여 기록합니다. (※ API에 usage 필드가 없으면 빈 데이터로 넘어가며 에러 없이 생략됩니다.) | `http_adapter.py` 및 `test_runner.py` |
+
+### 1.1. 다중 턴(Multi-turn) 시험지 작성법
+
+`golden.csv` 파일에 `conversation_id`와 `turn_id` 컬럼을 추가하면, 시스템이 자동으로 다중 턴 대화로 인식하여 평가합니다.
+
+- **`conversation_id`**: 동일한 대화를 식별하는 ID입니다. 이 값이 같은 행들은 하나의 대화로 묶입니다.
+- **`turn_id`**: 대화의 순서를 나타냅니다. 1부터 시작하여 1씩 증가해야 합니다.
+
+| case_id | conversation_id | turn_id | target_type | input | expected_output |
+|---|---|---|---|---|---|
+| multi-1 | conv-001 | 1 | chat | 우리 회사 이름은 '행복상사'야. | 알겠습니다. '행복상사'라고 기억하겠습니다. |
+| multi-2 | conv-001 | 2 | chat | 그럼 우리 회사 이름이 뭐야? | 행복상사입니다. |
+| multi-3 | conv-002 | 1 | chat | 내 이름은 김철수야. | 반갑습니다, 김철수님. |
+| multi-4 | conv-002 | 2 | chat | 내 이름 기억하고 있니? | 네, 김철수님으로 기억하고 있습니다. |
 
 ---
 

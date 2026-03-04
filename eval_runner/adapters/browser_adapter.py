@@ -1,12 +1,13 @@
 import time
 from .base import BaseAdapter, UniversalEvalOutput
 
+from typing import List, Dict, Optional
 class BrowserUIAdapter(BaseAdapter):
     """
     Playwright를 사용하여 웹 UI 기반의 에이전트를 평가하는 어댑터.
     API가 제공되지 않는 경우 사용하며, 대상 사이트의 DOM 구조에 따라 Selector 수정이 필요할 수 있음.
     """
-    def invoke(self, input_text: str, **kwargs) -> UniversalEvalOutput:
+    def invoke(self, input_text: str, history: Optional[List[Dict]] = None, **kwargs) -> UniversalEvalOutput:
         # 런타임에만 Playwright 의존성 필요
         try:
             from playwright.sync_api import sync_playwright

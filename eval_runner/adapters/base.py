@@ -29,5 +29,5 @@ class BaseAdapter:
         self.target_url = target_url
         self.api_key = api_key
 
-    def invoke(self, input_text: str, **kwargs) -> UniversalEvalOutput:
+    def invoke(self, input_text: str, history: Optional[List[Dict]] = None, **kwargs) -> UniversalEvalOutput:
         raise NotImplementedError

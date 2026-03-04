@@ -1,17 +1,26 @@
 import time
 import json
 import requests
+from typing import List, Dict, Optional
 from .base import BaseAdapter, UniversalEvalOutput
 
 class GenericHttpAdapter(BaseAdapter):
-    def invoke(self, input_text: str, **kwargs) -> UniversalEvalOutput:
+    def invoke(self, input_text: str, history: Optional[List[Dict]] = None, **kwargs) -> UniversalEvalOutput:
         start_time = time.time()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        messages = []
+        if history:
+            for turn in history:
+                messages.append({"role": "user", "content": turn["input"]})
+                messages.append({"role": "assistant", "content": turn["actual_output"]})
+        messages.append({"role": "user", "content": input_text})
+
         payload = {
-            "query": input_text,
+            "messages": messages,
+            "query": input_text, # For backward compatibility
             "inputs": kwargs.get("inputs", {}),
             "user": "eval-runner",
         }
