@@ -8,6 +8,7 @@ class BrowserUIAdapter(BaseAdapter):
     API가 제공되지 않는 경우 사용하며, 대상 사이트의 DOM 구조에 따라 Selector 수정이 필요할 수 있음.
     """
     def invoke(self, input_text: str, history: Optional[List[Dict]] = None, **kwargs) -> UniversalEvalOutput:
+        start_time = time.time()
         # 런타임에만 Playwright 의존성 필요
         try:
             from playwright.sync_api import sync_playwright
@@ -16,10 +17,9 @@ class BrowserUIAdapter(BaseAdapter):
                 input=input_text,
                 actual_output="",
                 error="Playwright not installed. Run: pip install playwright && playwright install",
-                http_status=500
+                http_status=500,
+                latency_ms=int((time.time() - start_time) * 1000)
             )
-
-        start_time = time.time()
         
         try:
             with sync_playwright() as p:

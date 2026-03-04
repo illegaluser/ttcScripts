@@ -57,6 +57,15 @@ class GenericHttpAdapter(BaseAdapter):
             contexts = data.get("docs", [])
             if isinstance(contexts, str):
                 contexts = [contexts]
+            
+            parsed_usage = {}
+            usage_data = data.get("usage", {})
+            if usage_data:
+                parsed_usage = {
+                    "promptTokens": usage_data.get("prompt_tokens", 0),
+                    "completionTokens": usage_data.get("completion_tokens", 0),
+                    "totalTokens": usage_data.get("total_tokens", 0),
+                }
 
             return UniversalEvalOutput(
                 input=input_text,
@@ -66,6 +75,7 @@ class GenericHttpAdapter(BaseAdapter):
                 http_status=status_code,
                 raw_response=raw_response,
                 latency_ms=latency,
+                usage=parsed_usage,
             )
 
         except Exception as e:

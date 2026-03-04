@@ -32,6 +32,7 @@ API_KEY = os.environ.get("API_KEY")
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY")
 LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST")
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "qwen3-coder:30b")
 
 RUN_ID = os.environ.get("BUILD_TAG") or os.environ.get("BUILD_ID") or str(int(time.time()))
 
@@ -46,16 +47,17 @@ if Langfuse and LANGFUSE_PUBLIC_KEY:
 # =========================
 # Dataset
 # =========================
+GOLDEN_CSV_PATH = os.environ.get("GOLDEN_CSV_PATH", "/app/data/golden.csv")
+
 def load_dataset():
     """
     `golden.csv`를 읽어 다중 턴 대화 단위로 그룹화하여 반환합니다.
     `conversation_id`가 없는 경우, 단일 턴 대화로 처리합니다.
     """
-    csv_path = "/app/data/golden.csv"
-    if not os.path.exists(csv_path):
-        return []
+    if not os.path.exists(GOLDEN_CSV_PATH):
+        raise FileNotFoundError(f"Evaluation dataset not found at {GOLDEN_CSV_PATH}")
     
-    df = pd.read_csv(csv_path).where(pd.notnull(df), None)
+    df = pd.read_csv(GOLDEN_CSV_PATH).where(pd.notnull(df), None)
     
     # 다중 턴 대화 지원
     if "conversation_id" in df.columns and "turn_id" in df.columns:
@@ -121,13 +123,19 @@ def _evaluate_agent_criteria(criteria_str: str, result) -> bool:
     return True
 
 def _promptfoo_policy_check(raw_text: str):
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-        tmp.write(raw_text or "")
-        tmp_path = tmp.name
-    cmd = ["promptfoo", "eval", "-c", "/app/configs/security.yaml", "--prompts", f"file://{tmp_path}", "-o", "json"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr or proc.stdout or "Promptfoo failed")
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+            tmp.write(raw_text or "")
+            tmp_path = tmp.name
+        
+        cmd = ["promptfoo", "eval", "-c", "/app/configs/security.yaml", "--prompts", f"file://{tmp_path}", "-o", "json"]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr or proc.stdout or "Promptfoo failed")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 def _schema_validate(raw_text: str):
     schema_path = "/app/configs/schema.json"
@@ -195,8 +203,12 @@ def test_evaluation(conversation):
             adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY)
             result = adapter.invoke(input_text, history=conversation_history)
 
+            update_payload = {"output": result.to_dict()}
+            if result.usage:
+                update_payload["usage"] = result.usage
+            
             if span:
-                span.update(output=result.to_dict())
+                span.update(**update_payload)
                 span.score(name="Latency", value=result.latency_ms, comment="ms")
 
             if result.error:
@@ -214,7 +226,7 @@ def test_evaluation(conversation):
                 assert passed, "Agent Task Failed"
                 continue
 
-            judge = GPTModel(model="qwen3-coder:30b", base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
+            judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
             test_case = LLMTestCase(
                 input=input_text,
                 actual_output=result.actual_output,
@@ -242,7 +254,7 @@ def test_evaluation(conversation):
             if span: span.end()
 
     if len(conversation) > 1:
-        judge = GPTModel(model="qwen3-coder:30b", base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
+        judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
         score, reason = _evaluate_multi_turn(conversation_history, judge)
         if parent_trace:
             parent_trace.score(name="MultiTurnConsistency", value=score, comment=reason)

@@ -49,11 +49,42 @@ pipeline {
             }
         }
 
-        stage('Publish Report') {
-            steps {
-                // JUnit 리포트 발행 (Jenkins 플러그인 필요)
-                junit 'reports/results.xml'
+                stage('Publish Report') {
+
+                    steps {
+
+                        // JUnit 리포트 발행 (Jenkins 플러그인 필요)
+
+                        junit 'reports/results.xml'
+
+                    }
+
+                }
+
             }
+
+        
+
+            post {
+
+                always {
+
+                    script {
+
+                        // BUILD_TAG에서 URL에 부적합한 문자를 제거하여 XSS 방지
+
+                        def safeBuildTag = env.BUILD_TAG ? env.BUILD_TAG.replaceAll('[^a-zA-Z0-9_.-]', '') : 'latest'
+
+                        def publicLangfuseUrl = "http://localhost:3000/project/traces?filter=tags%3D${safeBuildTag}"
+
+                        currentBuild.description = "Langfuse 결과: ${publicLangfuseUrl}"
+
+                    }
+
+                }
+
+            }
+
         }
-    }
-}
+
+        

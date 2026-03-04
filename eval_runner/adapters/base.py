@@ -11,6 +11,7 @@ class UniversalEvalOutput:
     raw_response: str = ""  # 원본 응답 저장 (Policy/Format 검증용)
     error: Optional[str] = None
     latency_ms: int = 0
+    usage: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self):
         return {
@@ -22,6 +23,7 @@ class UniversalEvalOutput:
             "raw_response": self.raw_response,
             "error": self.error,
             "latency_ms": self.latency_ms,
+            "usage": self.usage,
         }
 
 class BaseAdapter:
