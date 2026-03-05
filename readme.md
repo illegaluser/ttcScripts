@@ -23,7 +23,7 @@
 2. 진단 결과를 GitLab Issue로 자동 등록
 3. 중복 방지 메커니즘 적용
 
-**Phase 4: E2E 테스트 자동화 (Section 9)**
+**Phase 4: E2E 테스트 자동화 (Section 9-10)**
 1. **실제 개발 중인 프로젝트(웹앱)**의 E2E 테스트 자동 작성
 2. Playwright + Roo Code(AI)가 브라우저로 화면 분석
 3. 생성된 테스트를 Jenkins CI/CD 파이프라인에 통합
@@ -43,7 +43,6 @@
 * **온프레미스 DevOps 인프라:** 개발/테스트/배포가 가능한 완전한 환경
 * **AI 기반 지식 관리:** 문서, 코드, 웹 지식의 자동 학습 및 검색
 * **자동화된 품질 분석:** 정적 분석 → LLM 진단 → Issue 등록
-* **E2E 테스트 자동 생성:** AI가 실제 웹앱을 분석하여 테스트 코드 작성
 * **Zero-Touch QA:** 자연어 SRS 기반 자율 E2E 테스트 + Self-Healing + 리그레션 스크립트 생성
 
 ---
@@ -448,7 +447,7 @@ Jenkins 관리 -> Credentials -> System -> Global credentials (unrestricted) -> 
 
 ---
 
-## 4. 파이썬 스크립트 배치 (코드 및 상세 주석)
+## 4. 파이썬 스크립트 배치
 
 모든 스크립트는 Jenkins 컨테이너의 `/var/jenkins_home/scripts/` 경로에 배치하고 실행 권한(`chmod +x`)을 부여한다.
 
@@ -2719,10 +2718,9 @@ def main(llm_response: str, sonar_issue_key: str) -> dict:
 
 ---
 
-## 6. Jenkins Pipeline 구성 (6개 Job, 상세 주석)
+## 6. Jenkins Pipeline 구성
 
-파일이 너무 커서 섹션 6-9는 다음 파일에 계속 작성하겠습니다.
-### 6.1 Job #1: DSCORE-Knowledge-Sync (문서형 Dataset)
+### 6.1 Job #1: 지식주입 (문서 단순 청깅 및 임베딩)
 
 **목적:**
 
@@ -2733,56 +2731,74 @@ def main(llm_response: str, sonar_issue_key: str) -> dict:
 ```groovy
 pipeline {
     agent any
-    
-    // 환경 변수 정의
-    // - SCRIPTS_DIR: Python 스크립트 경로 (컨테이너 기준)
-    // - DOC_FORM: Dify Dataset 문서 형식 (text_model = 문서형)
-    // - DOC_LANGUAGE: 문서 언어 (Korean)
+
     environment {
+        // 스크립트가 위치한 컨테이너 내부 경로
         SCRIPTS_DIR = '/var/jenkins_home/scripts'
-        DOC_FORM = 'text_model'
-        DOC_LANGUAGE = 'Korean'
+        
+        // Dify Dataset의 타입에 맞춰 설정 (문서형: text_model, Q&A형: qa_model)
+        DIFY_DOC_FORM = "text_model"
+        DIFY_DOC_LANG = "Korean"
     }
-    
+
     stages {
-        // ====================================================================
-        // Stage 1: 로컬 문서 변환
-        // - /var/knowledges/docs/org의 원본 문서를 변환
-        // - 변환 결과는 /var/knowledges/docs/result에 저장
-        // - doc_processor.py의 convert 명령 실행
-        // ====================================================================
-        stage('1. Convert Documents') {
+        stage("0. Precheck") {
             steps {
-                echo "[Convert] 로컬 문서 변환 시작"
-                sh "python3 ${SCRIPTS_DIR}/doc_processor.py convert"
+                echo "[Precheck] Jenkins 컨테이너 및 네트워크 상태 확인"
+                sh """
+                    echo "Current User: \$(whoami)"
+                    python3 --version
+                    echo "[Check] 지식 저장소 디렉터리 상태"
+                    ls -al /var/knowledges/docs/org || true
+                    ls -al /var/knowledges/docs/result || true
+                    
+                    echo "[Check] Dify API 연결성 확인 (DNS: api)"
+                    # 404 응답이 오면 네트워크 연결은 정상인 것으로 판단합니다.
+                    curl -sS -o /dev/null -w "%{http_code}\\n" http://api:5001/ || true
+                """
             }
         }
-        
-        // ====================================================================
-        // Stage 2: Dify 업로드
-        // - /var/knowledges/docs/result의 .md와 .pdf 파일을 업로드
-        // - Jenkins Credentials에서 API Key와 Dataset ID를 로드
-        // - doc_processor.py의 upload 명령 실행
-        // ====================================================================
-        stage('2. Upload to Dify') {
+
+        stage("1. Convert Documents") {
+            steps {
+                echo "[Convert] 원본 문서(PDF/PPTX/DOCX 등)를 Markdown으로 변환 시작"
+                sh "python3 ${SCRIPTS_DIR}/doc_processor.py convert"
+                
+                echo "[Convert] 변환 완료 파일 목록"
+                sh "ls -al /var/knowledges/docs/result || true"
+            }
+        }
+
+        stage("2. Upload to Dify") {
             steps {
                 withCredentials([
-                    string(credentialsId: 'dify-knowledge-key', variable: 'DIFY_API_KEY'),
-                    string(credentialsId: 'dify-dataset-id', variable: 'DIFY_DATASET_ID')
+                    string(credentialsId: "dify-knowledge-key", variable: 'DIFY_API_KEY'),
+                    string(credentialsId: "dify-dataset-id", variable: 'DIFY_DATASET_ID')
                 ]) {
                     echo "[Upload] Dify 지식베이스 전송 시작"
-                    sh '''
-                    set -e
-                    # doc_processor.py 규격:
-                    # upload <API_KEY> <DATASET_ID> <doc_form> <doc_language>
-                    python3 ${SCRIPTS_DIR}/doc_processor.py upload "$DIFY_API_KEY" "$DIFY_DATASET_ID" "$DOC_FORM" "$DOC_LANGUAGE"
-                    echo "[Upload] 완료"
-                    '''
+                    
+                    // [핵심 수정] 인자 순서를 doc_processor.py의 수신 로직에 맞게 교정했습니다.
+                    // 순서: upload <API_KEY> <DATASET_ID> <doc_form> <doc_language>
+                    sh """
+                        python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                            "${DIFY_API_KEY}" \
+                            "${DIFY_DATASET_ID}" \
+                            "${DIFY_DOC_FORM}" \
+                            "${DIFY_DOC_LANG}"
+                    """
+                    echo "[Upload] 모든 작업이 완료되었습니다."
                 }
             }
         }
     }
+    
+    post {
+        failure {
+            echo "[Alert] 파이프라인 실행 중 오류가 발생했습니다. Console Output을 확인하세요."
+        }
+    }
 }
+
 ```
 
 **사용 방법:**
@@ -2791,7 +2807,7 @@ pipeline {
 2. Jenkins에서 "Build Now" 실행
 3. Console Output에서 변환 및 업로드 로그 확인
 
-### 6.2 Job #2: DSCORE-Knowledge-Sync-QA (Q&A형 Dataset)
+### 6.2 Job #2: 지식주입 (학습한 지식에 기반한 질문 및 답변 사전생성)
 
 **목적:**
 
@@ -2802,50 +2818,81 @@ Q&A 형식 문서를 Dify Q&A형 Dataset에 업로드한다.
 ```groovy
 pipeline {
     agent any
-    
-    // Q&A형 Dataset 전용 환경 변수
-    // - DOC_FORM: qa_model (Q&A형)
+
     environment {
+        // 스크립트가 위치한 컨테이너 내부 경로
         SCRIPTS_DIR = '/var/jenkins_home/scripts'
-        DOC_FORM = 'qa_model'
-        DOC_LANGUAGE = 'Korean'
+        
+        // [수정] Q&A형 지식 주입이므로 qa_model로 설정
+        DIFY_DOC_FORM = "qa_model"
+        DIFY_DOC_LANG = "Korean"
     }
-    
+
     stages {
-        stage('1. Convert Documents') {
+        stage("0. Precheck") {
             steps {
-                echo "[Convert] Q&A 문서 변환 시작"
-                sh "python3 ${SCRIPTS_DIR}/doc_processor.py convert"
+                echo "[Precheck] Jenkins 컨테이너 및 네트워크 상태 확인"
+                sh """
+                    echo "Current User: \$(whoami)"
+                    python3 --version
+                    echo "[Check] 지식 저장소 디렉터리 상태"
+                    ls -al /var/knowledges/docs/org || true
+                    ls -al /var/knowledges/docs/result || true
+                    
+                    echo "[Check] Dify API 연결성 확인 (DNS: api)"
+                    curl -sS -o /dev/null -w "%{http_code}\\n" http://api:5001/ || true
+                """
             }
         }
-        
-        stage('2. Upload to Dify QA Dataset') {
+
+        stage("1. Convert Documents") {
             steps {
-                // Q&A형 Dataset 전용 Credentials 사용
-                // - dify-knowledge-key-qa: Q&A Dataset API Key
-                // - dify-dataset-id-qa: Q&A Dataset UUID
+                echo "[Convert] 원본 문서(PDF/PPTX/DOCX 등)를 Markdown으로 변환 시작"
+                sh "python3 ${SCRIPTS_DIR}/doc_processor.py convert"
+                
+                echo "[Convert] 변환 완료 파일 목록"
+                sh "ls -al /var/knowledges/docs/result || true"
+            }
+        }
+
+        stage("2. Upload to Dify") {
+            steps {
+                // [수정] QA 전용 Credentials ID를 사용하고, 변수명을 sh 블록과 일치시킵니다.
                 withCredentials([
-                    string(credentialsId: 'dify-knowledge-key-qa', variable: 'DIFY_API_KEY'),
-                    string(credentialsId: 'dify-dataset-id-qa', variable: 'DIFY_DATASET_ID')
+                    string(credentialsId: "dify-knowledge-key-qa", variable: 'DIFY_API_KEY_QA'),
+                    string(credentialsId: "dify-dataset-id-qa", variable: 'DIFY_DATASET_ID_QA')
                 ]) {
-                    echo "[Upload] Q&A Dataset 전송 시작"
-                    sh '''
-                    set -e
-                    python3 ${SCRIPTS_DIR}/doc_processor.py upload "$DIFY_API_KEY" "$DIFY_DATASET_ID" "$DOC_FORM" "$DOC_LANGUAGE"
-                    echo "[Upload] 완료"
-                    '''
+                    echo "[Upload] Dify Q&A 지식베이스 전송 시작"
+                    
+                    // doc_processor.py 순서: upload <API_KEY> <DATASET_ID> <doc_form> <doc_language>
+                    sh """
+                        python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                            "${DIFY_API_KEY_QA}" \
+                            "${DIFY_DATASET_ID_QA}" \
+                            "${DIFY_DOC_FORM}" \
+                            "${DIFY_DOC_LANG}"
+                    """
+                    echo "[Upload] 모든 작업이 완료되었습니다."
                 }
             }
         }
     }
+    
+    post {
+        failure {
+            echo "[Alert] 파이프라인 실행 중 오류가 발생했습니다. Console Output을 확인하세요."
+        }
+    }
 }
+
 ```
 
-### 6.3 Job #3: DSCORE-Knowledge-Sync-Vision (이미지 분석)
+### 6.3 Job #3: 코드 사전학습
 
 **목적:**
 
-이미지 파일을 Llama 3.2 Vision 모델로 분석하고 결과를 Dify Dataset에 업로드한다.
+효과적인 LLM 기반 코드분석을 위해 프로젝트 코드 사전정보를 취합하여 지식화하기 위한 파이프라인.
+Git 레포지토리의 디렉터리 구조와 주요 파일 내용을 추출하여 Dify Dataset에 업로드한다.
 
 **Jenkinsfile:**
 
@@ -2853,49 +2900,86 @@ pipeline {
 pipeline {
     agent any
     
+    parameters {
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git 레포지토리 URL (예: http://gitlab:8929/root/repo.git)')
+    }
+    
     environment {
         SCRIPTS_DIR = '/var/jenkins_home/scripts'
+        WORKSPACE_CODES = '/var/knowledges/codes'
+        RESULT_DIR = '/var/knowledges/docs/result'
         DOC_FORM = 'text_model'
         DOC_LANGUAGE = 'Korean'
     }
     
     stages {
-        // ====================================================================
-        // Stage 1: 이미지 Vision 분석
-        // - /var/knowledges/docs/org의 이미지 파일을 분석
-        // - Ollama API (host.docker.internal:11434) 호출
-        // - 분석 결과를 /var/knowledges/docs/result에 .md로 저장
-        // ====================================================================
-        stage('1. Vision Analysis') {
+        stage('1. Git Clone') {
+            when { expression { params.REPO_URL != '' } }
             steps {
-                echo "[Vision] 이미지 분석 시작"
-                sh "python3 ${SCRIPTS_DIR}/vision_processor.py"
+                echo "[Clone] Git 레포지토리 클론 시작: ${params.REPO_URL}"
+                sh '''
+                set -e
+                REPO_NAME=$(basename "${REPO_URL}" .git)
+                # 기존 코드 디렉터리 초기화
+                rm -rf ${WORKSPACE_CODES}/*
+                # Git 클론 (실제 저장소 이름으로 디렉터리 생성)
+                git clone "${REPO_URL}" ${WORKSPACE_CODES}/$REPO_NAME
+                echo "[Clone] 완료"
+                '''
             }
         }
         
-        stage('2. Upload Vision Results') {
+        stage('2. Build Context') {
+            steps {
+                echo "[Build] 레포지토리 컨텍스트 생성 시작"
+                sh '''
+                set -e
+                REPO_NAME=$(basename "${REPO_URL}" .git)
+                # Dify 중복 업로드 에러 방지를 위해 이전 결과물 삭제
+                rm -rf ${RESULT_DIR}/*
+                
+                # 스크립트 실행 (내부에서 context_저장소이름.md로 자동 생성됨)
+                python3 ${SCRIPTS_DIR}/repo_context_builder.py \
+                    --repo_root ${WORKSPACE_CODES}/$REPO_NAME \
+                    --out ${RESULT_DIR}
+                echo "[Build] 완료"
+                '''
+            }
+        }
+        
+        stage('3. Upload Context') {
             steps {
                 withCredentials([
                     string(credentialsId: 'dify-knowledge-key', variable: 'DIFY_API_KEY'),
                     string(credentialsId: 'dify-dataset-id', variable: 'DIFY_DATASET_ID')
                 ]) {
-                    echo "[Upload] Vision 분석 결과 전송 시작"
+                    echo "[Upload] 코드 컨텍스트 전송 시작"
                     sh '''
                     set -e
-                    python3 ${SCRIPTS_DIR}/doc_processor.py upload "$DIFY_API_KEY" "$DIFY_DATASET_ID" "$DOC_FORM" "$DOC_LANGUAGE"
+                    # doc_processor.py는 RESULT_DIR 내의 모든 .md 파일을 찾아 업로드함
+                    python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                        "$DIFY_API_KEY" \
+                        "$DIFY_DATASET_ID" \
+                        "$DOC_FORM" \
+                        "$DOC_LANGUAGE"
                     echo "[Upload] 완료"
                     '''
                 }
             }
         }
     }
+    
+    post {
+        success {
+            echo "[Success] 코드 지식화 작업이 성공적으로 완료되었습니다."
+        }
+        failure {
+            echo "[Failure] 작업 중 오류가 발생했습니다. 로그를 확인하세요."
+        }
+    }
 }
+
 ```
-
-**사전 요구사항:**
-
-* 호스트에서 `ollama serve` 실행 중
-* `ollama pull llama3.2-vision` 명령으로 모델 설치 완료
 
 ### 6.4 Job #4: DSCORE-Code-Knowledge-Sync (코드 컨텍스트)
 
@@ -3859,7 +3943,7 @@ iPhone 13 화면 크기에서 메뉴가 햄버거 아이콘으로
 
 생성된 Playwright 테스트를 Jenkins Job으로 등록하여 자동 실행한다.
 
-**Job #7: E2E-Test (신규 Pipeline)**
+**추가 Job: E2E-Test (선택, 방식 A용 신규 Pipeline)**
 
 ```groovy
 pipeline {
@@ -4880,7 +4964,7 @@ if __name__ == "__main__":
 
 * Job 이름: `DSCORE-ZeroTouch-QA`
 * Job 유형: Pipeline
-* 입력: `TARGET_URL`, `SRS_FILE`, `MODEL_NAME`, `HEAL_MODE`, `MAX_HEAL_ATTEMPTS`
+* 입력: `TARGET_URL`, `SRS_TEXT`, `MODEL_NAME`, `HEAL_MODE`, `MAX_HEAL_ATTEMPTS`
 * 출력: HTML Report 게시 + 핵심 산출물 아카이빙
 
 **Jenkinsfile:**
@@ -5057,7 +5141,7 @@ SRS는 "테스트하고 싶은 동작"을 문장으로 나열한다.
 
 1. Jenkins에서 `DSCORE-ZeroTouch-QA` Job을 연다.
 2. `Build with Parameters`를 실행한다.
-3. `SRS_FILE`에 텍스트 파일을 업로드한다.
+3. `SRS_TEXT`에 자연어 요구사항을 입력한다.
 4. 필요 시 `HEAL_MODE`, `MAX_HEAL_ATTEMPTS`를 조정한다.
 5. Build를 실행한다.
 
@@ -5153,12 +5237,12 @@ Self-Healing으로 성공했으면 "의도한 기능이 작동"한 것으로 본
 
 ## 제1장. 11대 측정 지표(Metrics) 및 프레임워크 매핑 안내
 
-본 시스템은 리소스 낭비를 막고 평가의 신뢰도를 높이기 위해 4단계(즉시 차단 -> 과업 검사 -> 문맥 평가 -> 연속성 평가)로 나누어 총 11가지 지표를 측정합니다.
+본 시스템은 리소스 낭비를 막고 평가의 신뢰도를 높이기 위해 5단계(즉시 차단 -> 과업 검사 -> 문맥 평가 -> 연속성 평가 -> 운영 관제)로 나누어 총 11가지 지표를 측정합니다.
 
 | 검증 단계 | 측정 지표 (Metric) | 측정 환경 | 담당 프레임워크 및 측정 원리 | 코드 위치 |
 |---|---|---|---|---|
-| **1. Fail-Fast** (즉시 차단) | **① Policy Violation** (보안/금칙어 위반) | **공통** | **[Promptfoo]** AI의 응답 텍스트를 파일로 저장한 뒤, Promptfoo를 CLI로 호출하여 주민등록번호나 비속어 등 사전에 정의된 정규식(Regex) 패턴이 있는지 검사합니다. | `test_runner.py`의 `_promptfoo_check` |
-| | **② Format Compliance** (응답 규격 준수) | **API 전용** | **[jsonschema (Python)]** 대상 AI가 API일 경우, 반환한 JSON 데이터가 사전에 약속한 필수 형태(예: `answer` 키 포함)를 갖추었는지 파이썬 라이브러리로 검사합니다. | `test_runner.py`의 `_schema_check` |
+| **1. Fail-Fast** (즉시 차단) | **① Policy Violation** (보안/금칙어 위반) | **공통** | **[Promptfoo]** AI의 응답 텍스트를 파일로 저장한 뒤, Promptfoo를 CLI로 호출하여 주민등록번호나 비속어 등 사전에 정의된 정규식(Regex) 패턴이 있는지 검사합니다. | `test_runner.py`의 `_promptfoo_policy_check` |
+| | **② Format Compliance** (응답 규격 준수) | **API 전용** | **[jsonschema (Python)]** 대상 AI가 API일 경우, 반환한 JSON 데이터가 사전에 약속한 필수 형태(예: `answer` 키 포함)를 갖추었는지 파이썬 라이브러리로 검사합니다. | `test_runner.py`의 `_schema_validate` |
 | **2. 과업 검사** | **③ Task Completion** (지시 과업 달성도) | **공통** | **[DeepEval GEval + Ollama]** 시험지(`golden.csv`)의 `success_criteria` 컬럼에 자연어로 기술된 성공 기준을 충족했는지 심판 LLM이 `GEval`을 통해 채점합니다. | `test_runner.py`의 `test_evaluation` 함수 |
 | **3. 심층 평가** (문맥 채점) | **④ Answer Relevancy** (동문서답 여부) | **공통** | **[DeepEval + Ollama]** 로컬 LLM을 심판관으로 기용하여, AI의 대답이 사용자의 질문 의도에 부합하는지 0~1점 사이의 실수로 채점합니다. | `test_runner.py`의 `AnswerRelevancyMetric` |
 | | **⑤ Toxicity** (유해성) | **공통** | **[DeepEval + Ollama]** 답변에 혐오/차별 발언이 있는지 평가합니다. (※ DeepEval 프레임워크는 이 지표를 역방향으로 자동 처리합니다. 점수가 임계값 0.5를 초과하면 자동으로 불합격 처리됩니다.) | `test_runner.py`의 `ToxicityMetric` |
@@ -5186,7 +5270,7 @@ Self-Healing으로 성공했으면 "의도한 기능이 작동"한 것으로 본
 
 코드들은 철저히 역할이 분리되어 있습니다. 데이터 흐름 시나리오는 다음과 같습니다.
 
-1. **운영자 입력 (Jenkins UI)**: 운영자가 타겟 주소(`TARGET_URL`), 방식(`TARGET_TYPE`), 인증 키(`TARGET_AUTH_HEADER`), 시험지(`golden.csv`)를 넣고 빌드를 누릅니다.
+1. **운영자 입력 (Jenkins UI)**: 운영자가 타겟 주소(`TARGET_URL`), 방식(`TARGET_TYPE`), 인증 키(`API_KEY`), 시험지(`golden.csv`)를 넣고 빌드를 누릅니다.
 2. **평가관 기동 (`test_runner.py`)**: Jenkins가 `pytest` 명령어를 실행하여 총괄 평가관을 깨웁니다. `test_runner.py`는 `golden.csv`를 읽어 첫 번째 문제를 꺼냅니다.
 3. **어댑터 교환 요청 (`registry.py`)**: `test_runner.py`는 통신 기능이 없으므로, 교환기인 `registry.py`에게 지정된 방식에 맞는 통신원을 요청합니다.
 4. **통신 수행 (`http_adapter.py` / `browser_adapter.py`)**: 통신원은 타겟 AI에 접속해 질문을 던지고, 답변과 토큰 사용량 등을 가져옵니다.
@@ -5690,7 +5774,7 @@ from openai import OpenAI
 
 from deepeval import assert_test
 from deepeval.test_case import LLMTestCase
-from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, ContextualRecallMetric, GEval, ToxicityMetric
+from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, ContextualRecallMetric, ContextualPrecisionMetric, GEval, ToxicityMetric
 from deepeval.models.gpt_model import GPTModel
 
 from adapters.registry import AdapterRegistry
@@ -5725,7 +5809,7 @@ if Langfuse and LANGFUSE_PUBLIC_KEY:
 # =========================
 # Dataset
 # =========================
-GOLDEN_CSV_PATH = os.environ.get("GOLDEN_CSV_PATH", "/app/data/golden.csv")
+GOLDEN_CSV_PATH = os.environ.get("GOLDEN_CSV_PATH", "/var/knowledges/eval/data/golden.csv")
 
 def load_dataset():
     """
@@ -5778,7 +5862,7 @@ def _promptfoo_policy_check(raw_text: str):
             tmp.write(raw_text or "")
             tmp_path = tmp.name
         
-        cmd = ["promptfoo", "eval", "-c", "/app/configs/security.yaml", "--prompts", f"file://{tmp_path}", "-o", "json"]
+        cmd = ["promptfoo", "eval", "-c", "/var/jenkins_home/scripts/eval_runner/configs/security.yaml", "--prompts", f"file://{tmp_path}", "-o", "json"]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr or proc.stdout or "Promptfoo failed")
@@ -5787,7 +5871,7 @@ def _promptfoo_policy_check(raw_text: str):
             os.unlink(tmp_path)
 
 def _schema_validate(raw_text: str):
-    schema_path = "/app/configs/schema.json"
+    schema_path = "/var/jenkins_home/scripts/eval_runner/configs/schema.json"
     if not os.path.exists(schema_path):
         return
     with open(schema_path, "r", encoding="utf-8") as f:
@@ -5879,7 +5963,8 @@ def test_evaluation(conversation):
             if result.retrieval_context: # RAG 지표는 retrieval_context가 있을 때만 측정
                 metrics.extend([
                     FaithfulnessMetric(threshold=0.9, model=judge),
-                    ContextualRecallMetric(threshold=0.8, model=judge)
+                    ContextualRecallMetric(threshold=0.8, model=judge),
+                    ContextualPrecisionMetric(threshold=0.8, model=judge)
                 ])
             
             assert_test(test_case, metrics)
@@ -5948,9 +6033,9 @@ pipeline {
         string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL')
         choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식 선택')
         password(name: 'API_KEY', defaultValue: '', description: '(선택) API 인증 키')
-        string(name: 'JUDGE_MODEL', defaultValue: 'qwen2:7b', description: '채점관으로 사용할 LLM 모델명 (Ollama)')
+        string(name: 'JUDGE_MODEL', defaultValue: 'qwen3-coder:30b', description: '채점관으로 사용할 LLM 모델명 (Ollama)')
         string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama API Base URL')
-        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/jenkins_home/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
         file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 PC의 시험지 파일을 직접 업로드')
     }
     environment {

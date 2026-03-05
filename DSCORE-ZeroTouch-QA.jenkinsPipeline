@@ -1,0 +1,128 @@
+// =============================================================================
+// DSCORE-ZeroTouch-QA Jenkinsfile (v2.5 - Stable)
+//
+// 변경 내역
+// - [Fix] CSP 보안 이슈 대응을 위해 빌드 설명을 단순 텍스트 링크로 변경
+// - [Fix] 파이썬 의존성 및 브라우저 자동 설치 보장
+// =============================================================================
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'TARGET_URL',
+            defaultValue: 'https://www.naver.com',
+            description: '테스트 대상 웹앱 URL (http:// 또는 https:// 필수)'
+        )
+        // 텍스트 입력 방식 (안전함)
+        text(
+            name: 'SRS_TEXT',
+            description: '자연어 요구사항(SRS) 내용을 여기에 붙여넣으세요.',
+            defaultValue: ''
+        )
+        string(
+            name: 'MODEL_NAME',
+            defaultValue: 'qwen3-coder:30b',
+            description: 'Ollama LLM 모델명'
+        )
+        choice(
+            name: 'HEAL_MODE',
+            choices: ['on', 'off'],
+            description: 'Self-Healing 활성화 여부'
+        )
+        string(
+            name: 'MAX_HEAL_ATTEMPTS',
+            defaultValue: '2',
+            description: '최대 복구 시도 횟수'
+        )
+    }
+
+    environment {
+        SCRIPTS_DIR = '/var/jenkins_home/scripts'
+        REPORT_DIR  = "${WORKSPACE}/qa_reports"
+        OLLAMA_HOST = 'http://host.docker.internal:11434'
+        SRS_FILENAME = 'srs_input.txt'
+        
+        // 서버 환경이므로 Headless 모드 고정
+        HEADLESS = 'true'
+    }
+
+    stages {
+        stage('1. Prepare Output Directory') {
+            steps {
+                sh "mkdir -p ${REPORT_DIR}"
+            }
+        }
+
+        stage('2. Run Zero-Touch QA Agent') {
+            steps {
+                script {
+                    // 1. SRS 텍스트 파일 저장
+                    if (params.SRS_TEXT?.trim()) {
+                        writeFile file: "${WORKSPACE}/${SRS_FILENAME}", text: params.SRS_TEXT, encoding: 'UTF-8'
+                    } else {
+                        error "SRS_TEXT is empty. Please input requirements."
+                    }
+
+                    // 2. 실행 (의존성 설치 포함)
+                    sh """
+                    # 의존성 확인 (안전장치)
+                    pip3 install ollama playwright --break-system-packages || true
+                    playwright install chromium || true
+
+                    export HEAL_MODE="${params.HEAL_MODE}"
+                    export MAX_HEAL_ATTEMPTS="${params.MAX_HEAL_ATTEMPTS}"
+                    export OLLAMA_HOST="${env.OLLAMA_HOST}"
+                    export MODEL_NAME="${params.MODEL_NAME}"
+                    export HEADLESS="${env.HEADLESS}"
+
+                    echo ">>> Starting QA Agent..."
+                    
+                    python3 ${SCRIPTS_DIR}/autonomous_qa.py \
+                        --url "${params.TARGET_URL}" \
+                        --srs_file "${WORKSPACE}/${SRS_FILENAME}" \
+                        --out "${REPORT_DIR}" \
+                        --ollama_host "${env.OLLAMA_HOST}" \
+                        --model "${params.MODEL_NAME}"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // 1. 호스트 볼륨 백업 (선택 사항)
+            script {
+                sh """
+                mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER}
+                cp -r ${REPORT_DIR}/* /var/knowledges/qa_reports/${BUILD_NUMBER}/
+                """
+            }
+
+            // 2. HTML 리포트 게시
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: "${REPORT_DIR}",
+                reportFiles: 'index.html',
+                reportName: 'Zero-Touch QA Report'
+            ])
+
+            // 3. Artifact 아카이빙 (모든 파일 포함)
+            archiveArtifacts(
+                artifacts: "qa_reports/**/*",
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
+
+            // 4. [Fix] 빌드 설명 단순화 (HTML 태그 제거)
+            script {
+                def reportUrl = "${BUILD_URL}Zero-Touch_20QA_20Report"
+                currentBuild.description = "Test Finished. Report: ${reportUrl}"
+            }
+        }
+    }
+}

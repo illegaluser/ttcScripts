@@ -1,0 +1,156 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'SONAR_PROJECT_KEY',
+            defaultValue: 'dscore-ttc-sample',
+            description: 'SonarQube Project Key (예: dscore-ttc-sample)'
+        )
+
+        string(
+            name: 'GITLAB_PROJECT_PATH',
+            defaultValue: 'root/dscore-ttc-sample',
+            description: 'GitLab Project Path (예: root/dscore-ttc-sample)'
+        )
+
+        string(
+            name: 'BRANCH',
+            defaultValue: 'main',
+            description: '분석 대상 Git 브랜치'
+        )
+    }
+
+    environment {
+        // Jenkins에 등록한 SonarQube 서버 이름
+        SONARQUBE_SERVER = 'dscore-sonar'
+
+        // 컨테이너 내부에서 접근할 GitLab URL
+        GITLAB_HTTP_URL = 'http://gitlab:8929'
+
+        // GitLab 계정 (PoC)
+        GITLAB_USER = 'root'
+
+        // PoC: PAT 하드코딩
+        GITLAB_PAT = 'glpat-M_J3Ze9BeZsbFcHd6GkuO286MQp1OjEH.01.0w013cs97'
+    }
+
+    stages {
+
+        stage('Checkout from GitLab') {
+            steps {
+                script {
+                    echo "[Checkout] 워크스페이스 초기화"
+                    deleteDir()
+                }
+
+                sh '''
+                set -e
+                echo "[Checkout] GitLab에서 코드 체크아웃 (git clone)"
+
+                set +x
+                git clone -b "${BRANCH}" "http://${GITLAB_USER}:${GITLAB_PAT}@gitlab:8929/${GITLAB_PROJECT_PATH}.git" .
+                set -x
+
+                echo "[Checkout] 현재 작업 디렉터리"
+                pwd
+
+                echo "[Checkout] 디렉터리 목록"
+                ls -al
+                '''
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                sh '''
+                set -e
+                echo "[Build] PoC 단계: 빌드/테스트는 최소화 또는 스킵"
+                '''
+            }
+        }
+
+        stage('Prepare Node.js for SonarJS') {
+            steps {
+                sh '''
+                set -e
+                echo "[Node] SonarJS 분석용 Node.js 설치"
+
+                TOOLS_DIR="/var/jenkins_home/tools"
+                NODE_VERSION="v22.11.0"
+                DIST_NAME="node-${NODE_VERSION}-linux-arm64"
+                DIST_DIR="${TOOLS_DIR}/${DIST_NAME}"
+                NODE_LINK="${TOOLS_DIR}/node"
+                NODE_BIN="${NODE_LINK}/bin/node"
+
+                mkdir -p "${TOOLS_DIR}"
+
+                if [ -x "${NODE_BIN}" ]; then
+                  echo "[Node] 이미 설치됨"
+                  "${NODE_BIN}" -v
+                  exit 0
+                fi
+
+                cd "${TOOLS_DIR}"
+
+                rm -rf "${DIST_DIR}" "${NODE_LINK}"
+                rm -f node.tar.gz
+
+                if command -v curl >/dev/null 2>&1; then
+                  curl -fL --retry 3 -o node.tar.gz "https://nodejs.org/dist/${NODE_VERSION}/${DIST_NAME}.tar.gz"
+                elif command -v wget >/dev/null 2>&1; then
+                  wget -O node.tar.gz "https://nodejs.org/dist/${NODE_VERSION}/${DIST_NAME}.tar.gz"
+                else
+                  echo "[Node] ERROR: curl/wget 없음"
+                  exit 1
+                fi
+
+                tar -xzf node.tar.gz
+                rm -f node.tar.gz
+
+                if [ ! -d "${DIST_DIR}" ]; then
+                  echo "[Node] ERROR: 압축 해제 결과 디렉터리 없음: ${DIST_DIR}"
+                  ls -al
+                  exit 1
+                fi
+
+                ln -s "${DIST_DIR}" "${NODE_LINK}"
+
+                echo "[Node] 설치 완료"
+                "${NODE_BIN}" -v
+                '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                echo "[Sonar] SonarQube 분석 시작"
+
+                withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    script {
+                        def scannerHome = tool 'SonarScanner-CLI'
+
+                        sh """
+                        set -e
+
+                        NODE_BIN="/var/jenkins_home/tools/node/bin/node"
+                        if [ ! -x "\${NODE_BIN}" ]; then
+                          echo "[Sonar] ERROR: Node.js not found at \${NODE_BIN}"
+                          exit 1
+                        fi
+
+                        "${scannerHome}/bin/sonar-scanner" \\
+                          -Dsonar.host.url=${SONAR_HOST_URL} \\
+                          -Dsonar.token=${SONAR_AUTH_TOKEN} \\
+                          -Dsonar.projectKey=${SONAR_PROJECT_KEY} \\
+                          -Dsonar.projectName=${SONAR_PROJECT_KEY} \\
+                          -Dsonar.sources=. \\
+                          -Dsonar.exclusions=**/node_modules/**,**/build/**,**/dist/**,**/.git/** \\
+                          -Dsonar.nodejs.executable=\${NODE_BIN}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
