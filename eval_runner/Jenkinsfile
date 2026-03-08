@@ -1,16 +1,62 @@
+properties([
+    parameters([
+        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. 예: http://host.docker.internal:8000/invoke'),
+        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat 선택'),
+        password(name: 'API_KEY', defaultValue: '', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234'),
+        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...'),
+        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '채점용 Ollama 주소. 예: http://host.docker.internal:11434'),
+        [
+            $class: 'CascadeChoiceParameter',
+            choiceType: 'PT_SINGLE_SELECT',
+            description: 'OLLAMA 모델 목록에서 선택. 예: qwen3-coder:30b',
+            filterLength: 1,
+            filterable: true,
+            name: 'JUDGE_MODEL',
+            randomName: 'judge-model-choice',
+            referencedParameters: 'OLLAMA_BASE_URL',
+            script: [
+                $class: 'GroovyScript',
+                fallbackScript: [
+                    classpath: [],
+                    sandbox: false,
+                    script: '''
+                        return ['qwen3-coder:30b']
+                    '''
+                ],
+                script: [
+                    classpath: [],
+                    sandbox: false,
+                    script: '''
+                        import groovy.json.JsonSlurperClassic
+
+                        def baseUrl = (OLLAMA_BASE_URL ?: 'http://host.docker.internal:11434').trim()
+                        if (!baseUrl) {
+                            return ['qwen3-coder:30b']
+                        }
+
+                        def apiUrl = baseUrl.endsWith('/') ? "${baseUrl}api/tags" : "${baseUrl}/api/tags"
+                        def connection = new URL(apiUrl).openConnection()
+                        connection.setConnectTimeout(3000)
+                        connection.setReadTimeout(5000)
+                        def payload = new JsonSlurperClassic().parse(connection.getInputStream().newReader('UTF-8'))
+                        def models = ((payload?.models ?: []) as List)
+                            .collect { it?.name?.toString() }
+                            .findAll { it }
+                            .unique()
+                            .sort()
+                        return models ?: ['qwen3-coder:30b']
+                    '''
+                ]
+            ]
+        ],
+        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: '답변 관련성 합격 기준(0~1). 예: 0.7=보통, 0.8=엄격'),
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '컨테이너 내부 시험지 경로. 예: /var/knowledges/eval/data/golden.csv'),
+        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 golden.csv 직접 업로드. 업로드 시 GOLDEN_CSV_PATH 위치로 복사됨')
+    ])
+])
+
 pipeline {
     agent any
-    parameters {
-        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. 예: http://host.docker.internal:8000/invoke')
-        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat 선택')
-        password(name: 'API_KEY', defaultValue: '', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234')
-        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...')
-        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '채점용 Ollama 주소. 예: http://host.docker.internal:11434')
-        string(name: 'JUDGE_MODEL', defaultValue: 'qwen3-coder:30b', description: '심판 모델명. 실행 전에 설치 모델 목록과 대조 검증함. 예: qwen3-coder:30b')
-        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: '답변 관련성 합격 기준(0~1). 예: 0.7=보통, 0.8=엄격')
-        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '컨테이너 내부 시험지 경로. 예: /var/knowledges/eval/data/golden.csv')
-        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 golden.csv 직접 업로드. 업로드 시 GOLDEN_CSV_PATH 위치로 복사됨')
-    }
     environment {
         LANGFUSE_HOST = 'http://host.docker.internal:3000'
         PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
@@ -37,18 +83,23 @@ pipeline {
         }
         stage('1-1. Judge Model 검증') {
             steps {
-                sh """
-                set -eu
-                # 입력한 JUDGE_MODEL이 실제 Ollama 설치 목록에 있는지 먼저 검증합니다.
-                TAGS_URL="${params.OLLAMA_BASE_URL%/}/api/tags"
-                TMP_JSON="$(mktemp)"
-                trap 'rm -f "$TMP_JSON"' EXIT
+                withEnv([
+                    "OLLAMA_BASE_URL=${params.OLLAMA_BASE_URL}",
+                    "JUDGE_MODEL=${params.JUDGE_MODEL}",
+                ]) {
+                    sh '''
+                    set -eu
+                    # 입력한 JUDGE_MODEL이 실제 Ollama 설치 목록에 있는지 먼저 검증합니다.
+                    NORMALIZED_OLLAMA_BASE_URL="$(printf '%s' "$OLLAMA_BASE_URL" | sed 's:/*$::')"
+                    TAGS_URL="$NORMALIZED_OLLAMA_BASE_URL/api/tags"
+                    TMP_JSON="$(mktemp)"
+                    trap 'rm -f "$TMP_JSON"' EXIT
 
-                curl -fsSL "$TAGS_URL" -o "$TMP_JSON"
+                    curl -fsSL "$TAGS_URL" -o "$TMP_JSON"
 
-                echo "--------------------------------------------------"
-                echo "Installed Ollama models:"
-                python3 - "$TMP_JSON" "${params.JUDGE_MODEL}" <<'PY'
+                    echo "--------------------------------------------------"
+                    echo "Installed Ollama models:"
+                    python3 - "$TMP_JSON" "$JUDGE_MODEL" <<'PY'
 import json
 import sys
 
@@ -72,7 +123,8 @@ if selected_model not in models:
 print("--------------------------------------------------")
 print(f"Selected judge model confirmed: {selected_model}")
 PY
-                """
+                    '''
+                }
             }
         }
         stage('2. 파이썬 평가 실행 (Pytest)') {
