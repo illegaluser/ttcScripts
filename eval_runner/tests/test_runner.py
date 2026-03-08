@@ -314,7 +314,7 @@ def _render_metric_list(metric_details):
             "SKIPPED": "건너뜀",
         }.get(status, str(status))
         reason_text = str(metric.get("reason") or metric.get("error") or "")
-        reason = escape(_translate_text_to_korean(reason_text))
+        reason = _escape_with_linebreaks(_translate_text_to_korean(reason_text))
         score = metric.get("score")
         threshold = metric.get("threshold")
         score_display = "-" if score is None else score
@@ -325,9 +325,9 @@ def _render_metric_list(metric_details):
             "<li>"
             f"<strong>{escape(metric_label)}</strong> "
             f"[{status_label}] 점수={score_display}, 기준={threshold_display}"
-            f"<br><span>{reason}</span>"
-            "</li>"
-        )
+                f"<br><span>{reason}</span>"
+                "</li>"
+            )
     return "<ul>" + "".join(items) + "</ul>"
 
 
@@ -493,6 +493,41 @@ def _cleanup_translated_text(text: str) -> str:
     return cleaned
 
 
+def _insert_line_breaks(text: str, max_line_len: int = 92) -> str:
+    """
+    번역 결과가 한 줄 장문으로 내려오는 경우 문장/어절 단위 줄바꿈을 강제합니다.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    sentence_parts = re.split(r"(?<=[\.\!\?。！？])\s+|(?<=다)\s+", raw)
+    sentence_parts = [part.strip() for part in sentence_parts if part and part.strip()]
+    if not sentence_parts:
+        sentence_parts = [raw]
+
+    wrapped_lines = []
+    for sentence in sentence_parts:
+        line = sentence
+        while len(line) > max_line_len:
+            cut = line.rfind(" ", 0, max_line_len)
+            if cut <= 0:
+                cut = max_line_len
+            wrapped_lines.append(line[:cut].strip())
+            line = line[cut:].strip()
+        if line:
+            wrapped_lines.append(line)
+
+    return "\n".join(wrapped_lines)
+
+
+def _escape_with_linebreaks(text: str, max_line_len: int = 92) -> str:
+    """
+    줄바꿈을 포함한 텍스트를 HTML에서 읽기 좋게 표시합니다.
+    """
+    return escape(_insert_line_breaks(text, max_line_len=max_line_len)).replace("\n", "<br>")
+
+
 def _translate_with_ollama(prompt: str) -> str:
     """
     Ollama generate 호출을 공통화합니다.
@@ -606,6 +641,33 @@ def _render_summary_html():
             return "-"
         return text if len(text) <= limit else f"{text[:limit]}..."
 
+    def _easy_explanation(turn: dict) -> str:
+        """
+        비전공자도 이해하기 쉬운 요약 문장을 생성합니다.
+        """
+        status = str(turn.get("status") or "")
+        failure = _translate_text_to_korean(str(turn.get("failure_message") or ""))
+        task_completion = turn.get("task_completion") or {}
+        expected_outcome = str(turn.get("expected_outcome") or "pass").lower()
+
+        if status == "passed":
+            return "질문 의도와 평가 기준을 모두 만족해 통과했습니다."
+        if status == "failed_expected" and expected_outcome == "fail":
+            return "의도적으로 실패를 기대한 테스트에서 실제로 실패해, 실패 감지 규칙이 정상 동작했습니다."
+        if "Promptfoo policy checks reported" in failure or "정책 검사" in failure:
+            return "민감정보 또는 금칙 패턴이 감지되어 보안 기준에서 실패했습니다."
+        if "Format Compliance Failed" in failure or "응답 형식" in failure:
+            return "응답 형식이 약속된 규격과 달라 연동 기준에서 실패했습니다."
+        if "Adapter Error" in failure or "Connection Error" in failure:
+            return "대상 시스템 통신에 실패해 평가를 진행할 수 없었습니다."
+        if "TaskCompletion failed" in failure or (task_completion and task_completion.get("passed") is False):
+            return "응답에 반드시 들어가야 할 핵심 정보가 빠져 과업 달성 기준을 통과하지 못했습니다."
+        if "AnswerRelevancyMetric" in failure or "답변 관련성" in failure:
+            return "질문과 직접 관련 없는 내용이 섞여 답변 관련성 기준을 통과하지 못했습니다."
+        if "Metrics failed" in failure or "지표 평가 실패" in failure:
+            return "품질 지표 중 하나 이상이 기준 미달이라 실패했습니다."
+        return "평가 기준 미달로 실패했습니다."
+
     def _conversation_status_meta(status):
         if status == "passed":
             return ("통과", "ok", "정상 통과")
@@ -663,8 +725,9 @@ def _render_summary_html():
             token_usage_html = escape(_format_token_usage(turn.get("usage")))
             actual_output = escape(str(turn.get("actual_output") or ""))
             failure_raw = str(turn.get("failure_message") or "-")
-            failure_localized = escape(_translate_text_to_korean(failure_raw))
-            failure_raw_escaped = escape(failure_raw)
+            failure_localized = _escape_with_linebreaks(_translate_text_to_korean(failure_raw))
+            failure_raw_escaped = _escape_with_linebreaks(failure_raw)
+            easy_explanation = _translate_text_to_korean(_easy_explanation(turn))
             _, status_class, status_label = _turn_status_meta(turn.get("status"))
 
             if turn.get("status") == "failed":
@@ -678,6 +741,7 @@ def _render_summary_html():
             detail_html = (
                 "<details>"
                 "<summary>평가 상세 보기</summary>"
+                f"<p><strong>쉬운 해설</strong><br>{_escape_with_linebreaks(easy_explanation, max_line_len=80)}</p>"
                 f"<p><strong>사전 검사</strong><br>{fail_fast}</p>"
                 f"<p><strong>과업 달성도</strong><br>{task_completion_html}</p>"
                 f"<p><strong>품질 지표</strong><br>{metrics_html}</p>"
@@ -694,7 +758,7 @@ def _render_summary_html():
                 f"<td><span class='badge {status_class}'>{escape(status_label)}</span></td>"
                 f"<td>{escape(str(turn.get('latency_ms') or '-'))}</td>"
                 f"<td>{token_usage_html}</td>"
-                f"<td>{escape(_short_text(key_reason))}</td>"
+                f"<td>{_escape_with_linebreaks(_short_text(key_reason), max_line_len=60)}</td>"
                 f"<td>{detail_html}</td>"
                 "</tr>"
             )
@@ -720,7 +784,7 @@ def _render_summary_html():
                 f"<strong>{conversation_title}</strong> "
                 f"<span class='meta-inline'>({turn_count}턴, {escape(status_label)})</span>"
                 "</summary>"
-                f"<p class='summary-line'><strong>핵심 사유:</strong> {escape(_short_text(failure_message))}</p>"
+                f"<p class='summary-line'><strong>핵심 사유:</strong> {_escape_with_linebreaks(_short_text(failure_message), max_line_len=70)}</p>"
                 f"<p class='summary-line'><strong>멀티턴 일관성:</strong> {multi_turn_html}</p>"
                 "<table class='result-table'>"
                 "<thead><tr>"
