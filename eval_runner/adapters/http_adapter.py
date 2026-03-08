@@ -1,20 +1,89 @@
-import time
 import json
+import time
+from typing import Dict, List, Optional
+
 import requests
-from typing import List, Dict, Optional
+
 from .base import BaseAdapter, UniversalEvalOutput
+
 
 class GenericHttpAdapter(BaseAdapter):
     """
     대상 AI가 API일 때 작동하며, 대화 기록(history)을 포함한 다중 턴 요청을 지원합니다.
     """
-    def invoke(self, input_text: str, history: Optional[List[Dict]] = None, **kwargs) -> UniversalEvalOutput:
-        start_time = time.time()
+
+    @staticmethod
+    def _extract_usage(data: Dict) -> Dict[str, int]:
+        usage_data = data.get("usage", {}) if isinstance(data, dict) else {}
+        if not isinstance(usage_data, dict):
+            return {}
+
+        prompt_tokens = usage_data.get("prompt_tokens")
+        completion_tokens = usage_data.get("completion_tokens")
+        total_tokens = usage_data.get("total_tokens")
+
+        if prompt_tokens is None:
+            prompt_tokens = usage_data.get("input_tokens", 0)
+        if completion_tokens is None:
+            completion_tokens = usage_data.get("output_tokens", 0)
+        if total_tokens is None:
+            total_tokens = usage_data.get("total", 0) or (prompt_tokens or 0) + (completion_tokens or 0)
+
+        return {
+            "promptTokens": int(prompt_tokens or 0),
+            "completionTokens": int(completion_tokens or 0),
+            "totalTokens": int(total_tokens or 0),
+        }
+
+    @staticmethod
+    def _extract_actual_output(data: Dict) -> str:
+        if not isinstance(data, dict):
+            return ""
+
+        for key in ("answer", "response", "text", "output", "message"):
+            value = data.get(key)
+            if value is not None:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _extract_contexts(data: Dict) -> List[str]:
+        if not isinstance(data, dict):
+            return []
+
+        docs = data.get("docs")
+        if docs is None:
+            docs = data.get("retrieval_context", [])
+
+        if isinstance(docs, str):
+            return [docs]
+        if isinstance(docs, list):
+            return [str(item) for item in docs]
+        return []
+
+    def _build_headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
+
+        if self.auth_header:
+            if ":" in self.auth_header:
+                key, value = self.auth_header.split(":", 1)
+                headers[key.strip()] = value.strip()
+            else:
+                headers["Authorization"] = self.auth_header.strip()
+        elif self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        # 다중 턴 대화를 위해 이전 대화 기록을 messages에 추가
+        return headers
+
+    def invoke(
+        self,
+        input_text: str,
+        history: Optional[List[Dict]] = None,
+        **kwargs,
+    ) -> UniversalEvalOutput:
+        start_time = time.time()
+        headers = self._build_headers()
+
         messages = []
         if history:
             for turn in history:
@@ -24,48 +93,54 @@ class GenericHttpAdapter(BaseAdapter):
 
         payload = {
             "messages": messages,
-            "query": input_text, # 하위 호환성을 위한 필드
+            "query": input_text,
+            "input": input_text,
             "user": "eval-runner",
         }
 
         try:
-            res = requests.post(self.target_url, json=payload, headers=headers, timeout=60)
+            response = requests.post(
+                self.target_url,
+                json=payload,
+                headers=headers,
+                timeout=60,
+            )
             latency_ms = int((time.time() - start_time) * 1000)
 
             try:
-                data = res.json()
+                data = response.json()
                 raw_response = json.dumps(data, ensure_ascii=False)
             except json.JSONDecodeError:
                 data = {}
-                raw_response = res.text
+                raw_response = response.text
 
-            actual_output = data.get("answer") or data.get("response") or data.get("text") or ""
-            
-            if res.status_code >= 400:
-                return UniversalEvalOutput(input=input_text, actual_output=str(data), http_status=res.status_code, raw_response=raw_response, error=f"HTTP {res.status_code}", latency_ms=latency_ms)
+            actual_output = self._extract_actual_output(data)
+            usage = self._extract_usage(data)
 
-            docs = data.get("docs", [])
-            if isinstance(docs, str):
-                docs = [docs]
-
-            # API 응답에 'usage' 필드가 있으면 토큰 사용량 추출
-            parsed_usage = {}
-            usage_data = data.get("usage", {})
-            if usage_data:
-                parsed_usage = {
-                    "promptTokens": usage_data.get("prompt_tokens", 0),
-                    "completionTokens": usage_data.get("completion_tokens", 0),
-                    "totalTokens": usage_data.get("total_tokens", 0),
-                }
+            if response.status_code >= 400:
+                return UniversalEvalOutput(
+                    input=input_text,
+                    actual_output=actual_output or str(data),
+                    http_status=response.status_code,
+                    raw_response=raw_response,
+                    error=f"HTTP {response.status_code}",
+                    latency_ms=latency_ms,
+                    usage=usage,
+                )
 
             return UniversalEvalOutput(
-                input=input_text, actual_output=str(actual_output), retrieval_context=[str(c) for c in docs],
-                http_status=res.status_code, raw_response=raw_response, latency_ms=latency_ms,
-                usage=parsed_usage
+                input=input_text,
+                actual_output=str(actual_output),
+                retrieval_context=self._extract_contexts(data),
+                http_status=response.status_code,
+                raw_response=raw_response,
+                latency_ms=latency_ms,
+                usage=usage,
             )
-
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException as exc:
             return UniversalEvalOutput(
-                input=input_text, actual_output="", error=f"Connection Error: {e}",
-                latency_ms=int((time.time() - start_time) * 1000)
+                input=input_text,
+                actual_output="",
+                error=f"Connection Error: {exc}",
+                latency_ms=int((time.time() - start_time) * 1000),
             )

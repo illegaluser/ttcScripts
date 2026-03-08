@@ -1,19 +1,31 @@
-import os
 import json
+import os
 import re
-import time
-import tempfile
 import subprocess
-import pytest
+import tempfile
+import time
+from pathlib import Path
+
 import pandas as pd
+import pytest
 from jsonschema import validate
 from jsonschema.exceptions import ValidationError
-from openai import OpenAI
 
 from deepeval import assert_test
-from deepeval.test_case import LLMTestCase
-from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric, ContextualRecallMetric, GEval, ToxicityMetric
+from deepeval.metrics import (
+    AnswerRelevancyMetric,
+    ContextualRecallMetric,
+    FaithfulnessMetric,
+    GEval,
+    ToxicityMetric,
+)
 from deepeval.models.gpt_model import GPTModel
+from deepeval.test_case import LLMTestCase
+
+try:
+    from deepeval.metrics import ContextualPrecisionMetric
+except ImportError:
+    ContextualPrecisionMetric = None
 
 from adapters.registry import AdapterRegistry
 
@@ -22,58 +34,29 @@ try:
 except Exception:
     Langfuse = None
 
-# =========================
-# ENV
-# =========================
+
 TARGET_URL = os.environ.get("TARGET_URL")
-TARGET_TYPE = os.environ.get("TARGET_TYPE", "http")  # adapter type
+TARGET_TYPE = os.environ.get("TARGET_TYPE", "http")
 API_KEY = os.environ.get("API_KEY")
+TARGET_AUTH_HEADER = os.environ.get("TARGET_AUTH_HEADER")
 
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY")
 LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST")
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "qwen3-coder:30b")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 
 RUN_ID = os.environ.get("BUILD_TAG") or os.environ.get("BUILD_ID") or str(int(time.time()))
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_ROOT = MODULE_ROOT / "configs"
 
-langfuse = None
-if Langfuse and LANGFUSE_PUBLIC_KEY:
-    langfuse = Langfuse(
-        public_key=LANGFUSE_PUBLIC_KEY,
-        secret_key=LANGFUSE_SECRET_KEY,
-        host=LANGFUSE_HOST
-    )
+DEFAULT_GOLDEN_PATHS = [
+    MODULE_ROOT / "data" / "golden.csv",
+    Path("/var/knowledges/eval/data/golden.csv"),
+    Path("/var/jenkins_home/knowledges/eval/data/golden.csv"),
+    Path("/app/data/golden.csv"),
+]
 
-# =========================
-# Dataset
-# =========================
-GOLDEN_CSV_PATH = os.environ.get("GOLDEN_CSV_PATH", "/app/data/golden.csv")
-
-def load_dataset():
-    """
-    `golden.csv`를 읽어 다중 턴 대화 단위로 그룹화하여 반환합니다.
-    `conversation_id`가 없는 경우, 단일 턴 대화로 처리합니다.
-    """
-    if not os.path.exists(GOLDEN_CSV_PATH):
-        raise FileNotFoundError(f"Evaluation dataset not found at {GOLDEN_CSV_PATH}")
-    
-    df = pd.read_csv(GOLDEN_CSV_PATH).where(pd.notnull(df), None)
-    
-    # 다중 턴 대화 지원
-    if "conversation_id" in df.columns and "turn_id" in df.columns:
-        conversations = []
-        for _, group in df.groupby("conversation_id"):
-            # turn_id 순서대로 정렬하여 대화 흐름을 보장
-            sorted_group = group.sort_values(by="turn_id").to_dict(orient="records")
-            conversations.append(sorted_group)
-        return conversations
-    else:
-        # 단일 턴 시험 (레거시)
-        return [ [record] for record in df.to_dict(orient="records") ]
-
-# =========================
-# Helpers
-# =========================
 TASK_COMPLETION_CRITERIA = """
 Instruction:
 You are a strict judge evaluating whether an AI agent has successfully completed a given task.
@@ -93,42 +76,294 @@ Score 0 if the assistant contradicts itself, forgets previous information, or gi
 Your response must be a single float: 1.0 for perfect consistency, 0.0 for failure.
 """
 
-def _promptfoo_policy_check(raw_text: str):
-    tmp_path = None
+
+def _resolve_existing_path(env_value: str, fallback_paths):
+    if env_value:
+        return Path(env_value).expanduser()
+    for path in fallback_paths:
+        if path.exists():
+            return path
+    return Path(fallback_paths[0])
+
+
+GOLDEN_CSV_PATH = _resolve_existing_path(os.environ.get("GOLDEN_CSV_PATH"), DEFAULT_GOLDEN_PATHS)
+
+
+langfuse = None
+if Langfuse and LANGFUSE_PUBLIC_KEY:
+    langfuse = Langfuse(
+        public_key=LANGFUSE_PUBLIC_KEY,
+        secret_key=LANGFUSE_SECRET_KEY,
+        host=LANGFUSE_HOST,
+    )
+
+
+def _turn_sort_key(value):
+    if value is None:
+        return (1, 0)
     try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-            tmp.write(raw_text or "")
-            tmp_path = tmp.name
-        
-        cmd = ["promptfoo", "eval", "-c", "/app/configs/security.yaml", "--prompts", f"file://{tmp_path}", "-o", "json"]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr or proc.stdout or "Promptfoo failed")
+        return (0, int(value))
+    except (TypeError, ValueError):
+        return (0, str(value))
+
+
+def load_dataset():
+    """
+    `golden.csv`를 읽어 다중 턴 대화 단위로 그룹화하여 반환합니다.
+    `conversation_id`가 없는 경우, 단일 턴 대화로 처리합니다.
+    """
+
+    if not GOLDEN_CSV_PATH.exists():
+        raise FileNotFoundError(f"Evaluation dataset not found at {GOLDEN_CSV_PATH}")
+
+    df = pd.read_csv(GOLDEN_CSV_PATH)
+    df = df.where(pd.notnull(df), None)
+    records = df.to_dict(orient="records")
+
+    if "conversation_id" not in df.columns:
+        return [[record] for record in records]
+
+    grouped_conversations = {}
+    grouped_order = []
+    single_turn_conversations = []
+
+    for record in records:
+        conversation_id = record.get("conversation_id")
+        if conversation_id:
+            conversation_key = str(conversation_id)
+            if conversation_key not in grouped_conversations:
+                grouped_conversations[conversation_key] = []
+                grouped_order.append(conversation_key)
+            grouped_conversations[conversation_key].append(record)
+        else:
+            single_turn_conversations.append([record])
+
+    conversations = []
+    for conversation_key in grouped_order:
+        turns = grouped_conversations[conversation_key]
+        if "turn_id" in df.columns:
+            turns = sorted(turns, key=lambda turn: _turn_sort_key(turn.get("turn_id")))
+        conversations.append(turns)
+
+    conversations.extend(single_turn_conversations)
+    return conversations
+
+
+def _safe_json_loads(raw_text: str):
+    try:
+        return json.loads(raw_text)
+    except Exception:
+        return None
+
+
+def _safe_json_list(raw_text: str):
+    parsed = _safe_json_loads(raw_text) if isinstance(raw_text, str) else raw_text
+    return parsed if isinstance(parsed, list) else []
+
+
+def _config_path(filename: str) -> Path:
+    return CONFIG_ROOT / filename
+
+
+def _build_judge_model():
+    return GPTModel(model=JUDGE_MODEL, base_url=f"{OLLAMA_BASE_URL.rstrip('/')}/v1")
+
+
+def _promptfoo_policy_check(raw_text: str):
+    config_path = _config_path("security.yaml")
+    if not config_path.exists():
+        return
+
+    tmp_input_path = None
+    tmp_output_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp_input:
+            tmp_input.write(raw_text or "")
+            tmp_input_path = tmp_input.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_output:
+            tmp_output_path = tmp_output.name
+
+        command = [
+            "promptfoo",
+            "eval",
+            "-c",
+            str(config_path),
+            "--prompts",
+            f"file://{tmp_input_path}",
+            "--output",
+            tmp_output_path,
+            "--fail-on-error",
+        ]
+        process = subprocess.run(command, capture_output=True, text=True)
+        if process.returncode not in (0, 100):
+            raise RuntimeError(process.stderr or process.stdout or "Promptfoo failed")
+
+        if tmp_output_path and os.path.exists(tmp_output_path):
+            with open(tmp_output_path, "r", encoding="utf-8") as result_file:
+                result_payload = json.load(result_file)
+            failures = (((result_payload or {}).get("results") or {}).get("stats") or {}).get("failures", 0)
+            if failures:
+                raise RuntimeError(f"Promptfoo policy checks reported {failures} failure(s).")
     finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        if tmp_input_path and os.path.exists(tmp_input_path):
+            os.unlink(tmp_input_path)
+        if tmp_output_path and os.path.exists(tmp_output_path):
+            os.unlink(tmp_output_path)
+
 
 def _schema_validate(raw_text: str):
-    schema_path = "/app/configs/schema.json"
-    if not os.path.exists(schema_path):
+    schema_path = _config_path("schema.json")
+    if not schema_path.exists():
         return
-    with open(schema_path, "r", encoding="utf-8") as f:
-        schema = json.load(f)
+
+    with open(schema_path, "r", encoding="utf-8") as schema_file:
+        schema = json.load(schema_file)
+
     try:
         parsed = json.loads(raw_text or "")
         validate(instance=parsed, schema=schema)
-    except (json.JSONDecodeError, ValidationError) as e:
-        raise RuntimeError(f"Format Compliance Failed (schema.json): {e}")
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise RuntimeError(f"Format Compliance Failed (schema.json): {exc}") from exc
 
-# =========================
-# Tests
-# =========================
+
+def _parse_success_criteria_mode(criteria: str) -> str:
+    if not criteria:
+        return "none"
+    if any(token in criteria for token in ("status_code=", "raw~r/", "json.")):
+        return "dsl"
+    return "geval"
+
+
+def _json_get_path(obj, path: str):
+    current = obj
+    for token in path.split("."):
+        list_match = re.match(r"^([a-zA-Z0-9_\-]+)\[(\d+)\]$", token)
+        if list_match:
+            key, index = list_match.group(1), int(list_match.group(2))
+            if not isinstance(current, dict) or key not in current:
+                return None
+            current = current[key]
+            if not isinstance(current, list) or index >= len(current):
+                return None
+            current = current[index]
+            continue
+
+        if not isinstance(current, dict) or token not in current:
+            return None
+        current = current[token]
+    return current
+
+
+def _evaluate_rule_based_criteria(criteria_str: str, result) -> bool:
+    if not criteria_str:
+        return result.http_status == 200
+
+    conditions = [condition.strip() for condition in criteria_str.split(" AND ")]
+    parsed_json = _safe_json_loads(result.raw_response or "")
+
+    for condition in conditions:
+        if condition.startswith("status_code="):
+            expected_code = condition.split("=", 1)[1].strip()
+            if str(result.http_status) != expected_code:
+                return False
+            continue
+
+        if condition.startswith("raw~r/"):
+            pattern = condition[len("raw~r/") :]
+            if pattern.endswith("/"):
+                pattern = pattern[:-1]
+            if not re.search(pattern, result.raw_response or ""):
+                return False
+            continue
+
+        if "~r/" in condition and condition.startswith("json."):
+            left, right = condition.split("~r/", 1)
+            json_path = left.replace("json.", "", 1)
+            pattern = right[:-1] if right.endswith("/") else right
+            value = _json_get_path(parsed_json, json_path) if parsed_json is not None else None
+            if value is None or not re.search(pattern, str(value)):
+                return False
+            continue
+
+        return False
+
+    return True
+
+
+def _score_task_completion(turn, result, judge, span=None):
+    success_criteria = turn.get("success_criteria") or turn.get("expected_output")
+    criteria_mode = _parse_success_criteria_mode(success_criteria)
+
+    if criteria_mode == "dsl":
+        score = 1.0 if _evaluate_rule_based_criteria(success_criteria, result) else 0.0
+        reason = "Rule-based success_criteria evaluation"
+    elif criteria_mode == "geval":
+        task_completion_metric = GEval(
+            name="TaskCompletion",
+            criteria=TASK_COMPLETION_CRITERIA,
+            evaluation_params=["input", "actual_output", "expected_output"],
+            model=judge,
+        )
+        completion_test_case = LLMTestCase(
+            input=turn["input"],
+            actual_output=result.actual_output,
+            expected_output=success_criteria,
+        )
+        task_completion_metric.measure(completion_test_case)
+        score = float(task_completion_metric.score)
+        reason = task_completion_metric.reason
+    else:
+        score = 1.0 if result.http_status < 400 else 0.0
+        reason = "No success_criteria provided; falling back to HTTP success."
+
+    if span:
+        span.score(name="TaskCompletion", value=score, comment=reason)
+
+    if score < 0.5:
+        raise AssertionError(f"TaskCompletion failed with score {score}. Reason: {reason}")
+
+
+def _score_deepeval_metrics(turn, result, judge, span=None):
+    test_case = LLMTestCase(
+        input=turn["input"],
+        actual_output=result.actual_output,
+        expected_output=turn.get("expected_output"),
+        retrieval_context=result.retrieval_context,
+        context=_safe_json_list(turn.get("context_ground_truth", "[]")),
+    )
+
+    metrics = [
+        AnswerRelevancyMetric(threshold=0.8, model=judge),
+        ToxicityMetric(threshold=0.5, model=judge),
+    ]
+
+    if result.retrieval_context:
+        metrics.extend(
+            [
+                FaithfulnessMetric(threshold=0.9, model=judge),
+                ContextualRecallMetric(threshold=0.8, model=judge),
+            ]
+        )
+        if ContextualPrecisionMetric is not None:
+            metrics.append(ContextualPrecisionMetric(threshold=0.8, model=judge))
+
+    assert_test(test_case, metrics)
+
+    if span:
+        for metric in getattr(test_case, "metrics", []):
+            span.score(name=metric.__class__.__name__, value=metric.score, comment=metric.reason)
+
+
 @pytest.mark.parametrize("conversation", load_dataset())
 def test_evaluation(conversation):
     conv_id = conversation[0].get("conversation_id", conversation[0]["case_id"])
     parent_trace = None
     if langfuse:
-        parent_trace = langfuse.trace(name=f"Conversation-{conv_id}", id=f"{RUN_ID}:{conv_id}")
+        parent_trace = langfuse.trace(
+            name=f"Conversation-{conv_id}",
+            id=f"{RUN_ID}:{conv_id}",
+            tags=[RUN_ID],
+        )
 
     conversation_history = []
     full_conversation_passed = True
@@ -142,13 +377,13 @@ def test_evaluation(conversation):
             span = parent_trace.span(name=f"Turn-{turn.get('turn_id', 1)}", input={"input": input_text})
 
         try:
-            adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY)
+            adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
             result = adapter.invoke(input_text, history=conversation_history)
 
             update_payload = {"output": result.to_dict()}
             if result.usage:
                 update_payload["usage"] = result.usage
-            
+
             if span:
                 span.update(**update_payload)
                 span.score(name="Latency", value=result.latency_ms, comment="ms")
@@ -157,87 +392,51 @@ def test_evaluation(conversation):
                 raise RuntimeError(f"Adapter Error: {result.error}")
 
             _promptfoo_policy_check(result.raw_response)
-            _schema_validate(result.raw_response)
-            
-            judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
+            if TARGET_TYPE == "http":
+                _schema_validate(result.raw_response)
 
-            # [GEval] Task Completion 평가
-            success_criteria = turn.get("success_criteria") or turn.get("expected_output")
-            if success_criteria:
-                task_completion_metric = GEval(
-                    name="TaskCompletion",
-                    criteria=TASK_COMPLETION_CRITERIA,
-                    evaluation_params=["input", "actual_output", "expected_output"],
-                    model=judge
-                )
-                completion_test_case = LLMTestCase(
-                    input=turn["input"],
-                    actual_output=result.actual_output,
-                    expected_output=success_criteria 
-                )
-                task_completion_metric.measure(completion_test_case)
-                if span:
-                    span.score(name=task_completion_metric.name, value=task_completion_metric.score, comment=task_completion_metric.reason)
-
-                if task_completion_metric.score < 0.5: # 실패 시 즉시 중단
-                    pytest.fail(f"TaskCompletion failed for case_id {case_id} with score {task_completion_metric.score}. Reason: {task_completion_metric.reason}")
+            judge = _build_judge_model()
+            _score_task_completion(turn, result, judge, span)
 
             turn["actual_output"] = result.actual_output
             conversation_history.append(turn)
 
-            # [심층 평가] Answer Relevancy, Faithfulness, Toxicity 등
-            test_case = LLMTestCase(
-                input=input_text,
-                actual_output=result.actual_output,
-                expected_output=turn.get("expected_output"),
-                retrieval_context=result.retrieval_context,
-                context=json.loads(turn.get("context_ground_truth", "[]") or "[]"),
-            )
-            
-            metrics = [
-                AnswerRelevancyMetric(threshold=0.8, model=judge),
-                ToxicityMetric(threshold=0.5, model=judge)
-            ]
-            if result.retrieval_context: # RAG 지표는 retrieval_context가 있을 때만 측정
-                metrics.extend([
-                    FaithfulnessMetric(threshold=0.9, model=judge),
-                    ContextualRecallMetric(threshold=0.8, model=judge)
-                ])
-            
-            assert_test(test_case, metrics)
-            if span:
-                for m in test_case.metrics:
-                    span.score(name=m.__class__.__name__, value=m.score, comment=m.reason)
-
-
-        except Exception as e:
+            _score_deepeval_metrics(turn, result, judge, span)
+        except Exception as exc:
             full_conversation_passed = False
-            pytest.fail(f"Turn failed for case_id {case_id}: {e}")
+            pytest.fail(f"Turn failed for case_id {case_id}: {exc}")
         finally:
-            if span: span.end()
+            if span:
+                span.end()
 
-    # --- 다중 턴 일관성 채점 (GEval) ---
     if len(conversation) > 1:
         full_transcript = ""
         for turn in conversation_history:
             full_transcript += f"User: {turn['input']}\n"
             full_transcript += f"Assistant: {turn['actual_output']}\n\n"
-        
-        judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
-        
+
+        judge = _build_judge_model()
         consistency_metric = GEval(
             name="MultiTurnConsistency",
             criteria=MULTI_TURN_CONSISTENCY_CRITERIA,
             evaluation_params=["input"],
-            model=judge
+            model=judge,
         )
-        consistency_test_case = LLMTestCase(
-            input=full_transcript,
-            actual_output="" # 전체 대화록을 input으로 사용하므로 actual_output은 불필요
-        )
+        consistency_test_case = LLMTestCase(input=full_transcript, actual_output="")
         consistency_metric.measure(consistency_test_case)
+
         if parent_trace:
-            parent_trace.score(name=consistency_metric.name, value=consistency_metric.score, comment=consistency_metric.reason)
-    
+            parent_trace.score(
+                name=consistency_metric.name,
+                value=consistency_metric.score,
+                comment=consistency_metric.reason,
+            )
+
+        if consistency_metric.score < 0.5:
+            pytest.fail(
+                f"MultiTurnConsistency failed for conversation {conv_id} with score "
+                f"{consistency_metric.score}. Reason: {consistency_metric.reason}"
+            )
+
     if not full_conversation_passed:
         pytest.fail("One or more turns in the conversation failed.")

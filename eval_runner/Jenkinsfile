@@ -4,9 +4,10 @@ pipeline {
         string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL')
         choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식 선택')
         password(name: 'API_KEY', defaultValue: '', description: '(선택) API 인증 키')
+        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더. 예: Authorization: Bearer xxx')
         string(name: 'JUDGE_MODEL', defaultValue: 'qwen2:7b', description: '채점관으로 사용할 LLM 모델명 (Ollama)')
         string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama API Base URL')
-        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/jenkins_home/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
         file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 PC의 시험지 파일을 직접 업로드')
     }
     environment {
@@ -17,10 +18,15 @@ pipeline {
         stage('1. 시험지(Golden Dataset) 준비') {
             steps {
                 script {
-                    if (params.UPLOADED_GOLDEN_DATASET) {
-                        // 사용자가 파일을 업로드하면, 지정된 경로에 golden.csv로 덮어쓰기
-                        writeFile(file: params.GOLDEN_CSV_PATH, text: params.UPLOADED_GOLDEN_DATASET.readToString())
-                        echo "Uploaded dataset has been written to ${params.GOLDEN_CSV_PATH}"
+                    sh """
+                    mkdir -p "\$(dirname '${params.GOLDEN_CSV_PATH}')"
+                    mkdir -p /var/knowledges/eval/reports
+                    """
+                    if (params.UPLOADED_GOLDEN_DATASET?.trim()) {
+                        sh """
+                        cp "${env.UPLOADED_GOLDEN_DATASET}" "${params.GOLDEN_CSV_PATH}"
+                        """
+                        echo "Uploaded dataset has been copied to ${params.GOLDEN_CSV_PATH}"
                     } else {
                         echo "Using existing dataset at ${params.GOLDEN_CSV_PATH}"
                     }
@@ -44,9 +50,19 @@ pipeline {
                     echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
                     echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
                     echo "--------------------------------------------------"
+                    export TARGET_URL='${params.TARGET_URL}'
+                    export TARGET_TYPE='${params.TARGET_TYPE}'
+                    export API_KEY='${params.API_KEY}'
+                    export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
+                    export JUDGE_MODEL='${params.JUDGE_MODEL}'
+                    export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
+                    export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
+                    export PYTHONPATH='${env.PYTHONPATH}'
                     set -x
 
-                    python3 -m pytest
+                    python3 -m pytest /var/jenkins_home/scripts/eval_runner/tests/test_runner.py \
+                      -n 1 \
+                      --junitxml=/var/knowledges/eval/reports/results.xml
                     """
                 }
             }
@@ -55,8 +71,7 @@ pipeline {
     post {
         always {
             script {
-                // 빌드 설명에 Langfuse 리포트 링크 추가 (XSS 방지 처리 포함)
-                def safeBuildTag = env.BUILD_TAG.replaceAll('[^a-zA-Z0-9_.-]', '')
+                def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
                 def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
                 currentBuild.description = "📊 Langfuse Report: ${publicLangfuseUrl}"
             }
