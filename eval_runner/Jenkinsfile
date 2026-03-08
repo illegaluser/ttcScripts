@@ -2,8 +2,8 @@ properties([
     parameters([
         string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. 예: http://host.docker.internal:8000/invoke'),
         choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat 선택'),
-        password(name: 'API_KEY', defaultValue: '', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234'),
-        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...'),
+        password(name: 'API_KEY', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234'),
+        password(name: 'TARGET_AUTH_HEADER', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...'),
         string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '채점용 Ollama 주소. 예: http://host.docker.internal:11434'),
         [
             $class: 'CascadeChoiceParameter',
@@ -29,22 +29,28 @@ properties([
                     script: '''
                         import groovy.json.JsonSlurperClassic
 
+                        def defaultModels = ['qwen3-coder:30b']
                         def baseUrl = (OLLAMA_BASE_URL ?: 'http://host.docker.internal:11434').trim()
                         if (!baseUrl) {
-                            return ['qwen3-coder:30b']
+                            return defaultModels
                         }
 
-                        def apiUrl = baseUrl.endsWith('/') ? "${baseUrl}api/tags" : "${baseUrl}/api/tags"
-                        def connection = new URL(apiUrl).openConnection()
-                        connection.setConnectTimeout(3000)
-                        connection.setReadTimeout(5000)
-                        def payload = new JsonSlurperClassic().parse(connection.getInputStream().newReader('UTF-8'))
-                        def models = ((payload?.models ?: []) as List)
-                            .collect { it?.name?.toString() }
-                            .findAll { it }
-                            .unique()
-                            .sort()
-                        return models ?: ['qwen3-coder:30b']
+                        try {
+                            def apiUrl = baseUrl.endsWith('/') ? "${baseUrl}api/tags" : "${baseUrl}/api/tags"
+                            def connection = new URL(apiUrl).openConnection()
+                            connection.setConnectTimeout(3000)
+                            connection.setReadTimeout(5000)
+                            def payload = new JsonSlurperClassic().parse(connection.getInputStream().newReader('UTF-8'))
+                            def models = ((payload?.models ?: []) as List)
+                                .collect { it?.name?.toString() }
+                                .findAll { it }
+                                .unique()
+                                .sort()
+                            return models ?: defaultModels
+                        } catch (Throwable ignored) {
+                            // UI 렌더링 시점 네트워크/권한 이슈가 있어도 최소 선택지는 노출합니다.
+                            return defaultModels
+                        }
                     '''
                 ]
             ]
@@ -85,7 +91,7 @@ pipeline {
             steps {
                 withEnv([
                     "OLLAMA_BASE_URL=${params.OLLAMA_BASE_URL}",
-                    "JUDGE_MODEL=${params.JUDGE_MODEL}",
+                    "JUDGE_MODEL=${params.JUDGE_MODEL ?: ''}",
                 ]) {
                     sh '''
                     set -eu
@@ -93,17 +99,18 @@ pipeline {
                     NORMALIZED_OLLAMA_BASE_URL="$(printf '%s' "$OLLAMA_BASE_URL" | sed 's:/*$::')"
                     TAGS_URL="$NORMALIZED_OLLAMA_BASE_URL/api/tags"
                     TMP_JSON="$(mktemp)"
+                    EFFECTIVE_MODEL_FILE=".effective_judge_model"
                     trap 'rm -f "$TMP_JSON"' EXIT
 
                     curl -fsSL "$TAGS_URL" -o "$TMP_JSON"
 
                     echo "--------------------------------------------------"
                     echo "Installed Ollama models:"
-                    python3 - "$TMP_JSON" "$JUDGE_MODEL" <<'PY'
+                    python3 - "$TMP_JSON" "${JUDGE_MODEL:-}" "$EFFECTIVE_MODEL_FILE" <<'PY'
 import json
 import sys
 
-payload_path, selected_model = sys.argv[1], sys.argv[2]
+payload_path, selected_model, output_path = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
 with open(payload_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh) or {}
 
@@ -114,14 +121,67 @@ for model in models:
 if not models:
     raise SystemExit("No Ollama models were returned from /api/tags.")
 
-if selected_model not in models:
-    raise SystemExit(
-        f"Selected JUDGE_MODEL '{selected_model}' is not installed. "
-        f"Choose one of: {', '.join(models)}"
-    )
+if selected_model:
+    if selected_model not in models:
+        raise SystemExit(
+            f"Selected JUDGE_MODEL '{selected_model}' is not installed. "
+            f"Choose one of: {', '.join(models)}"
+        )
+    effective_model = selected_model
+else:
+    preferred = ["qwen3-coder:30b", "qwen2:7b"]
+    effective_model = next((m for m in preferred if m in models), models[0])
+    print("JUDGE_MODEL was empty. Auto-selected installed model:", effective_model)
+
+with open(output_path, "w", encoding="utf-8") as fh:
+    fh.write(effective_model)
 
 print("--------------------------------------------------")
-print(f"Selected judge model confirmed: {selected_model}")
+print(f"Selected judge model confirmed: {effective_model}")
+PY
+                    '''
+                }
+            }
+        }
+        stage('1-2. Target URL 연결 검증') {
+            steps {
+                withEnv([
+                    "TARGET_URL=${params.TARGET_URL}",
+                    "TARGET_TYPE=${params.TARGET_TYPE}",
+                ]) {
+                    sh '''
+                    set -eu
+                    # 평가 시작 전에 Jenkins 컨테이너에서 대상 엔드포인트 접근 가능 여부를 먼저 확인합니다.
+                    python3 - <<'PY'
+import os
+from urllib.parse import urlparse
+
+import requests
+
+target_url = os.environ.get("TARGET_URL", "").strip()
+target_type = os.environ.get("TARGET_TYPE", "http").strip()
+
+if not target_url:
+    raise SystemExit("TARGET_URL is empty.")
+
+try:
+    if target_type == "http":
+        # 인증/스키마 오류와 무관하게 네트워크 연결 가능 여부만 확인합니다.
+        response = requests.post(target_url, json={"input": "ping"}, timeout=5)
+    else:
+        response = requests.get(target_url, timeout=5)
+    print(f"TARGET_URL reachable: HTTP {response.status_code}")
+except requests.RequestException as exc:
+    parsed = urlparse(target_url)
+    host = parsed.hostname or "unknown"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    raise SystemExit(
+        "Cannot reach TARGET_URL from Jenkins container.\\n"
+        f" - TARGET_URL: {target_url}\\n"
+        f" - host: {host}, port: {port}\\n"
+        f" - error: {exc}\\n"
+        "Check target service is running and bound to 0.0.0.0, and verify host.docker.internal routing."
+    )
 PY
                     '''
                 }
@@ -139,7 +199,15 @@ PY
                         echo "=================================================="
                         echo "TARGET_URL: ${params.TARGET_URL}"
                         echo "TARGET_TYPE: ${params.TARGET_TYPE}"
-                        echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
+                        EFFECTIVE_JUDGE_MODEL="${params.JUDGE_MODEL ?: ''}"
+                        if [ -f .effective_judge_model ]; then
+                          EFFECTIVE_JUDGE_MODEL="\$(cat .effective_judge_model)"
+                        fi
+                        if [ -z "\$EFFECTIVE_JUDGE_MODEL" ]; then
+                          echo "JUDGE_MODEL is empty and no auto-selected model was found."
+                          exit 2
+                        fi
+                        echo "JUDGE_MODEL: \$EFFECTIVE_JUDGE_MODEL"
                         echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
                         echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
                         echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
@@ -149,7 +217,7 @@ PY
                         export TARGET_TYPE='${params.TARGET_TYPE}'
                         export API_KEY='${params.API_KEY}'
                         export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
-                        export JUDGE_MODEL='${params.JUDGE_MODEL}'
+                        export JUDGE_MODEL="\$EFFECTIVE_JUDGE_MODEL"
                         export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
                         export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'
                         export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
