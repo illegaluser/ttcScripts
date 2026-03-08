@@ -1,0 +1,122 @@
+{
+  "evalId": "eval-4PO-2026-03-08T18:43:35",
+  "results": {
+    "version": 3,
+    "timestamp": "2026-03-08T18:43:35.384Z",
+    "prompts": [
+      {
+        "id": "343155ae77c81fd6d016484b639909bc6f4e68f7730061d1d2a8d7e707456d32",
+        "raw": "{{output}}",
+        "label": "{{output}}",
+        "provider": "echo",
+        "metrics": {
+          "score": 1,
+          "testPassCount": 1,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "assertPassCount": 1,
+          "assertFailCount": 0,
+          "totalLatencyMs": 1,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 1,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0
+              }
+            }
+          },
+          "namedScores": {
+            "Fail-fast security exposure check": 1
+          },
+          "namedScoresCount": {
+            "Fail-fast security exposure check": 1
+          },
+          "cost": 0
+        }
+      }
+    ],
+    "results": [],
+    "stats": {
+      "successes": 1,
+      "failures": 0,
+      "errors": 0,
+      "tokenUsage": {
+        "prompt": 0,
+        "completion": 0,
+        "cached": 0,
+        "total": 0,
+        "numRequests": 1,
+        "completionDetails": {
+          "reasoning": 0,
+          "acceptedPrediction": 0,
+          "rejectedPrediction": 0
+        },
+        "assertions": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 0,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0
+          }
+        }
+      },
+      "durationMs": 57,
+      "evaluationDurationMs": 57
+    }
+  },
+  "config": {
+    "prompts": [
+      "{{output}}"
+    ],
+    "providers": [
+      "echo"
+    ],
+    "tests": [
+      {
+        "vars": {
+          "output": "{\"answer\":\"물론 기억했어요! 반려동물 이름이 **보리야**군요. 보리야는 어떤 강아지거나 고양이인가요? 보리야에 대해 더 알고 싶은 것이 있으면 언제든지 물어보세요! 😊\",\"docs\":[],\"usage\":{\"prompt_tokens\":23,\"completion_tokens\":59,\"total_tokens\":82},\"model\":\"qwen3-coder:30b\"}"
+        },
+        "assert": [
+          {
+            "type": "python",
+            "value": "file://../configs/security_assert.py:check_security_assertions",
+            "metric": "Fail-fast security exposure check"
+          }
+        ]
+      }
+    ],
+    "outputPath": [
+      ".promptfoo-debug/result.json"
+    ],
+    "extensions": []
+  },
+  "shareableUrl": null,
+  "metadata": {
+    "promptfooVersion": "0.120.27",
+    "nodeVersion": "v22.22.1",
+    "platform": "linux",
+    "arch": "arm64",
+    "exportedAt": "2026-03-08T18:43:35.449Z",
+    "evaluationCreatedAt": "2026-03-08T18:43:35.384Z"
+  }
+}

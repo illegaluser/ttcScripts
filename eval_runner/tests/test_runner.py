@@ -4,6 +4,7 @@ import re
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -11,21 +12,16 @@ import pytest
 from jsonschema import validate
 from jsonschema.exceptions import ValidationError
 
-from deepeval import assert_test
 from deepeval.metrics import (
     AnswerRelevancyMetric,
     ContextualRecallMetric,
+    ContextualPrecisionMetric,
     FaithfulnessMetric,
     GEval,
     ToxicityMetric,
 )
-from deepeval.models.gpt_model import GPTModel
-from deepeval.test_case import LLMTestCase
-
-try:
-    from deepeval.metrics import ContextualPrecisionMetric
-except ImportError:
-    ContextualPrecisionMetric = None
+from deepeval.models.llms.ollama_model import OllamaModel
+from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 
 from adapters.registry import AdapterRegistry
 
@@ -115,6 +111,20 @@ def _turn_sort_key(value):
         return (0, str(value))
 
 
+def _is_blank_value(value) -> bool:
+    """
+    CSV 로딩 후 들어오는 None/NaN/공백 문자열을 모두 비어 있는 값으로 취급합니다.
+    단일턴 케이스가 `conversation_id=nan`으로 잘못 묶이는 것을 막기 위한 정규화입니다.
+    """
+    if value is None:
+        return True
+    if pd.isna(value):
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
 def load_dataset():
     """
     `golden.csv`를 읽어 conversation 단위로 그룹화합니다.
@@ -137,7 +147,7 @@ def load_dataset():
 
     for record in records:
         conversation_id = record.get("conversation_id")
-        if conversation_id:
+        if not _is_blank_value(conversation_id):
             # 같은 conversation_id를 가진 row들을 하나의 대화로 모읍니다.
             conversation_key = str(conversation_id)
             if conversation_key not in grouped_conversations:
@@ -146,6 +156,7 @@ def load_dataset():
             grouped_conversations[conversation_key].append(record)
         else:
             # conversation_id가 비어 있으면 독립 대화로 유지합니다.
+            record["conversation_id"] = None
             single_turn_conversations.append([record])
 
     conversations = []
@@ -184,57 +195,73 @@ def _config_path(filename: str) -> Path:
 
 def _build_judge_model():
     """
-    Ollama 호환 OpenAI 엔드포인트를 사용하는 심판 LLM 객체를 생성합니다.
+    DeepEval 최신 OllamaModel을 사용해 심판 LLM 객체를 생성합니다.
     모든 DeepEval/GEval 호출이 동일한 모델 설정을 공유하도록 중앙화합니다.
     """
-    return GPTModel(model=JUDGE_MODEL, base_url=f"{OLLAMA_BASE_URL.rstrip('/')}/v1")
+    return OllamaModel(model=JUDGE_MODEL, base_url=OLLAMA_BASE_URL.rstrip("/"))
+
+
+def _promptfoo_relpath(path: Path, base_dir: Path) -> str:
+    """
+    Promptfoo CLI는 절대경로를 작업 디렉터리에 다시 붙여 해석하는 경우가 있어
+    항상 명시적으로 고정한 기준 디렉터리 상대경로로 넘깁니다.
+    """
+    return os.path.relpath(path, start=base_dir)
 
 
 def _promptfoo_policy_check(raw_text: str):
     """
-    Promptfoo CLI를 사용해 응답 원문에 금칙 패턴이 있는지 검사합니다.
-    파일 기반 입력을 쓰는 이유는 긴 응답도 안정적으로 처리하고 문서 지시와 동일한 흐름을 유지하기 위해서입니다.
+    Promptfoo 최신 CLI의 `--assertions` + `--model-outputs` 흐름으로
+    응답 원문에 금칙 패턴이 있는지 검사합니다.
+    컨테이너 이미지에 promptfoo를 고정 설치해 매 실행 시 다운로드를 피합니다.
     """
     config_path = _config_path("security.yaml")
     if not config_path.exists():
         return
 
-    tmp_input_path = None
-    tmp_output_path = None
+    tmp_dir = None
+    promptfoo_cwd = Path(__file__).resolve().parent
     try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp_input:
-            tmp_input.write(raw_text or "")
-            tmp_input_path = tmp_input.name
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_output:
-            tmp_output_path = tmp_output.name
+        tmp_dir = Path(tempfile.mkdtemp(prefix=".promptfoo-", dir=promptfoo_cwd))
+        model_outputs_path = tmp_dir / f"{uuid.uuid4().hex}-outputs.json"
+        result_path = tmp_dir / f"{uuid.uuid4().hex}-result.json"
 
-        # 결과 JSON을 파일로 남겨 CLI 출력 포맷 변화와 무관하게 실패 건수를 읽습니다.
+        with open(model_outputs_path, "w", encoding="utf-8") as output_file:
+            json.dump([raw_text or ""], output_file, ensure_ascii=False)
+
+        # 결과 JSON을 파일로 남겨 CLI 출력 포맷 변화와 무관하게 실패/에러 건수를 읽습니다.
         command = [
             "promptfoo",
             "eval",
-            "-c",
-            str(config_path),
-            "--prompts",
-            f"file://{tmp_input_path}",
+            "--assertions",
+            _promptfoo_relpath(config_path, promptfoo_cwd),
+            "--model-outputs",
+            _promptfoo_relpath(model_outputs_path, promptfoo_cwd),
             "--output",
-            tmp_output_path,
+            _promptfoo_relpath(result_path, promptfoo_cwd),
+            "--no-write",
+            "--no-table",
         ]
-        process = subprocess.run(command, capture_output=True, text=True)
-        if process.returncode != 0 and not (tmp_output_path and os.path.exists(tmp_output_path)):
+        process = subprocess.run(command, capture_output=True, text=True, cwd=promptfoo_cwd)
+        if process.returncode not in (0, 100) and not result_path.exists():
             raise RuntimeError(process.stderr or process.stdout or "Promptfoo failed")
 
-        if tmp_output_path and os.path.exists(tmp_output_path):
-            with open(tmp_output_path, "r", encoding="utf-8") as result_file:
-                result_payload = json.load(result_file)
-            failures = (((result_payload or {}).get("results") or {}).get("stats") or {}).get("failures", 0)
+        if result_path.exists():
+            with open(result_path, "r", encoding="utf-8") as result_file:
+                result_payload = json.load(result_file) or {}
+            stats = ((result_payload.get("results") or {}).get("stats") or {})
+            failures = stats.get("failures", 0)
+            errors = stats.get("errors", 0)
+            if errors:
+                raise RuntimeError(f"Promptfoo policy checks reported {errors} error(s).")
             if failures:
                 raise RuntimeError(f"Promptfoo policy checks reported {failures} failure(s).")
     finally:
-        # 매 테스트마다 생성되는 임시 파일이 누적되지 않도록 반드시 제거합니다.
-        if tmp_input_path and os.path.exists(tmp_input_path):
-            os.unlink(tmp_input_path)
-        if tmp_output_path and os.path.exists(tmp_output_path):
-            os.unlink(tmp_output_path)
+        # Promptfoo 임시 산출물이 워크스페이스에 누적되지 않게 대화별로 정리합니다.
+        if tmp_dir and tmp_dir.exists():
+            for child in tmp_dir.iterdir():
+                child.unlink(missing_ok=True)
+            tmp_dir.rmdir()
 
 
 def _schema_validate(raw_text: str):
@@ -353,8 +380,13 @@ def _score_task_completion(turn, result, judge, span=None):
         task_completion_metric = GEval(
             name="TaskCompletion",
             criteria=TASK_COMPLETION_CRITERIA,
-            evaluation_params=["input", "actual_output", "expected_output"],
+            evaluation_params=[
+                LLMTestCaseParams.INPUT,
+                LLMTestCaseParams.ACTUAL_OUTPUT,
+                LLMTestCaseParams.EXPECTED_OUTPUT,
+            ],
             model=judge,
+            async_mode=False,
         )
         completion_test_case = LLMTestCase(
             input=turn["input"],
@@ -390,27 +422,35 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
     )
 
     metrics = [
-        AnswerRelevancyMetric(threshold=0.8, model=judge),
-        ToxicityMetric(threshold=0.5, model=judge),
+        AnswerRelevancyMetric(threshold=0.8, model=judge, async_mode=False),
+        ToxicityMetric(threshold=0.5, model=judge, async_mode=False),
     ]
 
-    if result.retrieval_context:
+    if result.retrieval_context and test_case.context:
         # 검색 문맥이 있어야 Faithfulness/Recall/Precision 지표가 의미를 가집니다.
         metrics.extend(
             [
-                FaithfulnessMetric(threshold=0.9, model=judge),
-                ContextualRecallMetric(threshold=0.8, model=judge),
+                FaithfulnessMetric(threshold=0.9, model=judge, async_mode=False),
+                ContextualRecallMetric(threshold=0.8, model=judge, async_mode=False),
             ]
         )
-        if ContextualPrecisionMetric is not None:
-            metrics.append(ContextualPrecisionMetric(threshold=0.8, model=judge))
+        metrics.append(ContextualPrecisionMetric(threshold=0.8, model=judge, async_mode=False))
 
-    assert_test(test_case, metrics)
-
-    if span:
-        # 각 지표의 점수와 사유를 Langfuse에 개별 기록합니다.
-        for metric in getattr(test_case, "metrics", []):
+    failed_metrics = []
+    for metric in metrics:
+        metric.measure(test_case)
+        if span:
             span.score(name=metric.__class__.__name__, value=metric.score, comment=metric.reason)
+        if metric.error:
+            failed_metrics.append(f"{metric.__class__.__name__}: {metric.error}")
+            continue
+        if not metric.is_successful():
+            failed_metrics.append(
+                f"{metric.__class__.__name__} (score={metric.score}, threshold={metric.threshold}): {metric.reason}"
+            )
+
+    if failed_metrics:
+        raise AssertionError("Metrics failed: " + "; ".join(failed_metrics))
 
 
 @pytest.mark.parametrize("conversation", load_dataset())
@@ -432,6 +472,7 @@ def test_evaluation(conversation):
     conversation_history = []
     full_conversation_passed = True
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
+    judge = _build_judge_model()
 
     try:
         for turn in conversation:
@@ -466,7 +507,6 @@ def test_evaluation(conversation):
                     _schema_validate(result.raw_response)
 
                 # 2차 평가: 과업 완료 여부 판정
-                judge = _build_judge_model()
                 _score_task_completion(turn, result, judge, span)
 
                 # 다음 턴 입력에 사용할 수 있도록 assistant 응답을 대화 이력에 누적합니다.
@@ -490,12 +530,12 @@ def test_evaluation(conversation):
                 full_transcript += f"User: {turn['input']}\n"
                 full_transcript += f"Assistant: {turn['actual_output']}\n\n"
 
-            judge = _build_judge_model()
             consistency_metric = GEval(
                 name="MultiTurnConsistency",
                 criteria=MULTI_TURN_CONSISTENCY_CRITERIA,
-                evaluation_params=["input"],
+                evaluation_params=[LLMTestCaseParams.INPUT],
                 model=judge,
+                async_mode=False,
             )
             consistency_test_case = LLMTestCase(input=full_transcript, actual_output="")
             consistency_metric.measure(consistency_test_case)
