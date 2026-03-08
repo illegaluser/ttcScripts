@@ -218,10 +218,9 @@ def _promptfoo_policy_check(raw_text: str):
             f"file://{tmp_input_path}",
             "--output",
             tmp_output_path,
-            "--fail-on-error",
         ]
         process = subprocess.run(command, capture_output=True, text=True)
-        if process.returncode not in (0, 100):
+        if process.returncode != 0 and not (tmp_output_path and os.path.exists(tmp_output_path)):
             raise RuntimeError(process.stderr or process.stdout or "Promptfoo failed")
 
         if tmp_output_path and os.path.exists(tmp_output_path):

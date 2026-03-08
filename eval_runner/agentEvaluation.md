@@ -672,7 +672,7 @@ def _promptfoo_policy_check(raw_text: str):
             tmp.write(raw_text or "")
             tmp_path = tmp.name
         
-        cmd = ["promptfoo", "eval", "-c", "/app/configs/security.yaml", "--prompts", f"file://{tmp_path}", "-o", "json"]
+        cmd = ["promptfoo", "eval", "-c", "/app/configs/security.yaml", "--prompts", f"file://{tmp_path}", "--output", "/tmp/promptfoo-result.json"]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr or proc.stdout or "Promptfoo failed")
