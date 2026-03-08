@@ -383,25 +383,31 @@ PY
                 rm -f .effective_target_url .effective_judge_model
                 '''
 
-                // 컨테이너 외부에서도 바로 내려받을 수 있게 결과 파일을 워크스페이스 아티팩트로 복사합니다.
+                // 빌드 번호별 증적 보존을 위해 리포트를 build-<번호> 폴더로 분리 저장합니다.
+                def buildFolder = "build-${env.BUILD_NUMBER ?: 'manual'}"
+                def artifactDir = "eval-reports/${buildFolder}"
+                def historyDir = "${env.REPORT_DIR}/history/${buildFolder}"
                 sh """
-                mkdir -p eval-reports
-                cp -f ${env.REPORT_DIR}/* eval-reports/ 2>/dev/null || true
+                mkdir -p '${artifactDir}'
+                cp -f ${env.REPORT_DIR}/* '${artifactDir}/' 2>/dev/null || true
+                mkdir -p '${historyDir}'
+                cp -f ${env.REPORT_DIR}/* '${historyDir}/' 2>/dev/null || true
                 """
-                junit testResults: 'eval-reports/results.xml', allowEmptyResults: true
-                archiveArtifacts artifacts: 'eval-reports/*', allowEmptyArchive: true
+                junit testResults: "${artifactDir}/results.xml", allowEmptyResults: true
+                archiveArtifacts artifacts: "${artifactDir}/*", allowEmptyArchive: true
 
                 def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
                 def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
-                def summaryUrl = env.BUILD_URL ? "${env.BUILD_URL}artifact/eval-reports/summary.html" : "eval-reports/summary.html"
+                def summaryUrl = env.BUILD_URL ? "${env.BUILD_URL}artifact/${artifactDir}/summary.html" : "${artifactDir}/summary.html"
                 echo "Evaluation summary: ${summaryUrl}"
-                echo "Evaluation raw json: ${env.BUILD_URL ?: ''}artifact/eval-reports/summary.json"
+                echo "Evaluation raw json: ${env.BUILD_URL ?: ''}artifact/${artifactDir}/summary.json"
+                echo "Report history folder: ${historyDir}"
 
                 try {
                     publishHTML(
                         target: [
-                            reportName: 'AI Eval Summary',
-                            reportDir: 'eval-reports',
+                            reportName: "AI Eval Summary (${buildFolder})",
+                            reportDir: artifactDir,
                             reportFiles: 'summary.html',
                             keepAll: true,
                             alwaysLinkToLastBuild: true,
