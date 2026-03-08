@@ -412,7 +412,15 @@ PY
                     echo "publishHTML plugin is unavailable. Open summary via Artifacts."
                 }
 
-                currentBuild.description = "📊 Summary: ${summaryUrl} | Langfuse: ${publicLangfuseUrl}"
+                // Build 화면 description에 직접 링크를 남깁니다.
+                // (Markup Formatter 설정에 따라 HTML이 비활성화된 경우 URL 텍스트로 fallback)
+                def summaryLinkHtml = "<a href='${summaryUrl}'>summary.html</a>"
+                def langfuseLinkHtml = "<a href='${publicLangfuseUrl}'>langfuse</a>"
+                try {
+                    currentBuild.description = "Summary: ${summaryLinkHtml} | Langfuse: ${langfuseLinkHtml}"
+                } catch (ignored) {
+                    currentBuild.description = "Summary: ${summaryUrl} | Langfuse: ${publicLangfuseUrl}"
+                }
             }
         }
     }
