@@ -1,90 +1,65 @@
 pipeline {
     agent any
-
     parameters {
-        string(name: 'TARGET_URL', defaultValue: '', description: '평가할 외부 API 주소')
-        string(name: 'TARGET_TYPE', defaultValue: 'http', description: '어댑터 타입(http/dify/...)')
-        string(name: 'HOST_KNOWLEDGE_PATH', defaultValue: '/Users/luuuuunatic/Developer/dscore-ttc/data/knowledges', description: '호스트 지식 데이터 경로')
-        string(name: 'HOST_SCRIPTS_PATH', defaultValue: '/Users/luuuuunatic/Developer/dscore-ttc/data/jenkins/scripts', description: '호스트 스크립트 경로')
+        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL')
+        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식 선택')
+        password(name: 'API_KEY', defaultValue: '', description: '(선택) API 인증 키')
+        string(name: 'JUDGE_MODEL', defaultValue: 'qwen2:7b', description: '채점관으로 사용할 LLM 모델명 (Ollama)')
+        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama API Base URL')
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/jenkins_home/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
+        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 PC의 시험지 파일을 직접 업로드')
     }
-
     environment {
-        // Docker Desktop 호스트 접근 주소
-        OLLAMA_HOST = "http://host.docker.internal:11434"
+        LANGFUSE_HOST = 'http://host.docker.internal:3000'
+        PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
     }
-
     stages {
-        stage('Validation') {
+        stage('1. 시험지(Golden Dataset) 준비') {
             steps {
                 script {
-                    if (params.TARGET_URL == '') error "TARGET_URL required."
+                    if (params.UPLOADED_GOLDEN_DATASET) {
+                        // 사용자가 파일을 업로드하면, 지정된 경로에 golden.csv로 덮어쓰기
+                        writeFile(file: params.GOLDEN_CSV_PATH, text: params.UPLOADED_GOLDEN_DATASET.readToString())
+                        echo "Uploaded dataset has been written to ${params.GOLDEN_CSV_PATH}"
+                    } else {
+                        echo "Using existing dataset at ${params.GOLDEN_CSV_PATH}"
+                    }
                 }
             }
         }
-
-        stage('Run Evaluation') {
+        stage('2. 파이썬 평가 실행 (Pytest)') {
             steps {
-                // API Key 등 민감 정보 주입 (Jenkins Credentials 필요)
-                withCredentials([string(credentialsId: 'external-ai-api-key', variable: 'SAFE_API_KEY')]) {
-                    script {
-                        sh """
-                        set +x
-                        docker run --rm \
-                            --network devops-net \
-                            -v ${params.HOST_KNOWLEDGE_PATH}/eval/data:/app/data \
-                            -v ${params.HOST_KNOWLEDGE_PATH}/eval/reports:/app/reports \
-                            -v ${params.HOST_SCRIPTS_PATH}/eval_runner/adapters:/app/adapters \
-                            -v ${params.HOST_SCRIPTS_PATH}/eval_runner/tests:/app/tests \
-                            -v ${params.HOST_SCRIPTS_PATH}/eval_runner/configs:/app/configs \
-                            -e OLLAMA_BASE_URL=${OLLAMA_HOST} \
-                            -e TARGET_URL='${params.TARGET_URL}' \
-                            -e TARGET_TYPE='${params.TARGET_TYPE}' \
-                            -e API_KEY='${SAFE_API_KEY}' \
-                            dscore-eval-runner:v1-fat \
-                            pytest /app/tests/test_runner.py -n 1 --junitxml=/app/reports/results.xml
-                        set -x
-                        """
-                    }
+                withCredentials([
+                    string(credentialsId: 'langfuse-public-key', variable: 'LANGFUSE_PUBLIC_KEY'),
+                    string(credentialsId: 'langfuse-secret-key', variable: 'LANGFUSE_SECRET_KEY')
+                ]) {
+                    sh """
+                    set +x
+                    echo "=================================================="
+                    echo "             STARTING EVALUATION RUN              "
+                    echo "=================================================="
+                    echo "TARGET_URL: ${params.TARGET_URL}"
+                    echo "TARGET_TYPE: ${params.TARGET_TYPE}"
+                    echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
+                    echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
+                    echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
+                    echo "--------------------------------------------------"
+                    set -x
+
+                    python3 -m pytest
+                    """
                 }
             }
         }
-
-                stage('Publish Report') {
-
-                    steps {
-
-                        // JUnit 리포트 발행 (Jenkins 플러그인 필요)
-
-                        junit 'reports/results.xml'
-
-                    }
-
-                }
-
+    }
+    post {
+        always {
+            script {
+                // 빌드 설명에 Langfuse 리포트 링크 추가 (XSS 방지 처리 포함)
+                def safeBuildTag = env.BUILD_TAG.replaceAll('[^a-zA-Z0-9_.-]', '')
+                def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
+                currentBuild.description = "📊 Langfuse Report: ${publicLangfuseUrl}"
             }
-
-        
-
-            post {
-
-                always {
-
-                    script {
-
-                        // BUILD_TAG에서 URL에 부적합한 문자를 제거하여 XSS 방지
-
-                        def safeBuildTag = env.BUILD_TAG ? env.BUILD_TAG.replaceAll('[^a-zA-Z0-9_.-]', '') : 'latest'
-
-                        def publicLangfuseUrl = "http://localhost:3000/project/traces?filter=tags%3D${safeBuildTag}"
-
-                        currentBuild.description = "Langfuse 결과: ${publicLangfuseUrl}"
-
-                    }
-
-                }
-
-            }
-
         }
-
-        
+    }
+}
