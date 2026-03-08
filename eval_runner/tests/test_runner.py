@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import requests
 from jsonschema import validate
 from jsonschema.exceptions import ValidationError
 
@@ -170,6 +171,13 @@ CONTEXTUAL_RECALL_THRESHOLD = _env_float("CONTEXTUAL_RECALL_THRESHOLD", 0.8)
 CONTEXTUAL_PRECISION_THRESHOLD = _env_float("CONTEXTUAL_PRECISION_THRESHOLD", 0.8)
 TASK_COMPLETION_THRESHOLD = _env_float("TASK_COMPLETION_THRESHOLD", 0.5)
 MULTI_TURN_CONSISTENCY_THRESHOLD = _env_float("MULTI_TURN_CONSISTENCY_THRESHOLD", 0.5)
+SUMMARY_TRANSLATE_TO_KOREAN = os.environ.get("SUMMARY_TRANSLATE_TO_KOREAN", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+_SUMMARY_TRANSLATION_CACHE = {}
 
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -299,7 +307,8 @@ def _render_metric_list(metric_details):
             "FAIL": "실패",
             "SKIPPED": "건너뜀",
         }.get(status, str(status))
-        reason = escape(str(metric.get("reason") or metric.get("error") or ""))
+        reason_text = str(metric.get("reason") or metric.get("error") or "")
+        reason = escape(_translate_text_to_korean(reason_text))
         score = metric.get("score")
         threshold = metric.get("threshold")
         score_display = "-" if score is None else score
@@ -442,6 +451,67 @@ def _build_multi_turn_display(conversation: dict):
     return [_skipped_metric("MultiTurnConsistency", reason)]
 
 
+def _needs_translation_to_korean(text: str) -> bool:
+    """
+    요약 화면에서 가독성을 위해 중국어/영어 중심 문장을 한국어로 변환할지 판별합니다.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if bool(re.search(r"[가-힣]", stripped)):
+        return False
+    if bool(re.search(r"[\u4e00-\u9fff]", stripped)):
+        return True
+    return bool(re.search(r"[A-Za-z]", stripped))
+
+
+def _translate_text_to_korean(text: str) -> str:
+    """
+    요약 화면 출력용 텍스트를 한국어로 번역합니다.
+    - 번역 실패 시 원문 유지
+    - 동일 문장은 캐시해 반복 호출 비용을 줄입니다.
+    """
+    raw = str(text or "")
+    if not SUMMARY_TRANSLATE_TO_KOREAN:
+        return raw
+    if not _needs_translation_to_korean(raw):
+        return raw
+
+    cache_key = raw.strip()
+    if cache_key in _SUMMARY_TRANSLATION_CACHE:
+        return _SUMMARY_TRANSLATION_CACHE[cache_key]
+
+    try:
+        prompt = (
+            "다음 문장을 의미 손실 없이 자연스러운 한국어로 번역하세요.\n"
+            "- 코드, 숫자, 고유명사(case_id, 모델명, URL)는 유지\n"
+            "- 출력은 번역문만 작성\n\n"
+            f"{cache_key}"
+        )
+        response = requests.post(
+            f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+            json={
+                "model": JUDGE_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0},
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        translated = ((response.json() or {}).get("response") or "").strip()
+        if translated:
+            _SUMMARY_TRANSLATION_CACHE[cache_key] = translated
+            return translated
+    except Exception:
+        pass
+
+    _SUMMARY_TRANSLATION_CACHE[cache_key] = raw
+    return raw
+
+
 def _render_summary_html():
     """
     Jenkins 아티팩트 탭에서 바로 열어볼 수 있는 단일 HTML 리포트를 생성합니다.
@@ -452,7 +522,7 @@ def _render_summary_html():
     all_conversations = SUMMARY_STATE.get("conversations", [])
 
     def _short_text(value, limit=180):
-        text = str(value or "").strip()
+        text = _translate_text_to_korean(str(value or "")).strip()
         if not text:
             return "-"
         return text if len(text) <= limit else f"{text[:limit]}..."
@@ -530,7 +600,7 @@ def _render_summary_html():
                 f"<p><strong>과업 달성도</strong><br>{task_completion_html}</p>"
                 f"<p><strong>품질 지표</strong><br>{metrics_html}</p>"
                 f"<p><strong>실제 응답</strong><pre>{actual_output}</pre></p>"
-                f"<p><strong>원본 실패 메시지</strong><br>{escape(str(turn.get('failure_message') or '-'))}</p>"
+                f"<p><strong>원본 실패 메시지</strong><br>{escape(_translate_text_to_korean(str(turn.get('failure_message') or '-')))}</p>"
                 "</details>"
             )
 
