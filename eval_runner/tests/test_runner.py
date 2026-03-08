@@ -703,7 +703,18 @@ def _render_summary_html():
             task_completion_html = _render_metric_list(_build_task_completion_display(turn))
             metrics_html = _render_metric_list(_build_deepeval_metrics_display(turn))
             token_usage_html = escape(_format_token_usage(turn.get("usage")))
-            actual_output = escape(str(turn.get("actual_output") or ""))
+            input_text = str(turn.get("input") or "-")
+            expected_output_text = str(turn.get("expected_output") or "-")
+            success_criteria_text = str(turn.get("success_criteria") or "-")
+            actual_output_text = str(turn.get("actual_output") or turn.get("raw_response") or "-")
+            input_preview = _escape_with_linebreaks(_short_text(input_text, limit=220), max_line_len=60)
+            expected_preview = _escape_with_linebreaks(_short_text(expected_output_text, limit=180), max_line_len=60)
+            success_criteria_preview = _escape_with_linebreaks(_short_text(success_criteria_text, limit=180), max_line_len=60)
+            output_preview = _escape_with_linebreaks(_short_text(actual_output_text, limit=260), max_line_len=60)
+            actual_output = escape(actual_output_text)
+            input_full = escape(input_text)
+            expected_output_full = escape(expected_output_text)
+            success_criteria_full = escape(success_criteria_text)
             failure_raw = str(turn.get("failure_message") or "-")
             failure_localized = _escape_with_linebreaks(_translate_text_to_korean(failure_raw))
             failure_raw_escaped = _escape_with_linebreaks(failure_raw)
@@ -719,11 +730,14 @@ def _render_summary_html():
             detail_html = (
                 "<details>"
                 "<summary>평가 상세 보기</summary>"
+                f"<p><strong>입력값</strong><pre>{input_full}</pre></p>"
+                f"<p><strong>기대값</strong><pre>{expected_output_full}</pre></p>"
+                f"<p><strong>성공조건</strong><pre>{success_criteria_full}</pre></p>"
                 f"<p><strong>쉬운 해설</strong><br>{_escape_with_linebreaks(easy_explanation, max_line_len=80)}</p>"
                 f"<p><strong>사전 검사</strong><br>{fail_fast}</p>"
                 f"<p><strong>과업 달성도</strong><br>{task_completion_html}</p>"
                 f"<p><strong>품질 지표</strong><br>{metrics_html}</p>"
-                f"<p><strong>실제 응답</strong><pre>{actual_output}</pre></p>"
+                f"<p><strong>실제 AI 응답</strong><pre>{actual_output}</pre></p>"
                 f"<p><strong>가독성 요약 사유</strong><br>{failure_localized}</p>"
                 f"<p><strong>원문 실패 메시지</strong><pre>{failure_raw_escaped}</pre></p>"
                 "</details>"
@@ -736,6 +750,10 @@ def _render_summary_html():
                 f"<td><span class='badge {status_class}'>{escape(status_label)}</span></td>"
                 f"<td>{escape(str(turn.get('latency_ms') or '-'))}</td>"
                 f"<td>{token_usage_html}</td>"
+                f"<td>{input_preview}</td>"
+                f"<td>{expected_preview}</td>"
+                f"<td>{success_criteria_preview}</td>"
+                f"<td>{output_preview}</td>"
                 f"<td>{_escape_with_linebreaks(_short_text(key_reason), max_line_len=60)}</td>"
                 f"<td>{detail_html}</td>"
                 "</tr>"
@@ -766,7 +784,7 @@ def _render_summary_html():
                 f"<p class='summary-line'><strong>멀티턴 일관성:</strong> {multi_turn_html}</p>"
                 "<table class='result-table'>"
                 "<thead><tr>"
-                "<th>Case ID</th><th>기대결과</th><th>판정</th><th>응답시간(ms)</th><th>토큰 사용량</th><th>핵심 사유</th><th>상세</th>"
+                "<th>Case ID</th><th>기대결과</th><th>판정</th><th>응답시간(ms)</th><th>토큰 사용량</th><th>입력값</th><th>기대값</th><th>성공조건</th><th>실제 AI 응답</th><th>핵심 사유</th><th>상세</th>"
                 "</tr></thead>"
                 f"<tbody>{turn_rows}</tbody>"
                 "</table>"
@@ -1380,6 +1398,8 @@ def test_evaluation(conversation):
                 "case_id": case_id,
                 "turn_id": turn.get("turn_id"),
                 "input": input_text,
+                "expected_output": str(turn.get("expected_output") or ""),
+                "success_criteria": str(turn.get("success_criteria") or ""),
                 "expected_outcome": expected_outcome,
                 "status": "passed",
                 "latency_ms": None,
@@ -1388,6 +1408,7 @@ def test_evaluation(conversation):
                 "task_completion": None,
                 "metrics": [],
                 "actual_output": "",
+                "raw_response": "",
                 "usage": None,
                 "has_retrieval_context": False,
                 "has_context_ground_truth": bool(_safe_json_list(turn.get("context_ground_truth", "[]"))),
@@ -1403,6 +1424,10 @@ def test_evaluation(conversation):
                 # 같은 conversation 안에서는 동일 어댑터 인스턴스를 재사용합니다.
                 # 특히 ui_chat은 같은 브라우저 세션이 유지되어야 실제 멀티턴 검증이 됩니다.
                 result = adapter.invoke(input_text, history=conversation_history)
+                # 실패 단계와 무관하게 원 응답을 먼저 저장해 summary에서 항상 비교 가능하게 유지합니다.
+                turn_report["actual_output"] = result.actual_output or ""
+                turn_report["raw_response"] = result.raw_response or ""
+                turn["actual_output"] = result.actual_output or ""
 
                 update_payload = {"output": result.to_dict()}
                 if result.usage:
@@ -1438,8 +1463,6 @@ def test_evaluation(conversation):
                     )
 
                 # 다음 턴 입력에 사용할 수 있도록 assistant 응답을 대화 이력에 누적합니다.
-                turn["actual_output"] = result.actual_output
-                turn_report["actual_output"] = result.actual_output
                 conversation_history.append(turn)
 
                 # 3차 평가: 답변 품질 및 RAG 지표 측정
