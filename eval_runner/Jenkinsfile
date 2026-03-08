@@ -1,64 +1,16 @@
-properties([
-    parameters([
-        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. 예: http://host.docker.internal:8000/invoke'),
-        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat 선택'),
-        password(name: 'API_KEY', defaultValue: '', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234'),
-        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...'),
-        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '채점용 Ollama 주소. 예: http://host.docker.internal:11434'),
-        [
-            $class: 'CascadeChoiceParameter',
-            choiceType: 'PT_SINGLE_SELECT',
-            description: 'OLLAMA_BASE_URL/api/tags 에서 읽어온 심판 모델 목록. 예: qwen3-coder:30b, qwen2:7b',
-            filterLength: 1,
-            filterable: true,
-            name: 'JUDGE_MODEL',
-            randomName: 'judge-model-choice',
-            referencedParameters: 'OLLAMA_BASE_URL',
-            script: [
-                $class: 'GroovyScript',
-                fallbackScript: [
-                    classpath: [],
-                    sandbox: false,
-                    script: '''
-                        return ['qwen2:7b']
-                    '''
-                ],
-                script: [
-                    classpath: [],
-                    sandbox: false,
-                    script: '''
-                        import groovy.json.JsonSlurperClassic
-
-                        def baseUrl = (OLLAMA_BASE_URL ?: 'http://host.docker.internal:11434').trim()
-                        if (!baseUrl) {
-                            return ['qwen2:7b']
-                        }
-
-                        def apiUrl = baseUrl.endsWith('/') ? "${baseUrl}api/tags" : "${baseUrl}/api/tags"
-                        def connection = new URL(apiUrl).openConnection()
-                        connection.setConnectTimeout(3000)
-                        connection.setReadTimeout(5000)
-
-                        def payload = new JsonSlurperClassic().parse(connection.getInputStream().newReader('UTF-8'))
-                        def models = ((payload?.models ?: []) as List)
-                            .collect { it?.name?.toString() }
-                            .findAll { it }
-                            .unique()
-                            .sort()
-
-                        return models ?: ['qwen2:7b']
-                    '''
-                ]
-            ]
-        ],
-        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: '답변 관련성 합격 기준(0~1). 예: 0.7=보통, 0.8=엄격'),
-        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '컨테이너 내부 시험지 경로. 예: /var/knowledges/eval/data/golden.csv'),
-        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 golden.csv 직접 업로드. 업로드 시 GOLDEN_CSV_PATH 위치로 복사됨')
-    ])
-])
-
 pipeline {
     agent any
+    parameters {
+        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. 예: http://host.docker.internal:8000/invoke')
+        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat 선택')
+        password(name: 'API_KEY', defaultValue: '', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234')
+        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...')
+        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '채점용 Ollama 주소. 예: http://host.docker.internal:11434')
+        string(name: 'JUDGE_MODEL', defaultValue: 'qwen3-coder:30b', description: '심판 모델명. 실행 전에 설치 모델 목록과 대조 검증함. 예: qwen3-coder:30b')
+        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: '답변 관련성 합격 기준(0~1). 예: 0.7=보통, 0.8=엄격')
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '컨테이너 내부 시험지 경로. 예: /var/knowledges/eval/data/golden.csv')
+        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 golden.csv 직접 업로드. 업로드 시 GOLDEN_CSV_PATH 위치로 복사됨')
+    }
     environment {
         LANGFUSE_HOST = 'http://host.docker.internal:3000'
         PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
@@ -70,7 +22,7 @@ pipeline {
                 script {
                     sh """
                     mkdir -p "\$(dirname '${params.GOLDEN_CSV_PATH}')"
-                    mkdir -p ${env.REPORT_DIR}
+                    mkdir -p '${env.REPORT_DIR}'
                     """
                     if (params.UPLOADED_GOLDEN_DATASET?.trim()) {
                         sh """
@@ -87,6 +39,7 @@ pipeline {
             steps {
                 sh """
                 set -eu
+                # 입력한 JUDGE_MODEL이 실제 Ollama 설치 목록에 있는지 먼저 검증합니다.
                 TAGS_URL="${params.OLLAMA_BASE_URL%/}/api/tags"
                 TMP_JSON="$(mktemp)"
                 trap 'rm -f "$TMP_JSON"' EXIT
@@ -125,6 +78,7 @@ PY
         stage('2. 파이썬 평가 실행 (Pytest)') {
             steps {
                 script {
+                    // Langfuse 유무와 무관하게 동일한 평가 명령을 재사용하기 위한 클로저입니다.
                     def runEval = { ->
                         sh """
                         set +x
@@ -137,6 +91,7 @@ PY
                         echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
                         echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
                         echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
+                        echo "REPORT_DIR: ${env.REPORT_DIR}"
                         echo "--------------------------------------------------"
                         export TARGET_URL='${params.TARGET_URL}'
                         export TARGET_TYPE='${params.TARGET_TYPE}'
@@ -176,6 +131,7 @@ PY
     post {
         always {
             script {
+                // 컨테이너 외부에서도 바로 내려받을 수 있게 결과 파일을 워크스페이스 아티팩트로 복사합니다.
                 sh """
                 mkdir -p eval-reports
                 cp -f ${env.REPORT_DIR}/* eval-reports/ 2>/dev/null || true
