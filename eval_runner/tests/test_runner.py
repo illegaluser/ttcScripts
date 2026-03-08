@@ -144,12 +144,6 @@ THRESHOLD_DISPLAY_NAMES = {
 }
 
 
-class ExpectedFailureNotTriggered(AssertionError):
-    """
-    expected-fail 케이스가 실제로는 통과했을 때 구분하기 위한 전용 예외입니다.
-    """
-
-
 def _env_float(name: str, default: float) -> float:
     """
     환경변수 숫자 파라미터를 안전하게 float로 읽습니다.
@@ -406,7 +400,6 @@ def _build_deepeval_metrics_display(turn: dict):
 
     task_completion = turn.get("task_completion")
     failure = str(turn.get("failure_message") or "")
-    expected_fail_matched = turn.get("status") == "failed_expected"
     has_retrieval_context = bool(turn.get("has_retrieval_context"))
     has_context_ground_truth = bool(turn.get("has_context_ground_truth"))
 
@@ -423,8 +416,6 @@ def _build_deepeval_metrics_display(turn: dict):
             reason = "보안 정책 검사 실패로 해당 지표 평가를 건너뛰었습니다."
         elif "Format Compliance Failed" in failure:
             reason = "응답 형식 검사 실패로 해당 지표 평가를 건너뛰었습니다."
-        elif expected_fail_matched:
-            reason = "의도된 실패가 검출되어 대화를 조기 종료하고 해당 지표를 건너뛰었습니다."
         elif metric_name in (
             "FaithfulnessMetric",
             "ContextualRecallMetric",
@@ -450,8 +441,6 @@ def _build_multi_turn_display(conversation: dict):
     turns = conversation.get("turns", []) or []
     if len(turns) <= 1:
         reason = "단일턴 대화라 멀티턴 일관성 평가는 건너뛰었습니다."
-    elif any(turn.get("status") == "failed_expected" for turn in turns):
-        reason = "의도된 실패가 중간에 검출되어 멀티턴 일관성 평가는 건너뛰었습니다."
     else:
         reason = "대화가 중간에 실패하여 멀티턴 일관성 평가는 건너뛰었습니다."
     return [_skipped_metric("MultiTurnConsistency", reason)]
@@ -552,7 +541,6 @@ def _fallback_localize_common_phrases(text: str) -> str:
     """
     localized = str(text or "")
     replacements = [
-        (r"Expected failure observed at case_id", "예상 실패가 case_id"),
         (r"TaskCompletion failed with score", "TaskCompletion이 점수"),
         (r"Metrics failed:", "지표 평가 실패:"),
         (r"Promptfoo policy checks reported (\d+) failure\(s\)\.", r"Promptfoo 정책 검사에서 \1건 실패가 보고되었습니다."),
@@ -648,12 +636,8 @@ def _render_summary_html():
         status = str(turn.get("status") or "")
         failure = _translate_text_to_korean(str(turn.get("failure_message") or ""))
         task_completion = turn.get("task_completion") or {}
-        expected_outcome = str(turn.get("expected_outcome") or "pass").lower()
-
         if status == "passed":
             return "질문 의도와 평가 기준을 모두 만족해 통과했습니다."
-        if status == "failed_expected" and expected_outcome == "fail":
-            return "의도적으로 실패를 기대한 테스트에서 실제로 실패해, 실패 감지 규칙이 정상 동작했습니다."
         if "Promptfoo policy checks reported" in failure or "정책 검사" in failure:
             return "민감정보 또는 금칙 패턴이 감지되어 보안 기준에서 실패했습니다."
         if "Format Compliance Failed" in failure or "응답 형식" in failure:
@@ -671,8 +655,6 @@ def _render_summary_html():
     def _conversation_status_meta(status):
         if status == "passed":
             return ("통과", "ok", "정상 통과")
-        if status == "failed_expected":
-            return ("실패", "warn", "의도된 실패")
         if status == "failed":
             return ("실패", "fail", "실패")
         return ("알 수 없음", "skip", str(status or "unknown"))
@@ -680,8 +662,6 @@ def _render_summary_html():
     def _turn_status_meta(status):
         if status == "passed":
             return ("PASS", "ok", "통과")
-        if status == "failed_expected":
-            return ("FAIL", "warn", "의도된 실패")
         if status == "failed":
             return ("FAIL", "fail", "실패")
         return ("UNKNOWN", "skip", str(status or "unknown"))
@@ -732,8 +712,6 @@ def _render_summary_html():
 
             if turn.get("status") == "failed":
                 key_reason = turn.get("failure_message") or "실패"
-            elif turn.get("status") == "failed_expected":
-                key_reason = turn.get("failure_message") or "의도한 실패 케이스가 검출되었습니다."
             else:
                 task_completion = turn.get("task_completion") or {}
                 key_reason = task_completion.get("reason") or "정상 통과"
@@ -1055,34 +1033,6 @@ def _safe_json_list(raw_text: str):
     """
     parsed = _safe_json_loads(raw_text) if isinstance(raw_text, str) else raw_text
     return parsed if isinstance(parsed, list) else []
-
-
-def _is_expected_failure_case(turn: dict) -> bool:
-    """
-    케이스의 기대 결과가 실패인지 판별합니다.
-    1순위: expected_outcome/expected_result/expected_status/should_fail 컬럼
-    2순위: case_id 네이밍 규칙(*-FAIL-*)
-    """
-    for key in ("expected_outcome", "expected_result", "expected_status"):
-        value = turn.get(key)
-        if value is None:
-            continue
-        normalized = str(value).strip().lower()
-        if normalized in ("fail", "failed", "negative", "expect_fail", "expected_fail", "f"):
-            return True
-        if normalized in ("pass", "passed", "positive", "expect_pass", "expected_pass", "p"):
-            return False
-
-    should_fail = turn.get("should_fail")
-    if should_fail is not None:
-        normalized = str(should_fail).strip().lower()
-        if normalized in ("1", "true", "y", "yes"):
-            return True
-        if normalized in ("0", "false", "n", "no"):
-            return False
-
-    case_id = str(turn.get("case_id") or "").upper()
-    return "-FAIL-" in case_id or case_id.startswith("FAIL-") or case_id.endswith("-FAIL")
 
 
 def _compact_output_for_relevancy(text: str) -> str:
@@ -1424,12 +1374,13 @@ def test_evaluation(conversation):
         for turn in conversation:
             case_id = turn["case_id"]
             input_text = turn["input"]
-            expected_failure = _is_expected_failure_case(turn)
+            expected_outcome_raw = str(turn.get("expected_outcome") or "pass").strip().lower()
+            expected_outcome = "fail" if expected_outcome_raw in ("fail", "failed", "negative", "f") else "pass"
             turn_report = {
                 "case_id": case_id,
                 "turn_id": turn.get("turn_id"),
                 "input": input_text,
-                "expected_outcome": "fail" if expected_failure else "pass",
+                "expected_outcome": expected_outcome,
                 "status": "passed",
                 "latency_ms": None,
                 "policy_check": None,
@@ -1505,22 +1456,7 @@ def test_evaluation(conversation):
                         )
                 if failed_metrics:
                     raise AssertionError("Metrics failed: " + "; ".join(failed_metrics))
-                if expected_failure:
-                    raise ExpectedFailureNotTriggered(
-                        "This case is marked as expected-fail, but all checks passed."
-                    )
             except Exception as exc:
-                if expected_failure and not isinstance(exc, ExpectedFailureNotTriggered):
-                    # 의도된 실패 시나리오가 실제로 실패했으면, 결과 집계에서도 실패로 처리합니다.
-                    full_conversation_passed = False
-                    turn_report["status"] = "failed_expected"
-                    turn_report["failure_message"] = str(exc)
-                    conversation_report["status"] = "failed_expected"
-                    conversation_report["failure_message"] = (
-                        f"Expected failure observed at case_id {case_id}: {exc}"
-                    )
-                    pytest.fail(conversation_report["failure_message"])
-
                 full_conversation_passed = False
                 turn_report["status"] = "failed"
                 turn_report["failure_message"] = str(exc)
