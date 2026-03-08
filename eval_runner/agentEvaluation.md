@@ -535,6 +535,7 @@ import pytest
 import pandas as pd
 from jsonschema import validate
 from jsonschema.exceptions import ValidationError
+from jsonpath_ng import parse
 from openai import OpenAI
 
 from deepeval import assert_test
@@ -601,27 +602,7 @@ def load_dataset():
 # =========================
 # Helpers
 # =========================
-TASK_COMPLETION_CRITERIA = """
-Instruction:
-You are a strict judge evaluating whether an AI agent has successfully completed a given task.
-Analyze the user's 'input' (the task) and the agent's 'actual_output'.
-The 'expected_output' field contains the success criteria for this task.
-Score 1 if the agent's output clearly and unambiguously meets all success criteria.
-Score 0 if the agent fails, provides an incomplete answer, or produces an error.
-Your response must be a single float: 1.0 for success, 0.0 for failure.
-"""
-
-MULTI_TURN_CONSISTENCY_CRITERIA = """
-Instruction:
-You are a strict judge evaluating the conversational consistency of an AI assistant across multiple turns.
-Analyze the 'input', which contains the full conversation transcript.
-Score 1 if the assistant maintains context, remembers information from previous turns, and provides coherent, relevant responses throughout the conversation.
-Score 0 if the assistant contradicts itself, forgets previous information, or gives responses that are out of context.
-Your response must be a single float: 1.0 for perfect consistency, 0.0 for failure.
-"""
-
-def _promptfoo_policy_check(raw_text: str):
-    tmp_path = None
+U   tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             tmp.write(raw_text or "")
@@ -646,6 +627,38 @@ def _schema_validate(raw_text: str):
         validate(instance=parsed, schema=schema)
     except (json.JSONDecodeError, ValidationError) as e:
         raise RuntimeError(f"Format Compliance Failed (schema.json): {e}")
+
+def _check_rule_based_criteria(result, criteria_str):
+    """SUCCESS_CRITERIA_GUIDE.md에 정의된 문법을 파싱하여 성공 여부를 판정합니다."""
+    if not criteria_str:
+        # 가이드: 비어있을 경우 HTTP 200 확인
+        return result.http_status == 200
+
+    conditions = criteria_str.split(" AND ")
+    for cond in conditions:
+        cond = cond.strip()
+        if cond.startswith("status_code="):
+            expected = int(cond.split("=")[1])
+            if result.http_status != expected:
+                return False
+        elif "raw~r/" in cond:
+            # 문법: raw~r/<regex>/
+            pattern = cond.split("raw~r/")[1].rstrip("/")
+            if not re.search(pattern, result.raw_response or ""):
+                return False
+        elif "json." in cond and "~r/" in cond:
+            # 문법: json.<path>~r/<regex>/
+            left, right = cond.split("~r/")
+            json_path_str = left.replace("json.", "", 1)
+            pattern = right.rstrip("/")
+            try:
+                json_data = json.loads(result.raw_response)
+                matches = parse(json_path_str).find(json_data)
+                if not matches or not any(re.search(pattern, str(m.value)) for m in matches):
+                    return False
+            except Exception:
+                return False
+    return True
 
 # =========================
 # Tests
@@ -688,53 +701,24 @@ def test_evaluation(conversation):
             
             judge = GPTModel(model=JUDGE_MODEL, base_url=f"{os.environ.get('OLLAMA_BASE_URL')}/v1")
 
-            # [GEval] Task Completion 평가
-            success_criteria = turn.get("success_criteria") or turn.get("expected_output")
-            if success_criteria:
-                task_completion_metric = GEval(
-                    name="TaskCompletion",
-                    criteria=TASK_COMPLETION_CRITERIA,
-                    evaluation_params=["input", "actual_output", "expected_output"],
-                    model=judge
-                )
-                completion_test_case = LLMTestCase(
-                    input=turn["input"],
-                    actual_output=result.actual_output,
-                    expected_output=success_criteria 
-                )
-                task_completion_metric.measure(completion_test_case)
-                if span:
-                    span.score(name=task_completion_metric.name, value=task_completion_metric.score, comment=task_completion_metric.reason)
-
-                if task_completion_metric.score < 0.5: # 실패 시 즉시 중단
-                    pytest.fail(f"TaskCompletion failed for case_id {case_id} with score {task_completion_metric.score}. Reason: {task_completion_metric.reason}")
-
-            turn["actual_output"] = result.actual_output
-            conversation_history.append(turn)
-
-            # [심층 평가] Answer Relevancy, Faithfulness, Toxicity 등
-            test_case = LLMTestCase(
-                input=input_text,
-                actual_output=result.actual_output,
-                expected_output=turn.get("expected_output"),
-                retrieval_context=result.retrieval_context,
-                context=json.loads(turn.get("context_ground_truth", "[]") or "[]"),
-            )
+            # [검증 2단계: 과업 완료(Task Completion) - 규칙 기반]
+            # 가이드 문서에 따라 LLM(GEval) 대신 결정론적 규칙 검사로 변경
+            success_criteria = turn.get("success_criteria")
+            is_task_success = _check_rule_based_criteria(result, success_criteria)
             
-            metrics = [
-                AnswerRelevancyMetric(threshold=0.8, model=judge),
-                ToxicityMetric(threshold=0.5, model=judge)
-            ]
-            if result.retrieval_context: # RAG 지표는 retrieval_context가 있을 때만 측정
+            if span:
+                span.score(name="Task Completion", value=1.0 if is_task_success else 0.0, comment="Rule-based Check")
+
+            if not is_task_success:
+                pytest.fail(f"Task Completion failed. Criteria: {success_criteria or 'HTTP 200 OK'}")
+result.retrieval_context: # RAG 지표는 retrieval_context가 있을 때만 측정
                 metrics.extend([
                     FaithfulnessMetric(threshold=0.9, model=judge),
                     ContextualRecallMetric(threshold=0.8, model=judge)
                 ])
             
             assert_test(test_case, metrics)
-            if span:
-                for m in test_case.metrics:
-                    span.score(name=m.__class__.__name__, value=m.score, comment=m.reason)
+
 
 
         except Exception as e:
