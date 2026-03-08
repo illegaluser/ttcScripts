@@ -12,6 +12,7 @@ class UniversalEvalOutput:
     input: str
     actual_output: str
     retrieval_context: List[str] = field(default_factory=list)
+    tool_calls: List[Dict] = field(default_factory=list)
     http_status: int = 0
     raw_response: str = ""
     error: Optional[str] = None
@@ -27,6 +28,7 @@ class UniversalEvalOutput:
             "input": self.input,
             "actual_output": self.actual_output,
             "retrieval_context": self.retrieval_context,
+            "tool_calls": self.tool_calls,
             "http_status": self.http_status,
             "raw_response": self.raw_response,
             "error": self.error,
