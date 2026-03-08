@@ -71,7 +71,8 @@ pipeline {
     environment {
         LANGFUSE_HOST = 'http://host.docker.internal:3000'
         PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
-        REPORT_DIR = '/var/knowledges/eval/reports'
+        REPORT_ROOT_DIR = '/var/knowledges/eval/reports'
+        REPORT_DIR = "${REPORT_ROOT_DIR}/build-${BUILD_NUMBER}"
     }
     stages {
         stage('1. 시험지(Golden Dataset) 준비') {
@@ -79,6 +80,7 @@ pipeline {
                 script {
                     sh """
                     mkdir -p "\$(dirname '${params.GOLDEN_CSV_PATH}')"
+                    mkdir -p '${env.REPORT_ROOT_DIR}'
                     mkdir -p '${env.REPORT_DIR}'
                     """
                     if (params.UPLOADED_GOLDEN_DATASET?.trim()) {
@@ -383,15 +385,13 @@ PY
                 rm -f .effective_target_url .effective_judge_model
                 '''
 
-                // 빌드 번호별 증적 보존을 위해 리포트를 build-<번호> 폴더로 분리 저장합니다.
+                // 실행 단계에서 이미 REPORT_DIR=.../build-<번호>로 저장되므로,
+                // 아티팩트만 워크스페이스로 복사해 보존합니다.
                 def buildFolder = "build-${env.BUILD_NUMBER ?: 'manual'}"
                 def artifactDir = "eval-reports/${buildFolder}"
-                def historyDir = "${env.REPORT_DIR}/history/${buildFolder}"
                 sh """
                 mkdir -p '${artifactDir}'
-                cp -f ${env.REPORT_DIR}/* '${artifactDir}/' 2>/dev/null || true
-                mkdir -p '${historyDir}'
-                cp -f ${env.REPORT_DIR}/* '${historyDir}/' 2>/dev/null || true
+                find '${env.REPORT_DIR}' -maxdepth 1 -type f -exec cp -f {} '${artifactDir}/' \\;
                 """
                 junit testResults: "${artifactDir}/results.xml", allowEmptyResults: true
                 archiveArtifacts artifacts: "${artifactDir}/*", allowEmptyArchive: true
@@ -401,7 +401,7 @@ PY
                 def summaryUrl = env.BUILD_URL ? "${env.BUILD_URL}artifact/${artifactDir}/summary.html" : "${artifactDir}/summary.html"
                 echo "Evaluation summary: ${summaryUrl}"
                 echo "Evaluation raw json: ${env.BUILD_URL ?: ''}artifact/${artifactDir}/summary.json"
-                echo "Report history folder: ${historyDir}"
+                echo "Report build folder: ${env.REPORT_DIR}"
 
                 try {
                     publishHTML(
