@@ -2,6 +2,7 @@ properties([
     parameters([
         string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. 예: http://host.docker.internal:8000/invoke'),
         choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat 선택'),
+        booleanParam(name: 'AUTO_MANAGE_WRAPPER', defaultValue: true, description: 'TARGET_URL이 :8000/invoke일 때 로컬 wrapper를 Jenkins 컨테이너에서 자동 기동/종료'),
         password(name: 'API_KEY', description: '(선택) 대상 API가 x-api-key 같은 별도 키 인증을 요구할 때 입력. 예: sk-test-1234'),
         password(name: 'TARGET_AUTH_HEADER', description: '(선택) 전체 인증 헤더를 그대로 넘길 때 입력. 예: Authorization: Bearer eyJ...'),
         string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '채점용 Ollama 주소. 예: http://host.docker.internal:11434'),
@@ -148,40 +149,138 @@ PY
                 withEnv([
                     "TARGET_URL=${params.TARGET_URL}",
                     "TARGET_TYPE=${params.TARGET_TYPE}",
+                    "AUTO_MANAGE_WRAPPER=${params.AUTO_MANAGE_WRAPPER}",
+                    "OLLAMA_BASE_URL=${params.OLLAMA_BASE_URL}",
+                    "JUDGE_MODEL=${params.JUDGE_MODEL ?: ''}",
+                    "REPORT_DIR=${env.REPORT_DIR}",
                 ]) {
                     sh '''
                     set -eu
+                    EFFECTIVE_TARGET_URL="$TARGET_URL"
+                    WRAPPER_PID_FILE=".wrapper_pid"
+                    EFFECTIVE_TARGET_URL_FILE=".effective_target_url"
+
+                    # 이전 빌드 잔여 파일 정리
+                    rm -f "$EFFECTIVE_TARGET_URL_FILE"
+
+                    # TARGET_URL이 로컬 wrapper 엔드포인트일 때는 Jenkins 컨테이너 내부에서 wrapper를 자동 기동합니다.
+                    if [ "$AUTO_MANAGE_WRAPPER" = "true" ] && [ "$TARGET_TYPE" = "http" ]; then
+                        case "$TARGET_URL" in
+                            http://host.docker.internal:8000/invoke|http://localhost:8000/invoke|http://127.0.0.1:8000/invoke)
+                                EFFECTIVE_JUDGE_MODEL="${JUDGE_MODEL:-}"
+                                if [ -f .effective_judge_model ]; then
+                                    EFFECTIVE_JUDGE_MODEL="$(cat .effective_judge_model)"
+                                fi
+                                if [ -z "$EFFECTIVE_JUDGE_MODEL" ]; then
+                                    echo "Cannot start wrapper: effective judge model is empty."
+                                    exit 2
+                                fi
+
+                                if [ -f "$WRAPPER_PID_FILE" ]; then
+                                    OLD_PID="$(cat "$WRAPPER_PID_FILE" || true)"
+                                    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                                        kill "$OLD_PID" 2>/dev/null || true
+                                        sleep 1
+                                        kill -9 "$OLD_PID" 2>/dev/null || true
+                                    fi
+                                    rm -f "$WRAPPER_PID_FILE"
+                                fi
+
+                                echo "Auto-managing local wrapper for TARGET_URL=$TARGET_URL"
+                                nohup env \
+                                    OLLAMA_WRAPPER_HOST=0.0.0.0 \
+                                    OLLAMA_WRAPPER_PORT=8000 \
+                                    OLLAMA_BASE_URL="$OLLAMA_BASE_URL" \
+                                    OLLAMA_MODEL="$EFFECTIVE_JUDGE_MODEL" \
+                                    python3 /var/jenkins_home/scripts/eval_runner/ollama_wrapper_api.py \
+                                    > "$REPORT_DIR/wrapper.log" 2>&1 &
+                                WRAPPER_PID="$!"
+                                echo "$WRAPPER_PID" > "$WRAPPER_PID_FILE"
+
+                                READY="false"
+                                for _ in $(seq 1 20); do
+                                    if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+                                        READY="true"
+                                        break
+                                    fi
+                                    sleep 1
+                                done
+
+                                if [ "$READY" != "true" ]; then
+                                    echo "Wrapper startup failed. See $REPORT_DIR/wrapper.log"
+                                    tail -n 100 "$REPORT_DIR/wrapper.log" || true
+                                    exit 1
+                                fi
+
+                                EFFECTIVE_TARGET_URL="http://127.0.0.1:8000/invoke"
+                                echo "Wrapper started (pid=$WRAPPER_PID), effective TARGET_URL=$EFFECTIVE_TARGET_URL"
+                                ;;
+                            *)
+                                echo "AUTO_MANAGE_WRAPPER enabled, but TARGET_URL is not local wrapper endpoint. Skip auto start."
+                                ;;
+                        esac
+                    fi
+
+                    echo "$EFFECTIVE_TARGET_URL" > "$EFFECTIVE_TARGET_URL_FILE"
+
                     # 평가 시작 전에 Jenkins 컨테이너에서 대상 엔드포인트 접근 가능 여부를 먼저 확인합니다.
+                    export EFFECTIVE_TARGET_URL
                     python3 - <<'PY'
 import os
+import socket
 from urllib.parse import urlparse
 
 import requests
 
-target_url = os.environ.get("TARGET_URL", "").strip()
+target_url = os.environ.get("EFFECTIVE_TARGET_URL", "").strip()
 target_type = os.environ.get("TARGET_TYPE", "http").strip()
 
 if not target_url:
-    raise SystemExit("TARGET_URL is empty.")
+    raise SystemExit("EFFECTIVE_TARGET_URL is empty.")
 
-try:
-    if target_type == "http":
-        # 인증/스키마 오류와 무관하게 네트워크 연결 가능 여부만 확인합니다.
-        response = requests.post(target_url, json={"input": "ping"}, timeout=5)
-    else:
-        response = requests.get(target_url, timeout=5)
-    print(f"TARGET_URL reachable: HTTP {response.status_code}")
-except requests.RequestException as exc:
-    parsed = urlparse(target_url)
-    host = parsed.hostname or "unknown"
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+parsed = urlparse(target_url)
+host = parsed.hostname or ""
+port = parsed.port or (443 if parsed.scheme == "https" else 80)
+if not host:
+    raise SystemExit(f"Invalid TARGET_URL: {target_url}")
+
+# host가 IPv4/IPv6를 동시에 반환할 때 requests 예외 메시지가 마지막 주소 오류만 보여줄 수 있어
+# 주소별 TCP 연결 결과를 먼저 수집해 실제 네트워크 상태를 명확히 출력합니다.
+addr_results = []
+tcp_reachable = False
+for family, socktype, proto, _, sockaddr in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+    sock = socket.socket(family, socktype, proto)
+    sock.settimeout(2)
+    try:
+        sock.connect(sockaddr)
+        addr_results.append(f"OK   {sockaddr}")
+        tcp_reachable = True
+    except OSError as exc:
+        addr_results.append(f"FAIL {sockaddr} -> {exc}")
+    finally:
+        sock.close()
+
+print("Address connectivity details:")
+for row in addr_results:
+    print(f" - {row}")
+
+if not tcp_reachable:
     raise SystemExit(
         "Cannot reach TARGET_URL from Jenkins container.\\n"
         f" - TARGET_URL: {target_url}\\n"
         f" - host: {host}, port: {port}\\n"
-        f" - error: {exc}\\n"
         "Check target service is running and bound to 0.0.0.0, and verify host.docker.internal routing."
     )
+
+try:
+    if target_type == "http":
+        # 인증/스키마 오류와 무관하게 엔드포인트 응답성만 확인합니다.
+        response = requests.post(target_url, json={"input": "ping"}, timeout=5)
+    else:
+        response = requests.get(target_url, timeout=5)
+    print(f"TARGET_URL probe response: HTTP {response.status_code}")
+except requests.RequestException as exc:
+    print(f"TARGET_URL TCP reachable, but probe request failed: {exc}")
 PY
                     '''
                 }
@@ -197,8 +296,12 @@ PY
                         echo "=================================================="
                         echo "             STARTING EVALUATION RUN              "
                         echo "=================================================="
-                        echo "TARGET_URL: ${params.TARGET_URL}"
                         echo "TARGET_TYPE: ${params.TARGET_TYPE}"
+                        EFFECTIVE_TARGET_URL="${params.TARGET_URL}"
+                        if [ -f .effective_target_url ]; then
+                          EFFECTIVE_TARGET_URL="\$(cat .effective_target_url)"
+                        fi
+                        echo "TARGET_URL: \$EFFECTIVE_TARGET_URL"
                         EFFECTIVE_JUDGE_MODEL="${params.JUDGE_MODEL ?: ''}"
                         if [ -f .effective_judge_model ]; then
                           EFFECTIVE_JUDGE_MODEL="\$(cat .effective_judge_model)"
@@ -213,7 +316,7 @@ PY
                         echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
                         echo "REPORT_DIR: ${env.REPORT_DIR}"
                         echo "--------------------------------------------------"
-                        export TARGET_URL='${params.TARGET_URL}'
+                        export TARGET_URL="\$EFFECTIVE_TARGET_URL"
                         export TARGET_TYPE='${params.TARGET_TYPE}'
                         export API_KEY='${params.API_KEY}'
                         export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
@@ -251,6 +354,20 @@ PY
     post {
         always {
             script {
+                // 자동 기동한 wrapper 프로세스가 남지 않도록 항상 종료를 시도합니다.
+                sh '''
+                if [ -f .wrapper_pid ]; then
+                    WRAPPER_PID="$(cat .wrapper_pid || true)"
+                    if [ -n "${WRAPPER_PID:-}" ] && kill -0 "$WRAPPER_PID" 2>/dev/null; then
+                        kill "$WRAPPER_PID" 2>/dev/null || true
+                        sleep 1
+                        kill -9 "$WRAPPER_PID" 2>/dev/null || true
+                    fi
+                    rm -f .wrapper_pid
+                fi
+                rm -f .effective_target_url .effective_judge_model
+                '''
+
                 // 컨테이너 외부에서도 바로 내려받을 수 있게 결과 파일을 워크스페이스 아티팩트로 복사합니다.
                 sh """
                 mkdir -p eval-reports
