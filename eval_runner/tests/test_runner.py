@@ -211,7 +211,7 @@ def _recompute_summary_totals():
     metric_scores = {}
 
     for conversation in conversations:
-        if conversation.get("status") in ("passed", "passed_with_expected_failure"):
+        if conversation.get("status") == "passed":
             passed_conversations += 1
         else:
             failed_conversations += 1
@@ -222,7 +222,7 @@ def _recompute_summary_totals():
 
         for turn in conversation.get("turns", []):
             total_turns += 1
-            if turn.get("status") in ("passed", "expected_fail_matched"):
+            if turn.get("status") == "passed":
                 passed_turns += 1
             else:
                 failed_turns += 1
@@ -361,7 +361,7 @@ def _build_deepeval_metrics_display(turn: dict):
 
     task_completion = turn.get("task_completion")
     failure = str(turn.get("failure_message") or "")
-    expected_fail_matched = turn.get("status") == "expected_fail_matched"
+    expected_fail_matched = turn.get("status") == "failed_expected"
     has_retrieval_context = bool(turn.get("has_retrieval_context"))
     has_context_ground_truth = bool(turn.get("has_context_ground_truth"))
 
@@ -405,7 +405,7 @@ def _build_multi_turn_display(conversation: dict):
     turns = conversation.get("turns", []) or []
     if len(turns) <= 1:
         reason = "Skipped because this conversation has a single turn."
-    elif any(turn.get("status") == "expected_fail_matched" for turn in turns):
+    elif any(turn.get("status") == "failed_expected" for turn in turns):
         reason = "Skipped because expected-fail case matched before conversation completion."
     else:
         reason = "Skipped because the conversation failed before multi-turn evaluation."
@@ -415,15 +415,57 @@ def _build_multi_turn_display(conversation: dict):
 def _render_summary_html():
     """
     Jenkins 아티팩트 탭에서 바로 열어볼 수 있는 단일 HTML 리포트를 생성합니다.
-    별도 플러그인 없이도 케이스별 점수와 실패 이유를 한 화면에서 확인하는 목적입니다.
+    비개발자도 이해하기 쉽도록 요약/상세를 분리하고, 단일턴/멀티턴 결과를 구분해 표시합니다.
     """
     totals = SUMMARY_STATE["totals"]
     metric_averages = SUMMARY_STATE["metric_averages"]
-    conversations_html = []
+    all_conversations = SUMMARY_STATE.get("conversations", [])
 
-    for conversation in SUMMARY_STATE["conversations"]:
-        turn_rows = []
-        for turn in conversation.get("turns", []):
+    def _short_text(value, limit=180):
+        text = str(value or "").strip()
+        if not text:
+            return "-"
+        return text if len(text) <= limit else f"{text[:limit]}..."
+
+    def _conversation_status_meta(status):
+        if status == "passed":
+            return ("PASS", "ok", "정상 통과")
+        if status == "failed_expected":
+            return ("FAIL", "warn", "의도된 실패")
+        if status == "failed":
+            return ("FAIL", "fail", "실패")
+        return ("UNKNOWN", "skip", str(status or "unknown"))
+
+    def _turn_status_meta(status):
+        if status == "passed":
+            return ("PASS", "ok", "통과")
+        if status == "failed_expected":
+            return ("FAIL", "warn", "의도된 실패")
+        if status == "failed":
+            return ("FAIL", "fail", "실패")
+        return ("UNKNOWN", "skip", str(status or "unknown"))
+
+    def _is_passed_conversation(status):
+        return status == "passed"
+
+    def _group_stats(conversations):
+        total = len(conversations)
+        passed = sum(1 for conversation in conversations if _is_passed_conversation(conversation.get("status")))
+        failed = total - passed
+        rate = round((passed / total) * 100, 2) if total else 0.0
+        return {"total": total, "passed": passed, "failed": failed, "pass_rate": rate}
+
+    def _is_multi_turn_conversation(conversation):
+        return not _is_blank_value(conversation.get("conversation_id"))
+
+    multi_turn_conversations = [conversation for conversation in all_conversations if _is_multi_turn_conversation(conversation)]
+    single_turn_conversations = [conversation for conversation in all_conversations if not _is_multi_turn_conversation(conversation)]
+    multi_stats = _group_stats(multi_turn_conversations)
+    single_stats = _group_stats(single_turn_conversations)
+
+    def _render_turn_rows(turns):
+        rows = []
+        for turn in turns:
             fail_fast_parts = []
             if turn.get("policy_check"):
                 fail_fast_parts.append(f"Policy: {'PASS' if turn['policy_check']['passed'] else 'FAIL'}")
@@ -436,39 +478,71 @@ def _render_summary_html():
             metrics_html = _render_metric_list(_build_deepeval_metrics_display(turn))
             token_usage_html = escape(_format_token_usage(turn.get("usage")))
             actual_output = escape(str(turn.get("actual_output") or ""))
+            _, status_class, status_label = _turn_status_meta(turn.get("status"))
 
-            turn_rows.append(
+            if turn.get("status") == "failed":
+                key_reason = turn.get("failure_message") or "실패"
+            elif turn.get("status") == "failed_expected":
+                key_reason = turn.get("failure_message") or "의도한 실패 케이스가 검출되었습니다."
+            else:
+                task_completion = turn.get("task_completion") or {}
+                key_reason = task_completion.get("reason") or "정상 통과"
+
+            detail_html = (
+                "<details>"
+                "<summary>평가 상세 보기</summary>"
+                f"<p><strong>Fail-Fast</strong><br>{fail_fast}</p>"
+                f"<p><strong>Task Completion</strong><br>{task_completion_html}</p>"
+                f"<p><strong>DeepEval Metrics</strong><br>{metrics_html}</p>"
+                f"<p><strong>Actual Output</strong><pre>{actual_output}</pre></p>"
+                f"<p><strong>Failure Raw</strong><br>{escape(str(turn.get('failure_message') or '-'))}</p>"
+                "</details>"
+            )
+
+            rows.append(
                 "<tr>"
                 f"<td>{escape(str(turn.get('case_id') or ''))}</td>"
                 f"<td>{escape(str(turn.get('expected_outcome') or 'pass'))}</td>"
-                f"<td>{escape(str(turn.get('status') or 'unknown'))}</td>"
+                f"<td><span class='badge {status_class}'>{escape(status_label)}</span></td>"
                 f"<td>{escape(str(turn.get('latency_ms') or '-'))}</td>"
                 f"<td>{token_usage_html}</td>"
-                f"<td>{fail_fast}</td>"
-                f"<td>{task_completion_html}</td>"
-                f"<td>{metrics_html}</td>"
-                f"<td><details><summary>show</summary><pre>{actual_output}</pre></details></td>"
-                f"<td>{escape(str(turn.get('failure_message') or '-'))}</td>"
+                f"<td>{escape(_short_text(key_reason))}</td>"
+                f"<td>{detail_html}</td>"
                 "</tr>"
             )
+        return "".join(rows)
 
-        multi_turn_html = _render_metric_list(_build_multi_turn_display(conversation))
+    def _render_conversation_blocks(conversations):
+        if not conversations:
+            return "<p class='empty'>해당 유형의 대화 결과가 없습니다.</p>"
 
-        conversations_html.append(
-            "<section class='conversation'>"
-            f"<h2>{escape(str(conversation.get('conversation_key')))}</h2>"
-            f"<p>Status: <strong>{escape(str(conversation.get('status')))}</strong></p>"
-            f"<p>Failure: {escape(str(conversation.get('failure_message') or '-'))}</p>"
-            f"<p>Multi-turn: {multi_turn_html}</p>"
-            "<table>"
-            "<thead><tr>"
-            "<th>Case ID</th><th>Expected</th><th>Status</th><th>Latency(ms)</th><th>Token Usage</th><th>Fail-Fast</th>"
-            "<th>Task Completion</th><th>Metrics</th><th>Actual Output</th><th>Failure</th>"
-            "</tr></thead>"
-            f"<tbody>{''.join(turn_rows)}</tbody>"
-            "</table>"
-            "</section>"
-        )
+        blocks = []
+        for conversation in conversations:
+            status_text, status_class, status_label = _conversation_status_meta(conversation.get("status"))
+            turn_count = len(conversation.get("turns", []))
+            failure_message = conversation.get("failure_message") or "-"
+            multi_turn_html = _render_metric_list(_build_multi_turn_display(conversation))
+            turn_rows = _render_turn_rows(conversation.get("turns", []))
+            conversation_title = escape(str(conversation.get("conversation_key") or "Unknown"))
+
+            blocks.append(
+                "<details class='conversation' open>"
+                "<summary>"
+                f"<span class='badge {status_class}'>{escape(status_text)}</span> "
+                f"<strong>{conversation_title}</strong> "
+                f"<span class='meta-inline'>({turn_count} turn, {escape(status_label)})</span>"
+                "</summary>"
+                f"<p class='summary-line'><strong>핵심 사유:</strong> {escape(_short_text(failure_message))}</p>"
+                f"<p class='summary-line'><strong>멀티턴 일관성:</strong> {multi_turn_html}</p>"
+                "<table>"
+                "<thead><tr>"
+                "<th>Case ID</th><th>기대결과</th><th>판정</th><th>응답시간(ms)</th><th>토큰 사용량</th><th>핵심 사유</th><th>상세</th>"
+                "</tr></thead>"
+                f"<tbody>{turn_rows}</tbody>"
+                "</table>"
+                "</details>"
+            )
+        return "".join(blocks)
 
     metric_average_rows = "".join(
         f"<tr><td>{escape(name)}</td><td>{value}</td></tr>" for name, value in sorted(metric_averages.items())
@@ -492,17 +566,34 @@ def _render_summary_html():
   <meta charset="utf-8">
   <title>AI Agent Evaluation Summary</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #111827; background: #f8fafc; }}
-    h1, h2 {{ margin: 0 0 12px; }}
-    .meta, .cards, .conversation {{ margin-bottom: 24px; }}
-    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
-    .card {{ background: white; border: 1px solid #dbe2ea; border-radius: 10px; padding: 16px; }}
-    table {{ width: 100%; border-collapse: collapse; background: white; }}
-    th, td {{ border: 1px solid #dbe2ea; padding: 10px; vertical-align: top; text-align: left; }}
-    th {{ background: #e2e8f0; }}
-    pre {{ white-space: pre-wrap; word-break: break-word; margin: 0; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #0f172a; background: #f1f5f9; line-height: 1.45; }}
+    h1, h2, h3 {{ margin: 0 0 10px; }}
+    p {{ margin: 6px 0; }}
+    .meta, .cards, .section, .conversation {{ margin-bottom: 16px; }}
+    .meta {{ background: #ffffff; border: 1px solid #dbe2ea; border-radius: 12px; padding: 14px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }}
+    .card {{ background: #ffffff; border: 1px solid #dbe2ea; border-radius: 12px; padding: 12px; }}
+    .card .label {{ font-size: 12px; color: #475569; }}
+    .card .value {{ font-size: 20px; font-weight: 700; margin-top: 4px; }}
+    .section {{ border: 1px solid #dbe2ea; border-radius: 12px; background: #ffffff; padding: 14px; }}
+    .section-header {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
+    .help {{ margin-top: 8px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #ffffff; margin-top: 8px; }}
+    th, td {{ border: 1px solid #dbe2ea; padding: 8px; vertical-align: top; text-align: left; font-size: 13px; }}
+    th {{ background: #eef2ff; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }}
     ul {{ margin: 0; padding-left: 20px; }}
-    .conversation {{ border: 1px solid #dbe2ea; border-radius: 10px; padding: 16px; background: white; }}
+    .conversation {{ border: 1px solid #dbe2ea; border-radius: 12px; background: #ffffff; padding: 10px 12px; }}
+    .conversation > summary {{ cursor: pointer; font-size: 15px; display: flex; align-items: center; gap: 8px; }}
+    .summary-line {{ margin: 8px 0; }}
+    .meta-inline {{ color: #64748b; font-size: 12px; }}
+    .badge {{ display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 700; }}
+    .ok {{ background: #dcfce7; color: #166534; }}
+    .fail {{ background: #fee2e2; color: #991b1b; }}
+    .warn {{ background: #fef3c7; color: #92400e; }}
+    .skip {{ background: #e2e8f0; color: #334155; }}
+    .empty {{ color: #64748b; margin: 8px 0 0; }}
+    .note {{ background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; border-radius: 8px; padding: 8px; margin-top: 10px; }}
   </style>
 </head>
 <body>
@@ -512,31 +603,50 @@ def _render_summary_html():
     <p>Target: {escape(str(SUMMARY_STATE.get('target_url') or ''))} ({escape(str(SUMMARY_STATE.get('target_type') or ''))})</p>
     <p>Judge Model: {escape(str(SUMMARY_STATE.get('judge_model') or ''))}</p>
     <p>Langfuse Enabled: {'YES' if SUMMARY_STATE.get('langfuse_enabled') else 'NO'}</p>
+    <div class="note">
+      이 화면의 Turn 수는 <strong>실제로 실행된 턴</strong> 기준입니다. 대화 중간 실패 시 남은 턴은 실행되지 않을 수 있습니다.
+    </div>
   </div>
   <div class="cards">
-    <div class="card"><strong>Conversations</strong><br>{totals.get('conversations', 0)}</div>
-    <div class="card"><strong>Passed Conversations</strong><br>{totals.get('passed_conversations', 0)}</div>
-    <div class="card"><strong>Failed Conversations</strong><br>{totals.get('failed_conversations', 0)}</div>
-    <div class="card"><strong>Conversation Pass Rate</strong><br>{totals.get('conversation_pass_rate', 0)}%</div>
-    <div class="card"><strong>Turns</strong><br>{totals.get('turns', 0)}</div>
-    <div class="card"><strong>Turn Pass Rate</strong><br>{totals.get('turn_pass_rate', 0)}%</div>
+    <div class="card"><div class="label">전체 대화 수</div><div class="value">{totals.get('conversations', 0)}</div></div>
+    <div class="card"><div class="label">통과 대화 수</div><div class="value">{totals.get('passed_conversations', 0)}</div></div>
+    <div class="card"><div class="label">실패 대화 수</div><div class="value">{totals.get('failed_conversations', 0)}</div></div>
+    <div class="card"><div class="label">대화 통과율</div><div class="value">{totals.get('conversation_pass_rate', 0)}%</div></div>
+    <div class="card"><div class="label">실행된 턴 수</div><div class="value">{totals.get('turns', 0)}</div></div>
+    <div class="card"><div class="label">턴 통과율</div><div class="value">{totals.get('turn_pass_rate', 0)}%</div></div>
   </div>
-  <section class="conversation">
-    <h2>Thresholds</h2>
-    <table><thead><tr><th>Metric</th><th>Threshold</th></tr></thead><tbody>{threshold_rows}</tbody></table>
+  <section class="section">
+    <div class="section-header">
+      <h2>멀티턴 대화 결과</h2>
+      <span class="meta-inline">총 {multi_stats['total']}개, 통과 {multi_stats['passed']}개, 실패 {multi_stats['failed']}개, 통과율 {multi_stats['pass_rate']}%</span>
+    </div>
+    {_render_conversation_blocks(multi_turn_conversations)}
   </section>
-  <section class="conversation">
-    <h2>Metric Guide</h2>
-    <table>
-      <thead><tr><th>Metric</th><th>Description</th><th>Pass / Fail Rule</th></tr></thead>
-      <tbody>{metric_guide_rows}</tbody>
-    </table>
+  <section class="section">
+    <div class="section-header">
+      <h2>단일턴 대화 결과</h2>
+      <span class="meta-inline">총 {single_stats['total']}개, 통과 {single_stats['passed']}개, 실패 {single_stats['failed']}개, 통과율 {single_stats['pass_rate']}%</span>
+    </div>
+    {_render_conversation_blocks(single_turn_conversations)}
   </section>
-  <section class="conversation">
-    <h2>Metric Averages</h2>
-    <table><thead><tr><th>Metric</th><th>Average Score</th></tr></thead><tbody>{metric_average_rows}</tbody></table>
+  <section class="section">
+    <h2>평가 기준 및 평균 점수</h2>
+    <details class="help">
+      <summary>Threshold 보기</summary>
+      <table><thead><tr><th>Metric</th><th>Threshold</th></tr></thead><tbody>{threshold_rows}</tbody></table>
+    </details>
+    <details class="help">
+      <summary>Metric Guide 보기</summary>
+      <table>
+        <thead><tr><th>Metric</th><th>Description</th><th>Pass / Fail Rule</th></tr></thead>
+        <tbody>{metric_guide_rows}</tbody>
+      </table>
+    </details>
+    <details class="help">
+      <summary>Metric 평균 점수 보기</summary>
+      <table><thead><tr><th>Metric</th><th>Average Score</th></tr></thead><tbody>{metric_average_rows}</tbody></table>
+    </details>
   </section>
-  {''.join(conversations_html)}
 </body>
 </html>"""
 
@@ -1044,7 +1154,6 @@ def test_evaluation(conversation):
 
     conversation_history = []
     full_conversation_passed = True
-    expected_failure_matched = False
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
     judge = _build_judge_model()
     conversation_report = {
@@ -1147,15 +1256,15 @@ def test_evaluation(conversation):
                     )
             except Exception as exc:
                 if expected_failure and not isinstance(exc, ExpectedFailureNotTriggered):
-                    # 의도된 실패 시나리오가 실제로 실패했으므로 테스트 목적상 PASS로 처리합니다.
-                    expected_failure_matched = True
-                    turn_report["status"] = "expected_fail_matched"
+                    # 의도된 실패 시나리오가 실제로 실패했으면, 결과 집계에서도 실패로 처리합니다.
+                    full_conversation_passed = False
+                    turn_report["status"] = "failed_expected"
                     turn_report["failure_message"] = str(exc)
-                    conversation_report["status"] = "passed_with_expected_failure"
+                    conversation_report["status"] = "failed_expected"
                     conversation_report["failure_message"] = (
                         f"Expected failure observed at case_id {case_id}: {exc}"
                     )
-                    break
+                    pytest.fail(conversation_report["failure_message"])
 
                 full_conversation_passed = False
                 turn_report["status"] = "failed"
@@ -1169,7 +1278,7 @@ def test_evaluation(conversation):
                     # 실패 여부와 무관하게 span을 닫아 trace 구조를 깨지 않게 합니다.
                     span.end()
 
-        if len(conversation) > 1 and not expected_failure_matched:
+        if len(conversation) > 1:
             # 멀티턴 평가는 전체 대화록을 하나의 입력으로 다시 심판 모델에 제출합니다.
             full_transcript = ""
             for turn in conversation_history:
