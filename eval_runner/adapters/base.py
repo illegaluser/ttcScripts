@@ -58,3 +58,10 @@ class BaseAdapter:
         - kwargs: 개별 어댑터 확장 입력
         """
         raise NotImplementedError("통신 방식을 구현하세요.")
+
+    def close(self) -> None:
+        """
+        conversation 단위 자원을 정리하는 훅입니다.
+        정리할 것이 없는 어댑터는 기본 구현을 그대로 사용하고, UI 어댑터는 브라우저 세션 해제에 사용합니다.
+        """
+        return None

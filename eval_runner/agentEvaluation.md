@@ -23,6 +23,30 @@
 - **다중 턴:** `golden.csv` 파일에 `conversation_id`와 `turn_id` 컬럼을 추가하면, 시스템이 자동으로 다중 턴 대화로 인식하여 평가합니다.
 - **과업 완료:** `success_criteria` 컬럼에 과업의 성공 조건을 자연어로 기술하면, `GEval`이 이를 바탕으로 작업 완료 여부를 채점합니다.
 
+#### 다중 턴 시험지 작성 규칙
+
+- 같은 대화에 속한 모든 row는 동일한 `conversation_id`를 가져야 합니다.
+- `turn_id`는 대화 실행 순서를 의미하며, 숫자 오름차순으로 처리됩니다.
+- `conversation_id`가 비어 있는 row는 다중 턴에 포함되지 않고 단일 턴 케이스로 처리됩니다.
+- `success_criteria`는 conversation 전체 기준이 아니라 각 턴(row)별 성공 기준입니다.
+- 첫 번째 기억 주입 턴처럼 별도 성공 기준이 필요 없는 턴은 `success_criteria`를 비워둘 수 있습니다.
+- conversation 길이가 2턴 이상이면, 각 턴 평가와 별도로 전체 transcript를 이용한 `Multi-turn Consistency` 평가가 추가됩니다.
+
+#### 다중 턴 검증 동작 원리
+
+1. `test_runner.py`가 `golden.csv`를 읽고 동일한 `conversation_id`를 가진 row들을 하나의 conversation으로 묶습니다.
+2. 각 conversation 내부 row는 `turn_id` 순서대로 정렬됩니다.
+3. 현재 턴 호출 시 이전 턴의 `input`과 `actual_output` 이력이 함께 전달됩니다.
+4. 각 턴은 Fail-Fast, Task Completion, DeepEval 문맥 평가를 독립적으로 통과해야 합니다.
+5. conversation 종료 후 전체 transcript를 다시 심판 LLM에 제출하여 `Multi-turn Consistency`를 채점합니다.
+6. 개별 턴 실패 또는 최종 일관성 실패가 발생하면 해당 conversation 전체가 실패합니다.
+
+#### API와 UI의 다중 턴 차이
+
+- `TARGET_TYPE=http` 인 경우 이전 대화 이력은 `messages` 배열 형태로 API에 전달됩니다.
+- `TARGET_TYPE=ui_chat` 인 경우 같은 브라우저 세션과 같은 페이지를 conversation 전체 동안 재사용해야 실제 웹 UI의 문맥이 유지됩니다.
+- UI 평가에서 정확한 답변 추출을 위해 가능하면 `UI_INPUT_SELECTOR`, `UI_SUBMIT_SELECTOR`, `UI_RESPONSE_SELECTOR` 환경변수를 함께 설정하는 것을 권장합니다.
+
 | case_id | conversation_id | turn_id | input | expected_output | success_criteria |
 |---|---|---|---|---|---|
 | multi-1 | conv-001 | 1 | 우리 회사 이름은 '행복상사'야. | 알겠습니다. '행복상사'라고 기억하겠습니다. | |

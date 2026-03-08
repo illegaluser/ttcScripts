@@ -432,86 +432,91 @@ def test_evaluation(conversation):
 
     conversation_history = []
     full_conversation_passed = True
+    adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
 
-    for turn in conversation:
-        case_id = turn["case_id"]
-        input_text = turn["input"]
+    try:
+        for turn in conversation:
+            case_id = turn["case_id"]
+            input_text = turn["input"]
 
-        span = None
-        if parent_trace:
-            # 각 턴을 별도 span으로 남겨 어느 지점에서 실패했는지 추적 가능하게 합니다.
-            span = parent_trace.span(name=f"Turn-{turn.get('turn_id', 1)}", input={"input": input_text})
+            span = None
+            if parent_trace:
+                # 각 턴을 별도 span으로 남겨 어느 지점에서 실패했는지 추적 가능하게 합니다.
+                span = parent_trace.span(name=f"Turn-{turn.get('turn_id', 1)}", input={"input": input_text})
 
-        try:
-            # 대상 타입에 맞는 어댑터를 가져와 실제 AI 시스템을 호출합니다.
-            adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
-            result = adapter.invoke(input_text, history=conversation_history)
+            try:
+                # 같은 conversation 안에서는 동일 어댑터 인스턴스를 재사용합니다.
+                # 특히 ui_chat은 같은 브라우저 세션이 유지되어야 실제 멀티턴 검증이 됩니다.
+                result = adapter.invoke(input_text, history=conversation_history)
 
-            update_payload = {"output": result.to_dict()}
-            if result.usage:
-                update_payload["usage"] = result.usage
+                update_payload = {"output": result.to_dict()}
+                if result.usage:
+                    update_payload["usage"] = result.usage
 
-            if span:
-                # 응답 원문, 사용량, 지연시간을 먼저 기록해 사후 분석 데이터를 확보합니다.
-                span.update(**update_payload)
-                span.score(name="Latency", value=result.latency_ms, comment="ms")
+                if span:
+                    # 응답 원문, 사용량, 지연시간을 먼저 기록해 사후 분석 데이터를 확보합니다.
+                    span.update(**update_payload)
+                    span.score(name="Latency", value=result.latency_ms, comment="ms")
 
-            if result.error:
-                raise RuntimeError(f"Adapter Error: {result.error}")
+                if result.error:
+                    raise RuntimeError(f"Adapter Error: {result.error}")
 
-            # 1차 차단: 정책 위반 및 응답 규격 검사
-            _promptfoo_policy_check(result.raw_response)
-            if TARGET_TYPE == "http":
-                _schema_validate(result.raw_response)
+                # 1차 차단: 정책 위반 및 응답 규격 검사
+                _promptfoo_policy_check(result.raw_response)
+                if TARGET_TYPE == "http":
+                    _schema_validate(result.raw_response)
 
-            # 2차 평가: 과업 완료 여부 판정
+                # 2차 평가: 과업 완료 여부 판정
+                judge = _build_judge_model()
+                _score_task_completion(turn, result, judge, span)
+
+                # 다음 턴 입력에 사용할 수 있도록 assistant 응답을 대화 이력에 누적합니다.
+                turn["actual_output"] = result.actual_output
+                conversation_history.append(turn)
+
+                # 3차 평가: 답변 품질 및 RAG 지표 측정
+                _score_deepeval_metrics(turn, result, judge, span)
+            except Exception as exc:
+                full_conversation_passed = False
+                pytest.fail(f"Turn failed for case_id {case_id}: {exc}")
+            finally:
+                if span:
+                    # 실패 여부와 무관하게 span을 닫아 trace 구조를 깨지 않게 합니다.
+                    span.end()
+
+        if len(conversation) > 1:
+            # 멀티턴 평가는 전체 대화록을 하나의 입력으로 다시 심판 모델에 제출합니다.
+            full_transcript = ""
+            for turn in conversation_history:
+                full_transcript += f"User: {turn['input']}\n"
+                full_transcript += f"Assistant: {turn['actual_output']}\n\n"
+
             judge = _build_judge_model()
-            _score_task_completion(turn, result, judge, span)
-
-            # 다음 턴 입력에 사용할 수 있도록 assistant 응답을 대화 이력에 누적합니다.
-            turn["actual_output"] = result.actual_output
-            conversation_history.append(turn)
-
-            # 3차 평가: 답변 품질 및 RAG 지표 측정
-            _score_deepeval_metrics(turn, result, judge, span)
-        except Exception as exc:
-            full_conversation_passed = False
-            pytest.fail(f"Turn failed for case_id {case_id}: {exc}")
-        finally:
-            if span:
-                # 실패 여부와 무관하게 span을 닫아 trace 구조를 깨지 않게 합니다.
-                span.end()
-
-    if len(conversation) > 1:
-        # 멀티턴 평가는 전체 대화록을 하나의 입력으로 다시 심판 모델에 제출합니다.
-        full_transcript = ""
-        for turn in conversation_history:
-            full_transcript += f"User: {turn['input']}\n"
-            full_transcript += f"Assistant: {turn['actual_output']}\n\n"
-
-        judge = _build_judge_model()
-        consistency_metric = GEval(
-            name="MultiTurnConsistency",
-            criteria=MULTI_TURN_CONSISTENCY_CRITERIA,
-            evaluation_params=["input"],
-            model=judge,
-        )
-        consistency_test_case = LLMTestCase(input=full_transcript, actual_output="")
-        consistency_metric.measure(consistency_test_case)
-
-        if parent_trace:
-            parent_trace.score(
-                name=consistency_metric.name,
-                value=consistency_metric.score,
-                comment=consistency_metric.reason,
+            consistency_metric = GEval(
+                name="MultiTurnConsistency",
+                criteria=MULTI_TURN_CONSISTENCY_CRITERIA,
+                evaluation_params=["input"],
+                model=judge,
             )
+            consistency_test_case = LLMTestCase(input=full_transcript, actual_output="")
+            consistency_metric.measure(consistency_test_case)
 
-        if consistency_metric.score < 0.5:
-            pytest.fail(
-                f"MultiTurnConsistency failed for conversation {conv_id} with score "
-                f"{consistency_metric.score}. Reason: {consistency_metric.reason}"
-            )
+            if parent_trace:
+                parent_trace.score(
+                    name=consistency_metric.name,
+                    value=consistency_metric.score,
+                    comment=consistency_metric.reason,
+                )
 
-    if not full_conversation_passed:
-        # 개별 턴 실패를 conversation 수준 실패로 다시 명시합니다.
-        pytest.fail("One or more turns in the conversation failed.")
+            if consistency_metric.score < 0.5:
+                pytest.fail(
+                    f"MultiTurnConsistency failed for conversation {conv_id} with score "
+                    f"{consistency_metric.score}. Reason: {consistency_metric.reason}"
+                )
+
+        if not full_conversation_passed:
+            # 개별 턴 실패를 conversation 수준 실패로 다시 명시합니다.
+            pytest.fail("One or more turns in the conversation failed.")
+    finally:
+        # conversation 단위 자원은 여기서 정리합니다.
+        adapter.close()

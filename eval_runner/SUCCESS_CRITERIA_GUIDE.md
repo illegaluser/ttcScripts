@@ -67,3 +67,19 @@ AI 에이전트의 원본 응답을 JSON으로 파싱한 뒤, 특정 경로(JSON
 2.  **이슈 생성 (`TC-AGT-002`)**
     - **규칙**: `status_code=200 AND json.issue_key~r/^[A-Z]+-\d+$/`
     - **의미**: HTTP 응답이 200이고, 응답 JSON의 `issue_key` 필드 값이 `ABC-1234`와 같은 형식이어야 성공으로 간주합니다.
+
+## 5. 다중 턴에서의 `success_criteria`
+
+다중 턴 시험지에서도 `success_criteria`는 각 row(각 턴)에 개별적으로 적용됩니다. 같은 `conversation_id`를 공유하는 여러 턴이 있어도 conversation 전체에 한 번만 쓰는 구조가 아니라, 필요한 턴마다 선택적으로 작성하는 방식입니다.
+
+- 기억 주입 턴: `success_criteria`를 비워둘 수 있습니다.
+- 회상 확인 턴: `raw~r/행복상사/` 또는 자연어 기준을 기입할 수 있습니다.
+- API 기반 agent 턴: `status_code=200 AND json.result.status~r/^SUCCESS$/`
+
+주의할 점은, 각 턴의 `success_criteria`를 모두 통과하더라도 conversation 길이가 2턴 이상이면 별도로 `Multi-turn Consistency` 평가가 추가된다는 점입니다. 즉 멀티턴 평가는 "각 턴 성공"과 "대화 전체 일관성"을 모두 만족해야 최종 통과합니다.
+
+## 6. 다중 턴에서 API와 UI의 차이
+
+- API 평가에서는 이전 턴 이력이 `messages` 배열로 함께 전달되므로, 대상 API가 멀티턴 입력 형식을 받아들여야 합니다.
+- UI 평가는 동일한 브라우저 세션을 conversation 전체 동안 재사용해야 합니다. 매 턴마다 새 페이지를 열면 실제 멀티턴 검증이 되지 않습니다.
+- UI 대상은 응답 추출 정확도를 높이기 위해 셀렉터 환경변수(`UI_INPUT_SELECTOR`, `UI_SUBMIT_SELECTOR`, `UI_RESPONSE_SELECTOR`)를 명시하는 것을 권장합니다.
