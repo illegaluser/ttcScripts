@@ -35,35 +35,48 @@ pipeline {
         }
         stage('2. 파이썬 평가 실행 (Pytest)') {
             steps {
-                withCredentials([
-                    string(credentialsId: 'langfuse-public-key', variable: 'LANGFUSE_PUBLIC_KEY'),
-                    string(credentialsId: 'langfuse-secret-key', variable: 'LANGFUSE_SECRET_KEY')
-                ]) {
-                    sh """
-                    set +x
-                    echo "=================================================="
-                    echo "             STARTING EVALUATION RUN              "
-                    echo "=================================================="
-                    echo "TARGET_URL: ${params.TARGET_URL}"
-                    echo "TARGET_TYPE: ${params.TARGET_TYPE}"
-                    echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
-                    echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
-                    echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
-                    echo "--------------------------------------------------"
-                    export TARGET_URL='${params.TARGET_URL}'
-                    export TARGET_TYPE='${params.TARGET_TYPE}'
-                    export API_KEY='${params.API_KEY}'
-                    export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
-                    export JUDGE_MODEL='${params.JUDGE_MODEL}'
-                    export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
-                    export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
-                    export PYTHONPATH='${env.PYTHONPATH}'
-                    set -x
+                script {
+                    def runEval = { ->
+                        sh """
+                        set +x
+                        echo "=================================================="
+                        echo "             STARTING EVALUATION RUN              "
+                        echo "=================================================="
+                        echo "TARGET_URL: ${params.TARGET_URL}"
+                        echo "TARGET_TYPE: ${params.TARGET_TYPE}"
+                        echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
+                        echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
+                        echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
+                        echo "--------------------------------------------------"
+                        export TARGET_URL='${params.TARGET_URL}'
+                        export TARGET_TYPE='${params.TARGET_TYPE}'
+                        export API_KEY='${params.API_KEY}'
+                        export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
+                        export JUDGE_MODEL='${params.JUDGE_MODEL}'
+                        export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
+                        export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
+                        export PYTHONPATH='${env.PYTHONPATH}'
+                        set -x
 
-                    python3 -m pytest /var/jenkins_home/scripts/eval_runner/tests/test_runner.py \
-                      -n 1 \
-                      --junitxml=/var/knowledges/eval/reports/results.xml
-                    """
+                        python3 -m pytest /var/jenkins_home/scripts/eval_runner/tests/test_runner.py \
+                          -n 1 \
+                          --junitxml=/var/knowledges/eval/reports/results.xml
+                        """
+                    }
+
+                    try {
+                        withCredentials([
+                            string(credentialsId: 'langfuse-public-key', variable: 'LANGFUSE_PUBLIC_KEY'),
+                            string(credentialsId: 'langfuse-secret-key', variable: 'LANGFUSE_SECRET_KEY')
+                        ]) {
+                            runEval()
+                        }
+                    } catch (err) {
+                        echo "Langfuse credentials not found or unavailable. Continuing evaluation without Langfuse tracing."
+                        withEnv(['LANGFUSE_PUBLIC_KEY=', 'LANGFUSE_SECRET_KEY=']) {
+                            runEval()
+                        }
+                    }
                 }
             }
         }
