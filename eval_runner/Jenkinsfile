@@ -389,7 +389,26 @@ PY
 
                 def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
                 def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
-                currentBuild.description = "📊 Artifacts: eval-reports/summary.html | Langfuse: ${publicLangfuseUrl}"
+                def summaryUrl = env.BUILD_URL ? "${env.BUILD_URL}artifact/eval-reports/summary.html" : "eval-reports/summary.html"
+                echo "Evaluation summary: ${summaryUrl}"
+                echo "Evaluation raw json: ${env.BUILD_URL ?: ''}artifact/eval-reports/summary.json"
+
+                try {
+                    publishHTML(
+                        target: [
+                            reportName: 'AI Eval Summary',
+                            reportDir: 'eval-reports',
+                            reportFiles: 'summary.html',
+                            keepAll: true,
+                            alwaysLinkToLastBuild: true,
+                            allowMissing: true
+                        ]
+                    )
+                } catch (ignored) {
+                    echo "publishHTML plugin is unavailable. Open summary via Artifacts."
+                }
+
+                currentBuild.description = "📊 Summary: ${summaryUrl} | Langfuse: ${publicLangfuseUrl}"
             }
         }
     }

@@ -6258,7 +6258,7 @@ PY
 
                 def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
                 def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
-                currentBuild.description = "📊 Artifacts: eval-reports/summary.html | Langfuse: ${publicLangfuseUrl}"
+                currentBuild.description = "📊 Summary: ${env.BUILD_URL}artifact/eval-reports/summary.html | Langfuse: ${publicLangfuseUrl}"
             }
         }
     }
@@ -6268,7 +6268,8 @@ PY
 ### Jenkins 결과 확인 위치
 
 - **Jenkins UI**: 빌드 상세 페이지의 **Artifacts** 에서 `eval-reports/summary.html`, `eval-reports/summary.json`, `eval-reports/results.xml`을 확인합니다.
-- **`summary.html`**: conversation/turn 단위 상태, metric별 score, threshold, reason을 사람이 읽기 쉽게 정리한 보고서입니다.
+- **`summary.html`**: conversation/turn 단위 상태, metric별 score, threshold, reason, `Expected(pass/fail)`을 사람이 읽기 쉽게 정리한 보고서입니다.
+- **AI Eval Summary 탭**: `htmlpublisher` 플러그인이 있으면 Jenkins 빌드 화면에 `AI Eval Summary` 탭이 생성되어 `summary.html`을 바로 열 수 있습니다.
 - **`summary.json`**: 후처리 자동화나 외부 대시보드 적재를 위한 기계 판독용 원본입니다.
 - **`results.xml`**: Jenkins의 JUnit 테스트 결과 뷰와 연동되는 표준 결과 파일입니다.
 
@@ -6279,9 +6280,11 @@ PY
 ### 8.1 평가 시험지 파일 작성
 
 다중 턴 대화 평가를 위해 `conversation_id`와 `turn_id`를 추가할 수 있습니다.
+실패를 의도한 음수 테스트는 `expected_outcome=fail` 컬럼을 쓰거나 `case_id`에 `-FAIL-`을 포함해 표시합니다. 이 경우 실제 실패가 발생하면 `expected_fail_matched`로 집계되어 테스트 목적상 PASS 처리됩니다.
 
 ```csv
-case_id,conversation_id,turn_id,input,expected_output,success_criteria
-conv1-turn1,conv1,1,우리 회사 이름은 '행복상사'야.,,
-conv1-turn2,conv1,2,그럼 우리 회사 이름이 뭐야?,행복상사입니다.,응답에 '행복상사'가 포함되어야 함
+case_id,conversation_id,turn_id,input,expected_output,success_criteria,expected_outcome
+conv1-turn1,conv1,1,우리 회사 이름은 '행복상사'야.,,,pass
+conv1-turn2,conv1,2,그럼 우리 회사 이름이 뭐야?,행복상사입니다.,응답에 '행복상사'가 포함되어야 함,pass
+conv1-neg-1,,,2+2는 얼마야?,5입니다.,응답에 5가 포함되어야 함,fail
 ```

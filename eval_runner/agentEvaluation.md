@@ -28,6 +28,7 @@
 - 같은 대화에 속한 모든 row는 동일한 `conversation_id`를 가져야 합니다.
 - `turn_id`는 대화 실행 순서를 의미하며, 숫자 오름차순으로 처리됩니다.
 - `conversation_id`가 비어 있는 row는 다중 턴에 포함되지 않고 단일 턴 케이스로 처리됩니다.
+- 실패를 의도한 음수 테스트는 `expected_outcome=fail` 컬럼을 쓰거나, `case_id`에 `-FAIL-`을 포함해 표시합니다. 이 경우 실제 실패가 발생하면 `expected_fail_matched`로 집계되어 테스트 목적상 PASS 처리됩니다.
 - `success_criteria`는 conversation 전체 기준이 아니라 각 턴(row)별 성공 기준입니다.
 - 첫 번째 기억 주입 턴처럼 별도 성공 기준이 필요 없는 턴은 `success_criteria`를 비워둘 수 있습니다.
 - conversation 길이가 2턴 이상이면, 각 턴 평가와 별도로 전체 transcript를 이용한 `Multi-turn Consistency` 평가가 추가됩니다.
@@ -126,8 +127,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && npm install -g promptfoo@0.120.27 \
     && rm -rf /var/lib/apt/lists/*
 
-# Jenkins UI에서 Ollama 모델 목록을 동적으로 읽어 JUDGE_MODEL 드롭다운을 만들기 위해 Active Choices 플러그인을 설치합니다.
-RUN jenkins-plugin-cli --plugins uno-choice
+# Jenkins UI에서 JUDGE_MODEL 드롭다운/요약 HTML 탭을 쓰기 위한 플러그인 설치
+RUN jenkins-plugin-cli --plugins uno-choice htmlpublisher
 
 # 파이썬 평가 및 문서 처리 라이브러리 일괄 설치
 RUN pip3 install --no-cache-dir --break-system-packages \
@@ -1128,7 +1129,7 @@ PY
                 archiveArtifacts artifacts: 'eval-reports/*', allowEmptyArchive: true
                 def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
                 def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
-                currentBuild.description = "📊 Artifacts: eval-reports/summary.html | Langfuse: ${publicLangfuseUrl}"
+                currentBuild.description = "📊 Summary: ${env.BUILD_URL}artifact/eval-reports/summary.html | Langfuse: ${publicLangfuseUrl}"
             }
         }
     }
@@ -1138,7 +1139,8 @@ PY
 ### Jenkins 결과 확인 위치
 
 - **Jenkins UI**: 빌드 상세 페이지의 **Artifacts** 에서 `eval-reports/summary.html`, `eval-reports/summary.json`, `eval-reports/results.xml`을 확인합니다.
-- **`summary.html`**: conversation/turn 단위 상태, metric별 score, threshold, reason을 사람이 읽기 쉽게 정리한 보고서입니다.
+- **`summary.html`**: conversation/turn 단위 상태, metric별 score, threshold, reason, `Expected(pass/fail)`을 사람이 읽기 쉽게 정리한 보고서입니다.
+- **AI Eval Summary 탭**: `htmlpublisher` 플러그인이 있으면 Jenkins 빌드 화면에 `AI Eval Summary` 탭이 생성되어 `summary.html`을 바로 열 수 있습니다.
 - **`summary.json`**: 후처리 자동화나 외부 대시보드 적재를 위한 기계 판독용 원본입니다.
 - **`results.xml`**: Jenkins의 JUnit 테스트 결과 뷰와 연동되는 표준 결과 파일입니다.
 
@@ -1151,13 +1153,12 @@ PY
 로컬 Ollama를 평가 대상으로 사용하려면 아래 순서를 따릅니다.
 
 1. 호스트에서 Ollama가 `127.0.0.1:11434` 또는 `localhost:11434`로 실행 중인지 확인합니다.
-2. 호스트에서 `ollama_wrapper_api.py`를 실행하여 `0.0.0.0:8000` 래퍼 API를 띄웁니다.
-3. Jenkins 컨테이너 내부에서 `http://host.docker.internal:8000/health` 가 응답하는지 확인합니다.
-4. Jenkins 파이프라인 파라미터를 아래 값으로 채웁니다.
+2. Jenkins 파이프라인 파라미터를 아래 값으로 채웁니다. (`TARGET_MODE=local_ollama_wrapper`면 wrapper는 자동 기동/종료됩니다)
 
 ```text
 TARGET_URL              = http://host.docker.internal:8000/invoke
 TARGET_TYPE             = http
+TARGET_MODE             = local_ollama_wrapper
 API_KEY                 =
 TARGET_AUTH_HEADER      =
 JUDGE_MODEL             = qwen3-coder:30b
@@ -1171,8 +1172,8 @@ UPLOADED_GOLDEN_DATASET = (선택)
 - `TARGET_URL`은 측정 대상인 래퍼 API를 가리킵니다.
 - `OLLAMA_BASE_URL`은 DeepEval 심판관 LLM이 붙는 Ollama 서버를 가리킵니다.
 - 두 값이 모두 같은 호스트 Ollama를 참조하더라도 역할은 다릅니다.
-- Jenkinsfile 기본 예시의 `JUDGE_MODEL` 기본값은 현재 `qwen2:7b`입니다.
-- 로컬 Ollama의 `qwen3-coder:30b`를 평가하려면 빌드 파라미터에서 `JUDGE_MODEL=qwen3-coder:30b`로 직접 바꿔 입력합니다.
+- Jenkinsfile 기본 예시의 기본 폴백 모델은 현재 `qwen3-coder:30b`입니다.
+- 로컬 Ollama에서 다른 모델을 심판으로 쓰려면 빌드 파라미터에서 `JUDGE_MODEL`을 변경합니다.
 
 ### 8.0-1. 헬스체크 예시
 
@@ -1192,7 +1193,8 @@ docker exec jenkins curl http://host.docker.internal:11434/api/tags
 다중 턴 대화 평가를 위해 `conversation_id`와 `turn_id`를 추가할 수 있습니다.
 
 ```csv
-case_id,conversation_id,turn_id,input,expected_output,success_criteria
-conv1-turn1,conv1,1,우리 회사 이름은 '행복상사'야.,,
-conv1-turn2,conv1,2,그럼 우리 회사 이름이 뭐야?,행복상사입니다.,응답에 '행복상사'가 포함되어야 함
+case_id,conversation_id,turn_id,input,expected_output,success_criteria,expected_outcome
+conv1-turn1,conv1,1,우리 회사 이름은 '행복상사'야.,,,pass
+conv1-turn2,conv1,2,그럼 우리 회사 이름이 뭐야?,행복상사입니다.,응답에 '행복상사'가 포함되어야 함,pass
+conv1-neg-1,,,2+2는 얼마야?,5입니다.,응답에 5가 포함되어야 함,fail
 ```

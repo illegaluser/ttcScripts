@@ -120,6 +120,12 @@ METRIC_GUIDE = {
 }
 
 
+class ExpectedFailureNotTriggered(AssertionError):
+    """
+    expected-fail 케이스가 실제로는 통과했을 때 구분하기 위한 전용 예외입니다.
+    """
+
+
 def _env_float(name: str, default: float) -> float:
     """
     환경변수 숫자 파라미터를 안전하게 float로 읽습니다.
@@ -205,7 +211,7 @@ def _recompute_summary_totals():
     metric_scores = {}
 
     for conversation in conversations:
-        if conversation.get("status") == "passed":
+        if conversation.get("status") in ("passed", "passed_with_expected_failure"):
             passed_conversations += 1
         else:
             failed_conversations += 1
@@ -216,7 +222,7 @@ def _recompute_summary_totals():
 
         for turn in conversation.get("turns", []):
             total_turns += 1
-            if turn.get("status") == "passed":
+            if turn.get("status") in ("passed", "expected_fail_matched"):
                 passed_turns += 1
             else:
                 failed_turns += 1
@@ -297,6 +303,7 @@ def _render_summary_html():
             turn_rows.append(
                 "<tr>"
                 f"<td>{escape(str(turn.get('case_id') or ''))}</td>"
+                f"<td>{escape(str(turn.get('expected_outcome') or 'pass'))}</td>"
                 f"<td>{escape(str(turn.get('status') or 'unknown'))}</td>"
                 f"<td>{escape(str(turn.get('latency_ms') or '-'))}</td>"
                 f"<td>{fail_fast}</td>"
@@ -319,7 +326,7 @@ def _render_summary_html():
             f"<p>Multi-turn: {multi_turn_html}</p>"
             "<table>"
             "<thead><tr>"
-            "<th>Case ID</th><th>Status</th><th>Latency(ms)</th><th>Fail-Fast</th>"
+            "<th>Case ID</th><th>Expected</th><th>Status</th><th>Latency(ms)</th><th>Fail-Fast</th>"
             "<th>Task Completion</th><th>Metrics</th><th>Actual Output</th><th>Failure</th>"
             "</tr></thead>"
             f"<tbody>{''.join(turn_rows)}</tbody>"
@@ -547,6 +554,54 @@ def _safe_json_list(raw_text: str):
     """
     parsed = _safe_json_loads(raw_text) if isinstance(raw_text, str) else raw_text
     return parsed if isinstance(parsed, list) else []
+
+
+def _is_expected_failure_case(turn: dict) -> bool:
+    """
+    케이스의 기대 결과가 실패인지 판별합니다.
+    1순위: expected_outcome/expected_result/expected_status/should_fail 컬럼
+    2순위: case_id 네이밍 규칙(*-FAIL-*)
+    """
+    for key in ("expected_outcome", "expected_result", "expected_status"):
+        value = turn.get(key)
+        if value is None:
+            continue
+        normalized = str(value).strip().lower()
+        if normalized in ("fail", "failed", "negative", "expect_fail", "expected_fail", "f"):
+            return True
+        if normalized in ("pass", "passed", "positive", "expect_pass", "expected_pass", "p"):
+            return False
+
+    should_fail = turn.get("should_fail")
+    if should_fail is not None:
+        normalized = str(should_fail).strip().lower()
+        if normalized in ("1", "true", "y", "yes"):
+            return True
+        if normalized in ("0", "false", "n", "no"):
+            return False
+
+    case_id = str(turn.get("case_id") or "").upper()
+    return "-FAIL-" in case_id or case_id.startswith("FAIL-") or case_id.endswith("-FAIL")
+
+
+def _compact_output_for_relevancy(text: str) -> str:
+    """
+    AnswerRelevancyMetric에 장문/코드블록/이모지 노이즈가 주는 영향을 줄이기 위해
+    첫 핵심 문장만 추출합니다.
+    """
+    if not text:
+        return ""
+
+    normalized = re.sub(r"```[\s\S]*?```", " ", str(text))
+    normalized = re.sub(r"`([^`]*)`", r"\1", normalized)
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    first_line = lines[0]
+    first_line = re.sub(r"[\U00010000-\U0010FFFF]", "", first_line)
+    first_line = re.sub(r"\s+", " ", first_line).strip()
+    return first_line[:300]
 
 
 def _config_path(filename: str) -> Path:
@@ -780,7 +835,7 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
     문맥 기반 품질 지표를 수행합니다.
     기본 지표는 답변 관련성/유해성이고, retrieval_context가 있을 때만 RAG 지표를 추가합니다.
     """
-    test_case = LLMTestCase(
+    base_test_case = LLMTestCase(
         input=turn["input"],
         actual_output=result.actual_output,
         expected_output=turn.get("expected_output"),
@@ -793,7 +848,7 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
         ToxicityMetric(threshold=TOXICITY_THRESHOLD, model=judge, async_mode=False),
     ]
 
-    if result.retrieval_context and test_case.context:
+    if result.retrieval_context and base_test_case.context:
         # 검색 문맥이 있어야 Faithfulness/Recall/Precision 지표가 의미를 가집니다.
         metrics.extend(
             [
@@ -805,7 +860,17 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
 
     metric_results = []
     for metric in metrics:
-        metric.measure(test_case)
+        if isinstance(metric, AnswerRelevancyMetric):
+            compact_test_case = LLMTestCase(
+                input=turn["input"],
+                actual_output=_compact_output_for_relevancy(result.actual_output),
+                expected_output=turn.get("expected_output"),
+                retrieval_context=result.retrieval_context,
+                context=_safe_json_list(turn.get("context_ground_truth", "[]")),
+            )
+            metric.measure(compact_test_case)
+        else:
+            metric.measure(base_test_case)
         if span:
             span.score(name=metric.__class__.__name__, value=metric.score, comment=metric.reason)
         metric_results.append(
@@ -840,6 +905,7 @@ def test_evaluation(conversation):
 
     conversation_history = []
     full_conversation_passed = True
+    expected_failure_matched = False
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
     judge = _build_judge_model()
     conversation_report = {
@@ -855,10 +921,12 @@ def test_evaluation(conversation):
         for turn in conversation:
             case_id = turn["case_id"]
             input_text = turn["input"]
+            expected_failure = _is_expected_failure_case(turn)
             turn_report = {
                 "case_id": case_id,
                 "turn_id": turn.get("turn_id"),
                 "input": input_text,
+                "expected_outcome": "fail" if expected_failure else "pass",
                 "status": "passed",
                 "latency_ms": None,
                 "policy_check": None,
@@ -931,7 +999,22 @@ def test_evaluation(conversation):
                         )
                 if failed_metrics:
                     raise AssertionError("Metrics failed: " + "; ".join(failed_metrics))
+                if expected_failure:
+                    raise ExpectedFailureNotTriggered(
+                        "This case is marked as expected-fail, but all checks passed."
+                    )
             except Exception as exc:
+                if expected_failure and not isinstance(exc, ExpectedFailureNotTriggered):
+                    # 의도된 실패 시나리오가 실제로 실패했으므로 테스트 목적상 PASS로 처리합니다.
+                    expected_failure_matched = True
+                    turn_report["status"] = "expected_fail_matched"
+                    turn_report["failure_message"] = str(exc)
+                    conversation_report["status"] = "passed_with_expected_failure"
+                    conversation_report["failure_message"] = (
+                        f"Expected failure observed at case_id {case_id}: {exc}"
+                    )
+                    break
+
                 full_conversation_passed = False
                 turn_report["status"] = "failed"
                 turn_report["failure_message"] = str(exc)
@@ -944,7 +1027,7 @@ def test_evaluation(conversation):
                     # 실패 여부와 무관하게 span을 닫아 trace 구조를 깨지 않게 합니다.
                     span.end()
 
-        if len(conversation) > 1:
+        if len(conversation) > 1 and not expected_failure_matched:
             # 멀티턴 평가는 전체 대화록을 하나의 입력으로 다시 심판 모델에 제출합니다.
             full_transcript = ""
             for turn in conversation_history:
