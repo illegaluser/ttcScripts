@@ -262,18 +262,154 @@ def _render_metric_list(metric_details):
 
     items = []
     for metric in metric_details:
-        status = "PASS" if metric.get("passed") else "FAIL"
+        status = metric.get("status")
+        if not status:
+            passed = metric.get("passed")
+            if passed is True:
+                status = "PASS"
+            elif passed is False:
+                status = "FAIL"
+            else:
+                status = "SKIPPED"
         reason = escape(str(metric.get("reason") or metric.get("error") or ""))
         score = metric.get("score")
         threshold = metric.get("threshold")
+        score_display = "-" if score is None else score
+        threshold_display = "-" if threshold is None else threshold
         items.append(
             "<li>"
             f"<strong>{escape(metric['name'])}</strong> "
-            f"[{status}] score={score}, threshold={threshold}"
+            f"[{status}] score={score_display}, threshold={threshold_display}"
             f"<br><span>{reason}</span>"
             "</li>"
         )
     return "<ul>" + "".join(items) + "</ul>"
+
+
+def _skipped_metric(name: str, reason: str):
+    """요약 화면에서 미실행 지표를 명시적으로 SKIPPED 상태로 표현합니다."""
+    return {
+        "name": name,
+        "score": None,
+        "threshold": None,
+        "passed": None,
+        "reason": reason,
+        "error": None,
+        "status": "SKIPPED",
+    }
+
+
+def _format_token_usage(usage):
+    """어댑터별 키 차이를 흡수해 토큰 사용량을 단일 문자열로 표시합니다."""
+    if not usage or not isinstance(usage, dict):
+        return "-"
+
+    prompt = usage.get("promptTokens")
+    completion = usage.get("completionTokens")
+    total = usage.get("totalTokens")
+    if prompt is None:
+        prompt = usage.get("prompt_tokens")
+    if completion is None:
+        completion = usage.get("completion_tokens")
+    if total is None:
+        total = usage.get("total_tokens")
+    if total is None and (prompt is not None or completion is not None):
+        total = int(prompt or 0) + int(completion or 0)
+
+    if prompt is None and completion is None and total is None:
+        return "-"
+    return f"prompt={int(prompt or 0)}, completion={int(completion or 0)}, total={int(total or 0)}"
+
+
+def _build_task_completion_display(turn: dict):
+    """
+    Task Completion 표시용 리스트를 구성합니다.
+    실제 측정값이 없으면 실패 지점에 맞춰 SKIPPED 이유를 보여줍니다.
+    """
+    task_completion = turn.get("task_completion")
+    if task_completion:
+        return [task_completion]
+
+    failure = str(turn.get("failure_message") or "")
+    if "Adapter Error" in failure:
+        reason = "Skipped because adapter invocation failed before Task Completion."
+    elif "Promptfoo policy checks reported" in failure:
+        reason = "Skipped because policy check failed."
+    elif "Format Compliance Failed" in failure:
+        reason = "Skipped because schema validation failed."
+    else:
+        reason = "Skipped due to earlier stage failure."
+    return [_skipped_metric("TaskCompletion", reason)]
+
+
+def _build_deepeval_metrics_display(turn: dict):
+    """
+    DeepEval 지표 표시 리스트를 구성합니다.
+    - 실행된 지표는 실제 결과를 그대로 사용
+    - 실행되지 않은 지표는 SKIPPED로 보강
+    """
+    metric_names = [
+        "AnswerRelevancyMetric",
+        "ToxicityMetric",
+        "FaithfulnessMetric",
+        "ContextualRecallMetric",
+        "ContextualPrecisionMetric",
+    ]
+    existing_metrics = turn.get("metrics", []) or []
+    existing_by_name = {metric.get("name"): metric for metric in existing_metrics}
+    display_metrics = []
+
+    task_completion = turn.get("task_completion")
+    failure = str(turn.get("failure_message") or "")
+    expected_fail_matched = turn.get("status") == "expected_fail_matched"
+    has_retrieval_context = bool(turn.get("has_retrieval_context"))
+    has_context_ground_truth = bool(turn.get("has_context_ground_truth"))
+
+    for metric_name in metric_names:
+        if metric_name in existing_by_name:
+            display_metrics.append(existing_by_name[metric_name])
+            continue
+
+        if task_completion and not task_completion.get("passed"):
+            reason = "Skipped because Task Completion failed."
+        elif "Adapter Error" in failure:
+            reason = "Skipped because adapter invocation failed."
+        elif "Promptfoo policy checks reported" in failure:
+            reason = "Skipped because policy check failed."
+        elif "Format Compliance Failed" in failure:
+            reason = "Skipped because schema validation failed."
+        elif expected_fail_matched:
+            reason = "Skipped because expected-fail case matched and conversation stopped early."
+        elif metric_name in (
+            "FaithfulnessMetric",
+            "ContextualRecallMetric",
+            "ContextualPrecisionMetric",
+        ) and not (has_retrieval_context and has_context_ground_truth):
+            reason = "Skipped because retrieval_context/context_ground_truth was not available."
+        else:
+            reason = "Skipped due to earlier stage failure."
+
+        display_metrics.append(_skipped_metric(metric_name, reason))
+
+    return display_metrics
+
+
+def _build_multi_turn_display(conversation: dict):
+    """
+    Multi-turn 지표 표시를 구성합니다.
+    1턴 대화나 조기 종료 대화에서도 SKIPPED 이유를 명시합니다.
+    """
+    if conversation.get("multi_turn_consistency"):
+        return [conversation["multi_turn_consistency"]]
+
+    turns = conversation.get("turns", []) or []
+    if len(turns) <= 1:
+        reason = "Skipped because this conversation has a single turn."
+    elif any(turn.get("status") == "expected_fail_matched" for turn in turns):
+        reason = "Skipped because expected-fail case matched before conversation completion."
+    else:
+        reason = "Skipped because the conversation failed before multi-turn evaluation."
+    return [_skipped_metric("MultiTurnConsistency", reason)]
 
 
 def _render_summary_html():
@@ -296,8 +432,9 @@ def _render_summary_html():
                 fail_fast_parts.append(f"Schema: {schema_status.upper()}")
             fail_fast = "<br>".join(fail_fast_parts) if fail_fast_parts else "-"
 
-            task_completion_html = _render_metric_list([turn["task_completion"]]) if turn.get("task_completion") else "-"
-            metrics_html = _render_metric_list(turn.get("metrics", []))
+            task_completion_html = _render_metric_list(_build_task_completion_display(turn))
+            metrics_html = _render_metric_list(_build_deepeval_metrics_display(turn))
+            token_usage_html = escape(_format_token_usage(turn.get("usage")))
             actual_output = escape(str(turn.get("actual_output") or ""))
 
             turn_rows.append(
@@ -306,6 +443,7 @@ def _render_summary_html():
                 f"<td>{escape(str(turn.get('expected_outcome') or 'pass'))}</td>"
                 f"<td>{escape(str(turn.get('status') or 'unknown'))}</td>"
                 f"<td>{escape(str(turn.get('latency_ms') or '-'))}</td>"
+                f"<td>{token_usage_html}</td>"
                 f"<td>{fail_fast}</td>"
                 f"<td>{task_completion_html}</td>"
                 f"<td>{metrics_html}</td>"
@@ -314,9 +452,7 @@ def _render_summary_html():
                 "</tr>"
             )
 
-        multi_turn_html = "-"
-        if conversation.get("multi_turn_consistency"):
-            multi_turn_html = _render_metric_list([conversation["multi_turn_consistency"]])
+        multi_turn_html = _render_metric_list(_build_multi_turn_display(conversation))
 
         conversations_html.append(
             "<section class='conversation'>"
@@ -326,7 +462,7 @@ def _render_summary_html():
             f"<p>Multi-turn: {multi_turn_html}</p>"
             "<table>"
             "<thead><tr>"
-            "<th>Case ID</th><th>Expected</th><th>Status</th><th>Latency(ms)</th><th>Fail-Fast</th>"
+            "<th>Case ID</th><th>Expected</th><th>Status</th><th>Latency(ms)</th><th>Token Usage</th><th>Fail-Fast</th>"
             "<th>Task Completion</th><th>Metrics</th><th>Actual Output</th><th>Failure</th>"
             "</tr></thead>"
             f"<tbody>{''.join(turn_rows)}</tbody>"
@@ -935,6 +1071,8 @@ def test_evaluation(conversation):
                 "metrics": [],
                 "actual_output": "",
                 "usage": None,
+                "has_retrieval_context": False,
+                "has_context_ground_truth": bool(_safe_json_list(turn.get("context_ground_truth", "[]"))),
                 "failure_message": "",
             }
 
@@ -952,6 +1090,7 @@ def test_evaluation(conversation):
                 if result.usage:
                     update_payload["usage"] = result.usage
                     turn_report["usage"] = result.usage
+                turn_report["has_retrieval_context"] = bool(result.retrieval_context)
 
                 if span:
                     # 응답 원문, 사용량, 지연시간을 먼저 기록해 사후 분석 데이터를 확보합니다.
