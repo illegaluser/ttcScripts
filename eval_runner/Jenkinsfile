@@ -1,16 +1,64 @@
+properties([
+    parameters([
+        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL'),
+        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식 선택'),
+        password(name: 'API_KEY', defaultValue: '', description: '(선택) API 인증 키'),
+        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더. 예: Authorization: Bearer xxx'),
+        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama API Base URL'),
+        [
+            $class: 'CascadeChoiceParameter',
+            choiceType: 'PT_SINGLE_SELECT',
+            description: 'OLLAMA_BASE_URL에서 읽어온 설치 모델 목록입니다. 최초 1회 저장 후 다시 실행하면 드롭다운이 보입니다.',
+            filterLength: 1,
+            filterable: true,
+            name: 'JUDGE_MODEL',
+            randomName: 'judge-model-choice',
+            referencedParameters: 'OLLAMA_BASE_URL',
+            script: [
+                $class: 'GroovyScript',
+                fallbackScript: [
+                    classpath: [],
+                    sandbox: false,
+                    script: '''
+                        return ['qwen2:7b']
+                    '''
+                ],
+                script: [
+                    classpath: [],
+                    sandbox: false,
+                    script: '''
+                        import groovy.json.JsonSlurperClassic
+
+                        def baseUrl = (OLLAMA_BASE_URL ?: 'http://host.docker.internal:11434').trim()
+                        if (!baseUrl) {
+                            return ['qwen2:7b']
+                        }
+
+                        def apiUrl = baseUrl.endsWith('/') ? "${baseUrl}api/tags" : "${baseUrl}/api/tags"
+                        def connection = new URL(apiUrl).openConnection()
+                        connection.setConnectTimeout(3000)
+                        connection.setReadTimeout(5000)
+
+                        def payload = new JsonSlurperClassic().parse(connection.getInputStream().newReader('UTF-8'))
+                        def models = ((payload?.models ?: []) as List)
+                            .collect { it?.name?.toString() }
+                            .findAll { it }
+                            .unique()
+                            .sort()
+
+                        return models ?: ['qwen2:7b']
+                    '''
+                ]
+            ]
+        ],
+        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: 'AnswerRelevancyMetric 합격 기준 점수'),
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로'),
+        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 PC의 시험지 파일을 직접 업로드')
+    ])
+])
+
 pipeline {
     agent any
-    parameters {
-        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL')
-        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식 선택')
-        password(name: 'API_KEY', defaultValue: '', description: '(선택) API 인증 키')
-        password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더. 예: Authorization: Bearer xxx')
-        string(name: 'JUDGE_MODEL', defaultValue: 'qwen2:7b', description: '채점관으로 사용할 LLM 모델명 (Ollama)')
-        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama API Base URL')
-        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: 'AnswerRelevancyMetric 합격 기준 점수')
-        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
-        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 PC의 시험지 파일을 직접 업로드')
-    }
     environment {
         LANGFUSE_HOST = 'http://host.docker.internal:3000'
         PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
@@ -22,7 +70,7 @@ pipeline {
                 script {
                     sh """
                     mkdir -p "\$(dirname '${params.GOLDEN_CSV_PATH}')"
-                    mkdir -p /var/knowledges/eval/reports
+                    mkdir -p ${env.REPORT_DIR}
                     """
                     if (params.UPLOADED_GOLDEN_DATASET?.trim()) {
                         sh """
@@ -35,6 +83,45 @@ pipeline {
                 }
             }
         }
+        stage('1-1. Judge Model 검증') {
+            steps {
+                sh """
+                set -eu
+                TAGS_URL="${params.OLLAMA_BASE_URL%/}/api/tags"
+                TMP_JSON="$(mktemp)"
+                trap 'rm -f "$TMP_JSON"' EXIT
+
+                curl -fsSL "$TAGS_URL" -o "$TMP_JSON"
+
+                echo "--------------------------------------------------"
+                echo "Installed Ollama models:"
+                python3 - "$TMP_JSON" "${params.JUDGE_MODEL}" <<'PY'
+import json
+import sys
+
+payload_path, selected_model = sys.argv[1], sys.argv[2]
+with open(payload_path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh) or {}
+
+models = sorted({model.get("name") for model in payload.get("models", []) if model.get("name")})
+for model in models:
+    print(f" - {model}")
+
+if not models:
+    raise SystemExit("No Ollama models were returned from /api/tags.")
+
+if selected_model not in models:
+    raise SystemExit(
+        f"Selected JUDGE_MODEL '{selected_model}' is not installed. "
+        f"Choose one of: {', '.join(models)}"
+    )
+
+print("--------------------------------------------------")
+print(f"Selected judge model confirmed: {selected_model}")
+PY
+                """
+            }
+        }
         stage('2. 파이썬 평가 실행 (Pytest)') {
             steps {
                 script {
@@ -45,27 +132,27 @@ pipeline {
                         echo "             STARTING EVALUATION RUN              "
                         echo "=================================================="
                         echo "TARGET_URL: ${params.TARGET_URL}"
-                    echo "TARGET_TYPE: ${params.TARGET_TYPE}"
-                    echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
-                    echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
-                    echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
-                    echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
-                    echo "--------------------------------------------------"
-                    export TARGET_URL='${params.TARGET_URL}'
-                    export TARGET_TYPE='${params.TARGET_TYPE}'
-                    export API_KEY='${params.API_KEY}'
-                    export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
-                    export JUDGE_MODEL='${params.JUDGE_MODEL}'
-                    export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
-                    export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'
-                    export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
-                    export REPORT_DIR='${env.REPORT_DIR}'
-                    export PYTHONPATH='${env.PYTHONPATH}'
-                    set -x
+                        echo "TARGET_TYPE: ${params.TARGET_TYPE}"
+                        echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
+                        echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
+                        echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
+                        echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
+                        echo "--------------------------------------------------"
+                        export TARGET_URL='${params.TARGET_URL}'
+                        export TARGET_TYPE='${params.TARGET_TYPE}'
+                        export API_KEY='${params.API_KEY}'
+                        export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
+                        export JUDGE_MODEL='${params.JUDGE_MODEL}'
+                        export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
+                        export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'
+                        export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
+                        export REPORT_DIR='${env.REPORT_DIR}'
+                        export PYTHONPATH='${env.PYTHONPATH}'
+                        set -x
 
                         python3 -m pytest /var/jenkins_home/scripts/eval_runner/tests/test_runner.py \
                           -n 1 \
-                          --junitxml=/var/knowledges/eval/reports/results.xml
+                          --junitxml=${env.REPORT_DIR}/results.xml
                         """
                     }
 
