@@ -78,6 +78,10 @@ Your response must be a single float: 1.0 for perfect consistency, 0.0 for failu
 
 
 def _resolve_existing_path(env_value: str, fallback_paths):
+    """
+    환경변수에 명시된 경로가 있으면 그것을 사용하고,
+    없으면 러너가 일반적으로 배포되는 위치들을 순서대로 탐색해 첫 번째 존재 경로를 선택합니다.
+    """
     if env_value:
         return Path(env_value).expanduser()
     for path in fallback_paths:
@@ -99,6 +103,10 @@ if Langfuse and LANGFUSE_PUBLIC_KEY:
 
 
 def _turn_sort_key(value):
+    """
+    turn_id를 정렬 가능한 값으로 바꿉니다.
+    숫자는 숫자 순서대로, 문자열은 문자열 순서대로, 누락값은 가장 뒤로 보냅니다.
+    """
     if value is None:
         return (1, 0)
     try:
@@ -109,10 +117,9 @@ def _turn_sort_key(value):
 
 def load_dataset():
     """
-    `golden.csv`를 읽어 다중 턴 대화 단위로 그룹화하여 반환합니다.
-    `conversation_id`가 없는 경우, 단일 턴 대화로 처리합니다.
+    `golden.csv`를 읽어 conversation 단위로 그룹화합니다.
+    `conversation_id`가 있으면 멀티턴으로 묶고, 없으면 각 row를 단일 턴 대화 1개로 취급합니다.
     """
-
     if not GOLDEN_CSV_PATH.exists():
         raise FileNotFoundError(f"Evaluation dataset not found at {GOLDEN_CSV_PATH}")
 
@@ -121,6 +128,7 @@ def load_dataset():
     records = df.to_dict(orient="records")
 
     if "conversation_id" not in df.columns:
+        # 레거시 단일 턴 포맷입니다.
         return [[record] for record in records]
 
     grouped_conversations = {}
@@ -130,18 +138,21 @@ def load_dataset():
     for record in records:
         conversation_id = record.get("conversation_id")
         if conversation_id:
+            # 같은 conversation_id를 가진 row들을 하나의 대화로 모읍니다.
             conversation_key = str(conversation_id)
             if conversation_key not in grouped_conversations:
                 grouped_conversations[conversation_key] = []
                 grouped_order.append(conversation_key)
             grouped_conversations[conversation_key].append(record)
         else:
+            # conversation_id가 비어 있으면 독립 대화로 유지합니다.
             single_turn_conversations.append([record])
 
     conversations = []
     for conversation_key in grouped_order:
         turns = grouped_conversations[conversation_key]
         if "turn_id" in df.columns:
+            # turn_id 기준 정렬로 사용자-에이전트 문맥 순서를 고정합니다.
             turns = sorted(turns, key=lambda turn: _turn_sort_key(turn.get("turn_id")))
         conversations.append(turns)
 
@@ -150,6 +161,7 @@ def load_dataset():
 
 
 def _safe_json_loads(raw_text: str):
+    """JSON 파싱 실패를 예외 대신 None으로 돌려주는 안전 래퍼입니다."""
     try:
         return json.loads(raw_text)
     except Exception:
@@ -157,19 +169,32 @@ def _safe_json_loads(raw_text: str):
 
 
 def _safe_json_list(raw_text: str):
+    """
+    DeepEval의 context 입력은 list를 기대하므로,
+    문자열 JSON 또는 이미 파싱된 값을 받아 최종적으로 list만 반환합니다.
+    """
     parsed = _safe_json_loads(raw_text) if isinstance(raw_text, str) else raw_text
     return parsed if isinstance(parsed, list) else []
 
 
 def _config_path(filename: str) -> Path:
+    """평가 러너 모듈 위치를 기준으로 설정 파일 절대경로를 계산합니다."""
     return CONFIG_ROOT / filename
 
 
 def _build_judge_model():
+    """
+    Ollama 호환 OpenAI 엔드포인트를 사용하는 심판 LLM 객체를 생성합니다.
+    모든 DeepEval/GEval 호출이 동일한 모델 설정을 공유하도록 중앙화합니다.
+    """
     return GPTModel(model=JUDGE_MODEL, base_url=f"{OLLAMA_BASE_URL.rstrip('/')}/v1")
 
 
 def _promptfoo_policy_check(raw_text: str):
+    """
+    Promptfoo CLI를 사용해 응답 원문에 금칙 패턴이 있는지 검사합니다.
+    파일 기반 입력을 쓰는 이유는 긴 응답도 안정적으로 처리하고 문서 지시와 동일한 흐름을 유지하기 위해서입니다.
+    """
     config_path = _config_path("security.yaml")
     if not config_path.exists():
         return
@@ -183,6 +208,7 @@ def _promptfoo_policy_check(raw_text: str):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_output:
             tmp_output_path = tmp_output.name
 
+        # 결과 JSON을 파일로 남겨 CLI 출력 포맷 변화와 무관하게 실패 건수를 읽습니다.
         command = [
             "promptfoo",
             "eval",
@@ -205,6 +231,7 @@ def _promptfoo_policy_check(raw_text: str):
             if failures:
                 raise RuntimeError(f"Promptfoo policy checks reported {failures} failure(s).")
     finally:
+        # 매 테스트마다 생성되는 임시 파일이 누적되지 않도록 반드시 제거합니다.
         if tmp_input_path and os.path.exists(tmp_input_path):
             os.unlink(tmp_input_path)
         if tmp_output_path and os.path.exists(tmp_output_path):
@@ -212,6 +239,10 @@ def _promptfoo_policy_check(raw_text: str):
 
 
 def _schema_validate(raw_text: str):
+    """
+    API 응답이 약속된 JSON 스키마를 만족하는지 검사합니다.
+    UI 평가처럼 비JSON 응답이 자연스러운 경우는 상위 호출부에서 이 함수를 건너뜁니다.
+    """
     schema_path = _config_path("schema.json")
     if not schema_path.exists():
         return
@@ -227,6 +258,10 @@ def _schema_validate(raw_text: str):
 
 
 def _parse_success_criteria_mode(criteria: str) -> str:
+    """
+    success_criteria가 규칙 DSL인지, 자연어 GEval 기준인지, 비어 있는지를 판별합니다.
+    기존 시험지 문법과 문서 예시를 동시에 지원하기 위한 분기 함수입니다.
+    """
     if not criteria:
         return "none"
     if any(token in criteria for token in ("status_code=", "raw~r/", "json.")):
@@ -235,6 +270,10 @@ def _parse_success_criteria_mode(criteria: str) -> str:
 
 
 def _json_get_path(obj, path: str):
+    """
+    json.foo.bar[0] 형태의 단순 경로 문법을 따라 값을 추출합니다.
+    success_criteria의 `json.<path>~r/.../` 규칙을 처리하기 위한 최소 기능만 구현합니다.
+    """
     current = obj
     for token in path.split("."):
         list_match = re.match(r"^([a-zA-Z0-9_\-]+)\[(\d+)\]$", token)
@@ -255,6 +294,10 @@ def _json_get_path(obj, path: str):
 
 
 def _evaluate_rule_based_criteria(criteria_str: str, result) -> bool:
+    """
+    SUCCESS_CRITERIA_GUIDE.md의 규칙 기반 문법을 해석합니다.
+    조건들은 모두 AND 관계로 처리하며, 하나라도 불일치하면 즉시 실패합니다.
+    """
     if not criteria_str:
         return result.http_status == 200
 
@@ -263,12 +306,14 @@ def _evaluate_rule_based_criteria(criteria_str: str, result) -> bool:
 
     for condition in conditions:
         if condition.startswith("status_code="):
+            # HTTP 상태코드는 가장 직접적인 성공 신호입니다.
             expected_code = condition.split("=", 1)[1].strip()
             if str(result.http_status) != expected_code:
                 return False
             continue
 
         if condition.startswith("raw~r/"):
+            # raw_response 전체 문자열에 대한 정규식 매칭입니다.
             pattern = condition[len("raw~r/") :]
             if pattern.endswith("/"):
                 pattern = pattern[:-1]
@@ -277,6 +322,7 @@ def _evaluate_rule_based_criteria(criteria_str: str, result) -> bool:
             continue
 
         if "~r/" in condition and condition.startswith("json."):
+            # JSON 응답의 특정 경로 값을 꺼내 정규식으로 검증합니다.
             left, right = condition.split("~r/", 1)
             json_path = left.replace("json.", "", 1)
             pattern = right[:-1] if right.endswith("/") else right
@@ -291,6 +337,12 @@ def _evaluate_rule_based_criteria(criteria_str: str, result) -> bool:
 
 
 def _score_task_completion(turn, result, judge, span=None):
+    """
+    과업 완료 여부를 채점합니다.
+    - DSL이면 결정론적 규칙 검사
+    - 자연어면 GEval 심판 채점
+    - 조건이 없으면 HTTP 성공 여부로 최소 판정
+    """
     success_criteria = turn.get("success_criteria") or turn.get("expected_output")
     criteria_mode = _parse_success_criteria_mode(success_criteria)
 
@@ -298,6 +350,7 @@ def _score_task_completion(turn, result, judge, span=None):
         score = 1.0 if _evaluate_rule_based_criteria(success_criteria, result) else 0.0
         reason = "Rule-based success_criteria evaluation"
     elif criteria_mode == "geval":
+        # 문서가 권장하는 자연어 success_criteria는 GEval 심판이 판정합니다.
         task_completion_metric = GEval(
             name="TaskCompletion",
             criteria=TASK_COMPLETION_CRITERIA,
@@ -317,6 +370,7 @@ def _score_task_completion(turn, result, judge, span=None):
         reason = "No success_criteria provided; falling back to HTTP success."
 
     if span:
+        # 관제 시스템에서 턴별 과업 완료 점수를 바로 볼 수 있게 span에도 기록합니다.
         span.score(name="TaskCompletion", value=score, comment=reason)
 
     if score < 0.5:
@@ -324,6 +378,10 @@ def _score_task_completion(turn, result, judge, span=None):
 
 
 def _score_deepeval_metrics(turn, result, judge, span=None):
+    """
+    문맥 기반 품질 지표를 수행합니다.
+    기본 지표는 답변 관련성/유해성이고, retrieval_context가 있을 때만 RAG 지표를 추가합니다.
+    """
     test_case = LLMTestCase(
         input=turn["input"],
         actual_output=result.actual_output,
@@ -338,6 +396,7 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
     ]
 
     if result.retrieval_context:
+        # 검색 문맥이 있어야 Faithfulness/Recall/Precision 지표가 의미를 가집니다.
         metrics.extend(
             [
                 FaithfulnessMetric(threshold=0.9, model=judge),
@@ -350,15 +409,21 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
     assert_test(test_case, metrics)
 
     if span:
+        # 각 지표의 점수와 사유를 Langfuse에 개별 기록합니다.
         for metric in getattr(test_case, "metrics", []):
             span.score(name=metric.__class__.__name__, value=metric.score, comment=metric.reason)
 
 
 @pytest.mark.parametrize("conversation", load_dataset())
 def test_evaluation(conversation):
+    """
+    하나의 conversation을 끝까지 평가하는 메인 테스트입니다.
+    문서의 흐름대로 어댑터 호출 -> Fail-Fast 검사 -> 과업 완료 -> 심층 평가 -> 멀티턴 평가를 수행합니다.
+    """
     conv_id = conversation[0].get("conversation_id", conversation[0]["case_id"])
     parent_trace = None
     if langfuse:
+        # conversation 단위 상위 trace를 만들고 모든 턴 span을 그 아래에 연결합니다.
         parent_trace = langfuse.trace(
             name=f"Conversation-{conv_id}",
             id=f"{RUN_ID}:{conv_id}",
@@ -374,9 +439,11 @@ def test_evaluation(conversation):
 
         span = None
         if parent_trace:
+            # 각 턴을 별도 span으로 남겨 어느 지점에서 실패했는지 추적 가능하게 합니다.
             span = parent_trace.span(name=f"Turn-{turn.get('turn_id', 1)}", input={"input": input_text})
 
         try:
+            # 대상 타입에 맞는 어댑터를 가져와 실제 AI 시스템을 호출합니다.
             adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
             result = adapter.invoke(input_text, history=conversation_history)
 
@@ -385,31 +452,38 @@ def test_evaluation(conversation):
                 update_payload["usage"] = result.usage
 
             if span:
+                # 응답 원문, 사용량, 지연시간을 먼저 기록해 사후 분석 데이터를 확보합니다.
                 span.update(**update_payload)
                 span.score(name="Latency", value=result.latency_ms, comment="ms")
 
             if result.error:
                 raise RuntimeError(f"Adapter Error: {result.error}")
 
+            # 1차 차단: 정책 위반 및 응답 규격 검사
             _promptfoo_policy_check(result.raw_response)
             if TARGET_TYPE == "http":
                 _schema_validate(result.raw_response)
 
+            # 2차 평가: 과업 완료 여부 판정
             judge = _build_judge_model()
             _score_task_completion(turn, result, judge, span)
 
+            # 다음 턴 입력에 사용할 수 있도록 assistant 응답을 대화 이력에 누적합니다.
             turn["actual_output"] = result.actual_output
             conversation_history.append(turn)
 
+            # 3차 평가: 답변 품질 및 RAG 지표 측정
             _score_deepeval_metrics(turn, result, judge, span)
         except Exception as exc:
             full_conversation_passed = False
             pytest.fail(f"Turn failed for case_id {case_id}: {exc}")
         finally:
             if span:
+                # 실패 여부와 무관하게 span을 닫아 trace 구조를 깨지 않게 합니다.
                 span.end()
 
     if len(conversation) > 1:
+        # 멀티턴 평가는 전체 대화록을 하나의 입력으로 다시 심판 모델에 제출합니다.
         full_transcript = ""
         for turn in conversation_history:
             full_transcript += f"User: {turn['input']}\n"
@@ -439,4 +513,5 @@ def test_evaluation(conversation):
             )
 
     if not full_conversation_passed:
+        # 개별 턴 실패를 conversation 수준 실패로 다시 명시합니다.
         pytest.fail("One or more turns in the conversation failed.")
