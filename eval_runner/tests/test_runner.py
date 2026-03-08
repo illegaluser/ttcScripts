@@ -87,36 +87,59 @@ METRIC_GUIDE = {
     },
     "TaskCompletion": {
         "description": "success_criteria 또는 expected_output 기준으로 과업을 실제로 달성했는지 판정합니다.",
-        "pass_rule": "score >= task_completion threshold 이면 PASS",
+        "pass_rule": "score가 task_completion 기준 이상이면 통과",
     },
     "AnswerRelevancyMetric": {
         "description": "질문 의도에 비해 답변이 얼마나 직접적이고 관련성 있게 작성되었는지 평가합니다.",
-        "pass_rule": "score >= answer_relevancy threshold 이면 PASS",
+        "pass_rule": "score가 answer_relevancy 기준 이상이면 통과",
     },
     "ToxicityMetric": {
         "description": "응답에 혐오, 차별, 공격적 표현 같은 유해성이 있는지 평가합니다.",
-        "pass_rule": "DeepEval 기준으로 threshold 이하의 유해성일 때 PASS",
+        "pass_rule": "DeepEval 기준으로 유해성 score가 threshold 이하이면 통과",
     },
     "FaithfulnessMetric": {
         "description": "답변이 retrieval_context의 사실에 충실하고 환각이 없는지 평가합니다.",
-        "pass_rule": "score >= faithfulness threshold 이면 PASS",
+        "pass_rule": "score가 faithfulness 기준 이상이면 통과",
     },
     "ContextualRecallMetric": {
         "description": "질문에 답하는 데 필요한 근거 문맥을 충분히 검색해왔는지 평가합니다.",
-        "pass_rule": "score >= contextual_recall threshold 이면 PASS",
+        "pass_rule": "score가 contextual_recall 기준 이상이면 통과",
     },
     "ContextualPrecisionMetric": {
         "description": "검색된 문맥에 불필요한 노이즈가 적고 관련 근거가 중심인지 평가합니다.",
-        "pass_rule": "score >= contextual_precision threshold 이면 PASS",
+        "pass_rule": "score가 contextual_precision 기준 이상이면 통과",
     },
     "MultiTurnConsistency": {
         "description": "여러 턴에 걸쳐 기억 유지, 맥락 일관성, 모순 여부를 종합 평가합니다.",
-        "pass_rule": "score >= multi_turn_consistency threshold 이면 PASS",
+        "pass_rule": "score가 multi_turn_consistency 기준 이상이면 통과",
     },
     "Latency": {
         "description": "질문 전송부터 응답 수신 완료까지 걸린 시간(ms)입니다.",
-        "pass_rule": "정보성 지표이며 기본 PASS/FAIL 기준은 없음",
+        "pass_rule": "정보성 지표이며 기본 통과/실패 기준은 없음",
     },
+}
+
+METRIC_DISPLAY_NAMES = {
+    "PolicyCheck": "보안 정책 검사",
+    "SchemaValidation": "응답 형식 검사",
+    "TaskCompletion": "과업 달성도",
+    "AnswerRelevancyMetric": "답변 관련성",
+    "ToxicityMetric": "유해성",
+    "FaithfulnessMetric": "근거 충실도",
+    "ContextualRecallMetric": "문맥 재현율",
+    "ContextualPrecisionMetric": "문맥 정밀도",
+    "MultiTurnConsistency": "멀티턴 일관성",
+    "Latency": "응답 시간",
+}
+
+THRESHOLD_DISPLAY_NAMES = {
+    "task_completion": "과업 달성도",
+    "answer_relevancy": "답변 관련성",
+    "toxicity": "유해성",
+    "faithfulness": "근거 충실도",
+    "contextual_recall": "문맥 재현율",
+    "contextual_precision": "문맥 정밀도",
+    "multi_turn_consistency": "멀티턴 일관성",
 }
 
 
@@ -258,7 +281,7 @@ def _render_metric_list(metric_details):
     각 항목에 score/threshold/pass 여부와 이유를 함께 남겨 Jenkins 아티팩트만으로도 원인 파악이 가능하게 합니다.
     """
     if not metric_details:
-        return "<em>No metric results</em>"
+        return "<em>측정 결과가 없습니다.</em>"
 
     items = []
     for metric in metric_details:
@@ -271,15 +294,22 @@ def _render_metric_list(metric_details):
                 status = "FAIL"
             else:
                 status = "SKIPPED"
+        status_label = {
+            "PASS": "통과",
+            "FAIL": "실패",
+            "SKIPPED": "건너뜀",
+        }.get(status, str(status))
         reason = escape(str(metric.get("reason") or metric.get("error") or ""))
         score = metric.get("score")
         threshold = metric.get("threshold")
         score_display = "-" if score is None else score
         threshold_display = "-" if threshold is None else threshold
+        metric_name = str(metric.get("name") or "")
+        metric_label = METRIC_DISPLAY_NAMES.get(metric_name, metric_name)
         items.append(
             "<li>"
-            f"<strong>{escape(metric['name'])}</strong> "
-            f"[{status}] score={score_display}, threshold={threshold_display}"
+            f"<strong>{escape(metric_label)}</strong> "
+            f"[{status_label}] 점수={score_display}, 기준={threshold_display}"
             f"<br><span>{reason}</span>"
             "</li>"
         )
@@ -318,7 +348,7 @@ def _format_token_usage(usage):
 
     if prompt is None and completion is None and total is None:
         return "-"
-    return f"prompt={int(prompt or 0)}, completion={int(completion or 0)}, total={int(total or 0)}"
+    return f"입력={int(prompt or 0)}, 출력={int(completion or 0)}, 합계={int(total or 0)}"
 
 
 def _build_task_completion_display(turn: dict):
@@ -332,13 +362,13 @@ def _build_task_completion_display(turn: dict):
 
     failure = str(turn.get("failure_message") or "")
     if "Adapter Error" in failure:
-        reason = "Skipped because adapter invocation failed before Task Completion."
+        reason = "어댑터 호출 실패로 과업 달성도 평가를 건너뛰었습니다."
     elif "Promptfoo policy checks reported" in failure:
-        reason = "Skipped because policy check failed."
+        reason = "보안 정책 검사 실패로 과업 달성도 평가를 건너뛰었습니다."
     elif "Format Compliance Failed" in failure:
-        reason = "Skipped because schema validation failed."
+        reason = "응답 형식 검사 실패로 과업 달성도 평가를 건너뛰었습니다."
     else:
-        reason = "Skipped due to earlier stage failure."
+        reason = "이전 단계 실패로 과업 달성도 평가를 건너뛰었습니다."
     return [_skipped_metric("TaskCompletion", reason)]
 
 
@@ -371,23 +401,23 @@ def _build_deepeval_metrics_display(turn: dict):
             continue
 
         if task_completion and not task_completion.get("passed"):
-            reason = "Skipped because Task Completion failed."
+            reason = "과업 달성도 실패로 해당 지표 평가를 건너뛰었습니다."
         elif "Adapter Error" in failure:
-            reason = "Skipped because adapter invocation failed."
+            reason = "어댑터 호출 실패로 해당 지표 평가를 건너뛰었습니다."
         elif "Promptfoo policy checks reported" in failure:
-            reason = "Skipped because policy check failed."
+            reason = "보안 정책 검사 실패로 해당 지표 평가를 건너뛰었습니다."
         elif "Format Compliance Failed" in failure:
-            reason = "Skipped because schema validation failed."
+            reason = "응답 형식 검사 실패로 해당 지표 평가를 건너뛰었습니다."
         elif expected_fail_matched:
-            reason = "Skipped because expected-fail case matched and conversation stopped early."
+            reason = "의도된 실패가 검출되어 대화를 조기 종료하고 해당 지표를 건너뛰었습니다."
         elif metric_name in (
             "FaithfulnessMetric",
             "ContextualRecallMetric",
             "ContextualPrecisionMetric",
         ) and not (has_retrieval_context and has_context_ground_truth):
-            reason = "Skipped because retrieval_context/context_ground_truth was not available."
+            reason = "retrieval_context 또는 context_ground_truth가 없어 해당 지표를 건너뛰었습니다."
         else:
-            reason = "Skipped due to earlier stage failure."
+            reason = "이전 단계 실패로 해당 지표 평가를 건너뛰었습니다."
 
         display_metrics.append(_skipped_metric(metric_name, reason))
 
@@ -404,11 +434,11 @@ def _build_multi_turn_display(conversation: dict):
 
     turns = conversation.get("turns", []) or []
     if len(turns) <= 1:
-        reason = "Skipped because this conversation has a single turn."
+        reason = "단일턴 대화라 멀티턴 일관성 평가는 건너뛰었습니다."
     elif any(turn.get("status") == "failed_expected" for turn in turns):
-        reason = "Skipped because expected-fail case matched before conversation completion."
+        reason = "의도된 실패가 중간에 검출되어 멀티턴 일관성 평가는 건너뛰었습니다."
     else:
-        reason = "Skipped because the conversation failed before multi-turn evaluation."
+        reason = "대화가 중간에 실패하여 멀티턴 일관성 평가는 건너뛰었습니다."
     return [_skipped_metric("MultiTurnConsistency", reason)]
 
 
@@ -429,12 +459,12 @@ def _render_summary_html():
 
     def _conversation_status_meta(status):
         if status == "passed":
-            return ("PASS", "ok", "정상 통과")
+            return ("통과", "ok", "정상 통과")
         if status == "failed_expected":
-            return ("FAIL", "warn", "의도된 실패")
+            return ("실패", "warn", "의도된 실패")
         if status == "failed":
-            return ("FAIL", "fail", "실패")
-        return ("UNKNOWN", "skip", str(status or "unknown"))
+            return ("실패", "fail", "실패")
+        return ("알 수 없음", "skip", str(status or "unknown"))
 
     def _turn_status_meta(status):
         if status == "passed":
@@ -468,10 +498,15 @@ def _render_summary_html():
         for turn in turns:
             fail_fast_parts = []
             if turn.get("policy_check"):
-                fail_fast_parts.append(f"Policy: {'PASS' if turn['policy_check']['passed'] else 'FAIL'}")
+                fail_fast_parts.append(f"보안 정책: {'통과' if turn['policy_check']['passed'] else '실패'}")
             if turn.get("schema_check"):
                 schema_status = turn["schema_check"].get("status", "skipped")
-                fail_fast_parts.append(f"Schema: {schema_status.upper()}")
+                schema_status_label = {
+                    "passed": "통과",
+                    "skipped": "건너뜀",
+                    "failed": "실패",
+                }.get(str(schema_status).lower(), str(schema_status))
+                fail_fast_parts.append(f"응답 형식: {schema_status_label}")
             fail_fast = "<br>".join(fail_fast_parts) if fail_fast_parts else "-"
 
             task_completion_html = _render_metric_list(_build_task_completion_display(turn))
@@ -491,11 +526,11 @@ def _render_summary_html():
             detail_html = (
                 "<details>"
                 "<summary>평가 상세 보기</summary>"
-                f"<p><strong>Fail-Fast</strong><br>{fail_fast}</p>"
-                f"<p><strong>Task Completion</strong><br>{task_completion_html}</p>"
-                f"<p><strong>DeepEval Metrics</strong><br>{metrics_html}</p>"
-                f"<p><strong>Actual Output</strong><pre>{actual_output}</pre></p>"
-                f"<p><strong>Failure Raw</strong><br>{escape(str(turn.get('failure_message') or '-'))}</p>"
+                f"<p><strong>사전 검사</strong><br>{fail_fast}</p>"
+                f"<p><strong>과업 달성도</strong><br>{task_completion_html}</p>"
+                f"<p><strong>품질 지표</strong><br>{metrics_html}</p>"
+                f"<p><strong>실제 응답</strong><pre>{actual_output}</pre></p>"
+                f"<p><strong>원본 실패 메시지</strong><br>{escape(str(turn.get('failure_message') or '-'))}</p>"
                 "</details>"
             )
 
@@ -523,18 +558,18 @@ def _render_summary_html():
             failure_message = conversation.get("failure_message") or "-"
             multi_turn_html = _render_metric_list(_build_multi_turn_display(conversation))
             turn_rows = _render_turn_rows(conversation.get("turns", []))
-            conversation_title = escape(str(conversation.get("conversation_key") or "Unknown"))
+            conversation_title = escape(str(conversation.get("conversation_key") or "미지정"))
 
             blocks.append(
                 "<details class='conversation' open>"
                 "<summary>"
                 f"<span class='badge {status_class}'>{escape(status_text)}</span> "
                 f"<strong>{conversation_title}</strong> "
-                f"<span class='meta-inline'>({turn_count} turn, {escape(status_label)})</span>"
+                f"<span class='meta-inline'>({turn_count}턴, {escape(status_label)})</span>"
                 "</summary>"
                 f"<p class='summary-line'><strong>핵심 사유:</strong> {escape(_short_text(failure_message))}</p>"
                 f"<p class='summary-line'><strong>멀티턴 일관성:</strong> {multi_turn_html}</p>"
-                "<table>"
+                "<table class='result-table'>"
                 "<thead><tr>"
                 "<th>Case ID</th><th>기대결과</th><th>판정</th><th>응답시간(ms)</th><th>토큰 사용량</th><th>핵심 사유</th><th>상세</th>"
                 "</tr></thead>"
@@ -545,15 +580,16 @@ def _render_summary_html():
         return "".join(blocks)
 
     metric_average_rows = "".join(
-        f"<tr><td>{escape(name)}</td><td>{value}</td></tr>" for name, value in sorted(metric_averages.items())
+        f"<tr><td>{escape(METRIC_DISPLAY_NAMES.get(name, name))}</td><td>{value}</td></tr>"
+        for name, value in sorted(metric_averages.items())
     )
     threshold_rows = "".join(
-        f"<tr><td>{escape(name)}</td><td>{value}</td></tr>"
+        f"<tr><td>{escape(THRESHOLD_DISPLAY_NAMES.get(name, name))}</td><td>{value}</td></tr>"
         for name, value in sorted(SUMMARY_STATE["thresholds"].items())
     )
     metric_guide_rows = "".join(
         "<tr>"
-        f"<td>{escape(metric_name)}</td>"
+        f"<td>{escape(METRIC_DISPLAY_NAMES.get(metric_name, metric_name))}</td>"
         f"<td>{escape(str(metric_meta.get('description') or ''))}</td>"
         f"<td>{escape(str(metric_meta.get('pass_rule') or ''))}</td>"
         "</tr>"
@@ -564,7 +600,7 @@ def _render_summary_html():
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>AI Agent Evaluation Summary</title>
+  <title>AI 에이전트 평가 요약</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #0f172a; background: #f1f5f9; line-height: 1.45; }}
     h1, h2, h3 {{ margin: 0 0 10px; }}
@@ -578,9 +614,11 @@ def _render_summary_html():
     .section {{ border: 1px solid #dbe2ea; border-radius: 12px; background: #ffffff; padding: 14px; }}
     .section-header {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
     .help {{ margin-top: 8px; }}
-    table {{ width: 100%; border-collapse: collapse; background: #ffffff; margin-top: 8px; }}
-    th, td {{ border: 1px solid #dbe2ea; padding: 8px; vertical-align: top; text-align: left; font-size: 13px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #ffffff; margin-top: 8px; border: 2px solid #334155; }}
+    th, td {{ border: 1px solid #64748b; padding: 8px; vertical-align: top; text-align: left; font-size: 13px; }}
     th {{ background: #eef2ff; }}
+    .result-table {{ border: 2px solid #1f2937; }}
+    .result-table th {{ border-bottom: 2px solid #1f2937; }}
     pre {{ white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }}
     ul {{ margin: 0; padding-left: 20px; }}
     .conversation {{ border: 1px solid #dbe2ea; border-radius: 12px; background: #ffffff; padding: 10px 12px; }}
@@ -597,12 +635,12 @@ def _render_summary_html():
   </style>
 </head>
 <body>
-  <h1>AI Agent Evaluation Summary</h1>
+  <h1>AI 에이전트 평가 요약</h1>
   <div class="meta">
-    <p>Run ID: <strong>{escape(str(SUMMARY_STATE['run_id']))}</strong></p>
-    <p>Target: {escape(str(SUMMARY_STATE.get('target_url') or ''))} ({escape(str(SUMMARY_STATE.get('target_type') or ''))})</p>
-    <p>Judge Model: {escape(str(SUMMARY_STATE.get('judge_model') or ''))}</p>
-    <p>Langfuse Enabled: {'YES' if SUMMARY_STATE.get('langfuse_enabled') else 'NO'}</p>
+    <p>실행 ID: <strong>{escape(str(SUMMARY_STATE['run_id']))}</strong></p>
+    <p>평가 대상: {escape(str(SUMMARY_STATE.get('target_url') or ''))} ({escape(str(SUMMARY_STATE.get('target_type') or ''))})</p>
+    <p>심판 모델: {escape(str(SUMMARY_STATE.get('judge_model') or ''))}</p>
+    <p>Langfuse 사용: {'사용' if SUMMARY_STATE.get('langfuse_enabled') else '미사용'}</p>
     <div class="note">
       이 화면의 Turn 수는 <strong>실제로 실행된 턴</strong> 기준입니다. 대화 중간 실패 시 남은 턴은 실행되지 않을 수 있습니다.
     </div>
@@ -632,19 +670,19 @@ def _render_summary_html():
   <section class="section">
     <h2>평가 기준 및 평균 점수</h2>
     <details class="help">
-      <summary>Threshold 보기</summary>
-      <table><thead><tr><th>Metric</th><th>Threshold</th></tr></thead><tbody>{threshold_rows}</tbody></table>
+      <summary>합격 기준(Threshold) 보기</summary>
+      <table><thead><tr><th>지표</th><th>기준값</th></tr></thead><tbody>{threshold_rows}</tbody></table>
     </details>
     <details class="help">
-      <summary>Metric Guide 보기</summary>
+      <summary>지표 설명 보기</summary>
       <table>
-        <thead><tr><th>Metric</th><th>Description</th><th>Pass / Fail Rule</th></tr></thead>
+        <thead><tr><th>지표</th><th>설명</th><th>판정 기준</th></tr></thead>
         <tbody>{metric_guide_rows}</tbody>
       </table>
     </details>
     <details class="help">
-      <summary>Metric 평균 점수 보기</summary>
-      <table><thead><tr><th>Metric</th><th>Average Score</th></tr></thead><tbody>{metric_average_rows}</tbody></table>
+      <summary>지표 평균 점수 보기</summary>
+      <table><thead><tr><th>지표</th><th>평균 점수</th></tr></thead><tbody>{metric_average_rows}</tbody></table>
     </details>
   </section>
 </body>
