@@ -7,12 +7,14 @@ pipeline {
         password(name: 'TARGET_AUTH_HEADER', defaultValue: '', description: '(선택) 전체 인증 헤더. 예: Authorization: Bearer xxx')
         string(name: 'JUDGE_MODEL', defaultValue: 'qwen2:7b', description: '채점관으로 사용할 LLM 모델명 (Ollama)')
         string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama API Base URL')
+        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: 'AnswerRelevancyMetric 합격 기준 점수')
         string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '평가 시험지(CSV) 파일의 컨테이너 내부 경로')
         file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 PC의 시험지 파일을 직접 업로드')
     }
     environment {
         LANGFUSE_HOST = 'http://host.docker.internal:3000'
         PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
+        REPORT_DIR = '/var/knowledges/eval/reports'
     }
     stages {
         stage('1. 시험지(Golden Dataset) 준비') {
@@ -43,20 +45,23 @@ pipeline {
                         echo "             STARTING EVALUATION RUN              "
                         echo "=================================================="
                         echo "TARGET_URL: ${params.TARGET_URL}"
-                        echo "TARGET_TYPE: ${params.TARGET_TYPE}"
-                        echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
-                        echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
-                        echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
-                        echo "--------------------------------------------------"
-                        export TARGET_URL='${params.TARGET_URL}'
-                        export TARGET_TYPE='${params.TARGET_TYPE}'
-                        export API_KEY='${params.API_KEY}'
-                        export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
-                        export JUDGE_MODEL='${params.JUDGE_MODEL}'
-                        export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
-                        export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
-                        export PYTHONPATH='${env.PYTHONPATH}'
-                        set -x
+                    echo "TARGET_TYPE: ${params.TARGET_TYPE}"
+                    echo "JUDGE_MODEL: ${params.JUDGE_MODEL}"
+                    echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
+                    echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
+                    echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
+                    echo "--------------------------------------------------"
+                    export TARGET_URL='${params.TARGET_URL}'
+                    export TARGET_TYPE='${params.TARGET_TYPE}'
+                    export API_KEY='${params.API_KEY}'
+                    export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
+                    export JUDGE_MODEL='${params.JUDGE_MODEL}'
+                    export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
+                    export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'
+                    export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
+                    export REPORT_DIR='${env.REPORT_DIR}'
+                    export PYTHONPATH='${env.PYTHONPATH}'
+                    set -x
 
                         python3 -m pytest /var/jenkins_home/scripts/eval_runner/tests/test_runner.py \
                           -n 1 \
@@ -84,9 +89,16 @@ pipeline {
     post {
         always {
             script {
+                sh """
+                mkdir -p eval-reports
+                cp -f ${env.REPORT_DIR}/* eval-reports/ 2>/dev/null || true
+                """
+                junit testResults: 'eval-reports/results.xml', allowEmptyResults: true
+                archiveArtifacts artifacts: 'eval-reports/*', allowEmptyArchive: true
+
                 def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
                 def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
-                currentBuild.description = "📊 Langfuse Report: ${publicLangfuseUrl}"
+                currentBuild.description = "📊 Artifacts: eval-reports/summary.html | Langfuse: ${publicLangfuseUrl}"
             }
         }
     }

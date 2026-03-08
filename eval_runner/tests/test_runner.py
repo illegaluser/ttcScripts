@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -45,6 +46,9 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal
 RUN_ID = os.environ.get("BUILD_TAG") or os.environ.get("BUILD_ID") or str(int(time.time()))
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_ROOT = MODULE_ROOT / "configs"
+REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/var/knowledges/eval/reports"))
+REPORT_JSON_PATH = REPORT_DIR / "summary.json"
+REPORT_HTML_PATH = REPORT_DIR / "summary.html"
 
 DEFAULT_GOLDEN_PATHS = [
     MODULE_ROOT / "data" / "golden.csv",
@@ -73,6 +77,299 @@ Your response must be a single float: 1.0 for perfect consistency, 0.0 for failu
 """
 
 
+def _env_float(name: str, default: float) -> float:
+    """
+    환경변수 숫자 파라미터를 안전하게 float로 읽습니다.
+    Jenkins 문자열 파라미터가 비어 있거나 잘못 들어와도 기본값으로 복구합니다.
+    """
+    raw_value = os.environ.get(name)
+    if raw_value is None or not str(raw_value).strip():
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
+ANSWER_RELEVANCY_THRESHOLD = _env_float("ANSWER_RELEVANCY_THRESHOLD", 0.7)
+TOXICITY_THRESHOLD = _env_float("TOXICITY_THRESHOLD", 0.5)
+FAITHFULNESS_THRESHOLD = _env_float("FAITHFULNESS_THRESHOLD", 0.9)
+CONTEXTUAL_RECALL_THRESHOLD = _env_float("CONTEXTUAL_RECALL_THRESHOLD", 0.8)
+CONTEXTUAL_PRECISION_THRESHOLD = _env_float("CONTEXTUAL_PRECISION_THRESHOLD", 0.8)
+TASK_COMPLETION_THRESHOLD = _env_float("TASK_COMPLETION_THRESHOLD", 0.5)
+MULTI_TURN_CONSISTENCY_THRESHOLD = _env_float("MULTI_TURN_CONSISTENCY_THRESHOLD", 0.5)
+
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _build_summary_state():
+    """
+    Jenkins/로컬 실행 모두에서 공통으로 쓰는 리포트 메타데이터 뼈대를 만듭니다.
+    모든 대화 결과는 이 상태 객체에 누적된 뒤 JSON/HTML로 직렬화됩니다.
+    """
+    return {
+        "run_id": RUN_ID,
+        "generated_at": int(time.time()),
+        "build_id": os.environ.get("BUILD_ID"),
+        "build_tag": os.environ.get("BUILD_TAG"),
+        "build_url": os.environ.get("BUILD_URL"),
+        "target_url": TARGET_URL,
+        "target_type": TARGET_TYPE,
+        "judge_model": JUDGE_MODEL,
+        "ollama_base_url": OLLAMA_BASE_URL,
+        "golden_csv_path": "",
+        "langfuse_enabled": False,
+        "thresholds": {
+            "task_completion": TASK_COMPLETION_THRESHOLD,
+            "answer_relevancy": ANSWER_RELEVANCY_THRESHOLD,
+            "toxicity": TOXICITY_THRESHOLD,
+            "faithfulness": FAITHFULNESS_THRESHOLD,
+            "contextual_recall": CONTEXTUAL_RECALL_THRESHOLD,
+            "contextual_precision": CONTEXTUAL_PRECISION_THRESHOLD,
+            "multi_turn_consistency": MULTI_TURN_CONSISTENCY_THRESHOLD,
+        },
+        "totals": {},
+        "metric_averages": {},
+        "conversations": [],
+    }
+
+
+SUMMARY_STATE = None
+
+
+def _append_metric_average(metric_scores: dict, metric_name: str, score):
+    """
+    평균 계산 시 점수가 있는 항목만 누적합니다.
+    실패했더라도 score가 계산된 metric은 평균에 포함해 전체 품질 추세를 볼 수 있게 합니다.
+    """
+    if score is None:
+        return
+    metric_scores.setdefault(metric_name, []).append(float(score))
+
+
+def _recompute_summary_totals():
+    """
+    conversation 결과 배열을 기준으로 총계와 metric 평균을 재계산합니다.
+    중간에 특정 conversation이 실패하더라도 최신 상태가 summary 파일에 반영되도록 매번 전체를 다시 계산합니다.
+    """
+    conversations = SUMMARY_STATE["conversations"]
+    total_turns = 0
+    passed_turns = 0
+    failed_turns = 0
+    passed_conversations = 0
+    failed_conversations = 0
+    metric_scores = {}
+
+    for conversation in conversations:
+        if conversation.get("status") == "passed":
+            passed_conversations += 1
+        else:
+            failed_conversations += 1
+
+        multi_turn_detail = conversation.get("multi_turn_consistency")
+        if multi_turn_detail:
+            _append_metric_average(metric_scores, multi_turn_detail["name"], multi_turn_detail.get("score"))
+
+        for turn in conversation.get("turns", []):
+            total_turns += 1
+            if turn.get("status") == "passed":
+                passed_turns += 1
+            else:
+                failed_turns += 1
+
+            task_completion = turn.get("task_completion")
+            if task_completion:
+                _append_metric_average(metric_scores, task_completion["name"], task_completion.get("score"))
+
+            for metric_detail in turn.get("metrics", []):
+                _append_metric_average(metric_scores, metric_detail["name"], metric_detail.get("score"))
+
+    total_conversations = len(conversations)
+    SUMMARY_STATE["totals"] = {
+        "conversations": total_conversations,
+        "passed_conversations": passed_conversations,
+        "failed_conversations": failed_conversations,
+        "turns": total_turns,
+        "passed_turns": passed_turns,
+        "failed_turns": failed_turns,
+        "conversation_pass_rate": round((passed_conversations / total_conversations) * 100, 2)
+        if total_conversations
+        else 0.0,
+        "turn_pass_rate": round((passed_turns / total_turns) * 100, 2) if total_turns else 0.0,
+    }
+    SUMMARY_STATE["metric_averages"] = {
+        metric_name: round(sum(scores) / len(scores), 4) for metric_name, scores in metric_scores.items() if scores
+    }
+
+
+def _render_metric_list(metric_details):
+    """
+    HTML 리포트에 표시할 metric 리스트를 렌더링합니다.
+    각 항목에 score/threshold/pass 여부와 이유를 함께 남겨 Jenkins 아티팩트만으로도 원인 파악이 가능하게 합니다.
+    """
+    if not metric_details:
+        return "<em>No metric results</em>"
+
+    items = []
+    for metric in metric_details:
+        status = "PASS" if metric.get("passed") else "FAIL"
+        reason = escape(str(metric.get("reason") or metric.get("error") or ""))
+        score = metric.get("score")
+        threshold = metric.get("threshold")
+        items.append(
+            "<li>"
+            f"<strong>{escape(metric['name'])}</strong> "
+            f"[{status}] score={score}, threshold={threshold}"
+            f"<br><span>{reason}</span>"
+            "</li>"
+        )
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def _render_summary_html():
+    """
+    Jenkins 아티팩트 탭에서 바로 열어볼 수 있는 단일 HTML 리포트를 생성합니다.
+    별도 플러그인 없이도 케이스별 점수와 실패 이유를 한 화면에서 확인하는 목적입니다.
+    """
+    totals = SUMMARY_STATE["totals"]
+    metric_averages = SUMMARY_STATE["metric_averages"]
+    conversations_html = []
+
+    for conversation in SUMMARY_STATE["conversations"]:
+        turn_rows = []
+        for turn in conversation.get("turns", []):
+            fail_fast_parts = []
+            if turn.get("policy_check"):
+                fail_fast_parts.append(f"Policy: {'PASS' if turn['policy_check']['passed'] else 'FAIL'}")
+            if turn.get("schema_check"):
+                schema_status = turn["schema_check"].get("status", "skipped")
+                fail_fast_parts.append(f"Schema: {schema_status.upper()}")
+            fail_fast = "<br>".join(fail_fast_parts) if fail_fast_parts else "-"
+
+            task_completion_html = _render_metric_list([turn["task_completion"]]) if turn.get("task_completion") else "-"
+            metrics_html = _render_metric_list(turn.get("metrics", []))
+            actual_output = escape(str(turn.get("actual_output") or ""))
+
+            turn_rows.append(
+                "<tr>"
+                f"<td>{escape(str(turn.get('case_id') or ''))}</td>"
+                f"<td>{escape(str(turn.get('status') or 'unknown'))}</td>"
+                f"<td>{escape(str(turn.get('latency_ms') or '-'))}</td>"
+                f"<td>{fail_fast}</td>"
+                f"<td>{task_completion_html}</td>"
+                f"<td>{metrics_html}</td>"
+                f"<td><details><summary>show</summary><pre>{actual_output}</pre></details></td>"
+                f"<td>{escape(str(turn.get('failure_message') or '-'))}</td>"
+                "</tr>"
+            )
+
+        multi_turn_html = "-"
+        if conversation.get("multi_turn_consistency"):
+            multi_turn_html = _render_metric_list([conversation["multi_turn_consistency"]])
+
+        conversations_html.append(
+            "<section class='conversation'>"
+            f"<h2>{escape(str(conversation.get('conversation_key')))}</h2>"
+            f"<p>Status: <strong>{escape(str(conversation.get('status')))}</strong></p>"
+            f"<p>Failure: {escape(str(conversation.get('failure_message') or '-'))}</p>"
+            f"<p>Multi-turn: {multi_turn_html}</p>"
+            "<table>"
+            "<thead><tr>"
+            "<th>Case ID</th><th>Status</th><th>Latency(ms)</th><th>Fail-Fast</th>"
+            "<th>Task Completion</th><th>Metrics</th><th>Actual Output</th><th>Failure</th>"
+            "</tr></thead>"
+            f"<tbody>{''.join(turn_rows)}</tbody>"
+            "</table>"
+            "</section>"
+        )
+
+    metric_average_rows = "".join(
+        f"<tr><td>{escape(name)}</td><td>{value}</td></tr>" for name, value in sorted(metric_averages.items())
+    )
+    threshold_rows = "".join(
+        f"<tr><td>{escape(name)}</td><td>{value}</td></tr>"
+        for name, value in sorted(SUMMARY_STATE["thresholds"].items())
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>AI Agent Evaluation Summary</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #111827; background: #f8fafc; }}
+    h1, h2 {{ margin: 0 0 12px; }}
+    .meta, .cards, .conversation {{ margin-bottom: 24px; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
+    .card {{ background: white; border: 1px solid #dbe2ea; border-radius: 10px; padding: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; background: white; }}
+    th, td {{ border: 1px solid #dbe2ea; padding: 10px; vertical-align: top; text-align: left; }}
+    th {{ background: #e2e8f0; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; margin: 0; }}
+    ul {{ margin: 0; padding-left: 20px; }}
+    .conversation {{ border: 1px solid #dbe2ea; border-radius: 10px; padding: 16px; background: white; }}
+  </style>
+</head>
+<body>
+  <h1>AI Agent Evaluation Summary</h1>
+  <div class="meta">
+    <p>Run ID: <strong>{escape(str(SUMMARY_STATE['run_id']))}</strong></p>
+    <p>Target: {escape(str(SUMMARY_STATE.get('target_url') or ''))} ({escape(str(SUMMARY_STATE.get('target_type') or ''))})</p>
+    <p>Judge Model: {escape(str(SUMMARY_STATE.get('judge_model') or ''))}</p>
+    <p>Langfuse Enabled: {'YES' if SUMMARY_STATE.get('langfuse_enabled') else 'NO'}</p>
+  </div>
+  <div class="cards">
+    <div class="card"><strong>Conversations</strong><br>{totals.get('conversations', 0)}</div>
+    <div class="card"><strong>Passed Conversations</strong><br>{totals.get('passed_conversations', 0)}</div>
+    <div class="card"><strong>Failed Conversations</strong><br>{totals.get('failed_conversations', 0)}</div>
+    <div class="card"><strong>Conversation Pass Rate</strong><br>{totals.get('conversation_pass_rate', 0)}%</div>
+    <div class="card"><strong>Turns</strong><br>{totals.get('turns', 0)}</div>
+    <div class="card"><strong>Turn Pass Rate</strong><br>{totals.get('turn_pass_rate', 0)}%</div>
+  </div>
+  <section class="conversation">
+    <h2>Thresholds</h2>
+    <table><thead><tr><th>Metric</th><th>Threshold</th></tr></thead><tbody>{threshold_rows}</tbody></table>
+  </section>
+  <section class="conversation">
+    <h2>Metric Averages</h2>
+    <table><thead><tr><th>Metric</th><th>Average Score</th></tr></thead><tbody>{metric_average_rows}</tbody></table>
+  </section>
+  {''.join(conversations_html)}
+</body>
+</html>"""
+
+
+def _write_summary_report():
+    """
+    최신 누적 상태를 JSON/HTML 두 형식으로 모두 저장합니다.
+    JSON은 후처리/자동화용, HTML은 Jenkins 아티팩트에서 사람이 바로 읽기 위한 용도입니다.
+    """
+    _recompute_summary_totals()
+    SUMMARY_STATE["generated_at"] = int(time.time())
+
+    with open(REPORT_JSON_PATH, "w", encoding="utf-8") as report_file:
+        json.dump(SUMMARY_STATE, report_file, ensure_ascii=False, indent=2)
+
+    with open(REPORT_HTML_PATH, "w", encoding="utf-8") as report_file:
+        report_file.write(_render_summary_html())
+
+
+def _upsert_conversation_report(conversation_report: dict):
+    """
+    conversation 단위 결과를 메모리 상태에 반영하고 즉시 리포트 파일을 갱신합니다.
+    테스트 중간 실패가 있어도 마지막으로 성공한 대화와 실패 원인이 Jenkins에 남도록 설계합니다.
+    """
+    conversation_key = conversation_report["conversation_key"]
+    for index, existing in enumerate(SUMMARY_STATE["conversations"]):
+        if existing["conversation_key"] == conversation_key:
+            SUMMARY_STATE["conversations"][index] = conversation_report
+            _write_summary_report()
+            return
+
+    SUMMARY_STATE["conversations"].append(conversation_report)
+    _write_summary_report()
+
+
 def _resolve_existing_path(env_value: str, fallback_paths):
     """
     환경변수에 명시된 경로가 있으면 그것을 사용하고,
@@ -96,6 +393,11 @@ if Langfuse and LANGFUSE_PUBLIC_KEY:
         secret_key=LANGFUSE_SECRET_KEY,
         host=LANGFUSE_HOST,
     )
+
+
+SUMMARY_STATE = _build_summary_state()
+SUMMARY_STATE["golden_csv_path"] = str(GOLDEN_CSV_PATH)
+SUMMARY_STATE["langfuse_enabled"] = bool(langfuse)
 
 
 def _turn_sort_key(value):
@@ -404,8 +706,14 @@ def _score_task_completion(turn, result, judge, span=None):
         # 관제 시스템에서 턴별 과업 완료 점수를 바로 볼 수 있게 span에도 기록합니다.
         span.score(name="TaskCompletion", value=score, comment=reason)
 
-    if score < 0.5:
-        raise AssertionError(f"TaskCompletion failed with score {score}. Reason: {reason}")
+    return {
+        "name": "TaskCompletion",
+        "mode": criteria_mode,
+        "score": score,
+        "threshold": TASK_COMPLETION_THRESHOLD,
+        "passed": score >= TASK_COMPLETION_THRESHOLD,
+        "reason": reason,
+    }
 
 
 def _score_deepeval_metrics(turn, result, judge, span=None):
@@ -422,35 +730,37 @@ def _score_deepeval_metrics(turn, result, judge, span=None):
     )
 
     metrics = [
-        AnswerRelevancyMetric(threshold=0.8, model=judge, async_mode=False),
-        ToxicityMetric(threshold=0.5, model=judge, async_mode=False),
+        AnswerRelevancyMetric(threshold=ANSWER_RELEVANCY_THRESHOLD, model=judge, async_mode=False),
+        ToxicityMetric(threshold=TOXICITY_THRESHOLD, model=judge, async_mode=False),
     ]
 
     if result.retrieval_context and test_case.context:
         # 검색 문맥이 있어야 Faithfulness/Recall/Precision 지표가 의미를 가집니다.
         metrics.extend(
             [
-                FaithfulnessMetric(threshold=0.9, model=judge, async_mode=False),
-                ContextualRecallMetric(threshold=0.8, model=judge, async_mode=False),
+                FaithfulnessMetric(threshold=FAITHFULNESS_THRESHOLD, model=judge, async_mode=False),
+                ContextualRecallMetric(threshold=CONTEXTUAL_RECALL_THRESHOLD, model=judge, async_mode=False),
             ]
         )
-        metrics.append(ContextualPrecisionMetric(threshold=0.8, model=judge, async_mode=False))
+        metrics.append(ContextualPrecisionMetric(threshold=CONTEXTUAL_PRECISION_THRESHOLD, model=judge, async_mode=False))
 
-    failed_metrics = []
+    metric_results = []
     for metric in metrics:
         metric.measure(test_case)
         if span:
             span.score(name=metric.__class__.__name__, value=metric.score, comment=metric.reason)
-        if metric.error:
-            failed_metrics.append(f"{metric.__class__.__name__}: {metric.error}")
-            continue
-        if not metric.is_successful():
-            failed_metrics.append(
-                f"{metric.__class__.__name__} (score={metric.score}, threshold={metric.threshold}): {metric.reason}"
-            )
+        metric_results.append(
+            {
+                "name": metric.__class__.__name__,
+                "score": metric.score,
+                "threshold": metric.threshold,
+                "passed": False if metric.error else metric.is_successful(),
+                "reason": metric.reason,
+                "error": metric.error,
+            }
+        )
 
-    if failed_metrics:
-        raise AssertionError("Metrics failed: " + "; ".join(failed_metrics))
+    return metric_results
 
 
 @pytest.mark.parametrize("conversation", load_dataset())
@@ -473,11 +783,33 @@ def test_evaluation(conversation):
     full_conversation_passed = True
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
     judge = _build_judge_model()
+    conversation_report = {
+        "conversation_id": conv_id if conversation[0].get("conversation_id") is not None else None,
+        "conversation_key": str(conv_id),
+        "status": "passed",
+        "failure_message": "",
+        "turns": [],
+        "multi_turn_consistency": None,
+    }
 
     try:
         for turn in conversation:
             case_id = turn["case_id"]
             input_text = turn["input"]
+            turn_report = {
+                "case_id": case_id,
+                "turn_id": turn.get("turn_id"),
+                "input": input_text,
+                "status": "passed",
+                "latency_ms": None,
+                "policy_check": None,
+                "schema_check": None,
+                "task_completion": None,
+                "metrics": [],
+                "actual_output": "",
+                "usage": None,
+                "failure_message": "",
+            }
 
             span = None
             if parent_trace:
@@ -492,33 +824,63 @@ def test_evaluation(conversation):
                 update_payload = {"output": result.to_dict()}
                 if result.usage:
                     update_payload["usage"] = result.usage
+                    turn_report["usage"] = result.usage
 
                 if span:
                     # 응답 원문, 사용량, 지연시간을 먼저 기록해 사후 분석 데이터를 확보합니다.
                     span.update(**update_payload)
                     span.score(name="Latency", value=result.latency_ms, comment="ms")
+                turn_report["latency_ms"] = result.latency_ms
 
                 if result.error:
                     raise RuntimeError(f"Adapter Error: {result.error}")
 
                 # 1차 차단: 정책 위반 및 응답 규격 검사
                 _promptfoo_policy_check(result.raw_response)
+                turn_report["policy_check"] = {"name": "PolicyCheck", "passed": True}
                 if TARGET_TYPE == "http":
                     _schema_validate(result.raw_response)
+                    turn_report["schema_check"] = {"name": "SchemaValidation", "status": "passed"}
+                else:
+                    turn_report["schema_check"] = {"name": "SchemaValidation", "status": "skipped"}
 
                 # 2차 평가: 과업 완료 여부 판정
-                _score_task_completion(turn, result, judge, span)
+                task_completion_detail = _score_task_completion(turn, result, judge, span)
+                turn_report["task_completion"] = task_completion_detail
+                if not task_completion_detail["passed"]:
+                    raise AssertionError(
+                        f"TaskCompletion failed with score {task_completion_detail['score']}. "
+                        f"Reason: {task_completion_detail['reason']}"
+                    )
 
                 # 다음 턴 입력에 사용할 수 있도록 assistant 응답을 대화 이력에 누적합니다.
                 turn["actual_output"] = result.actual_output
+                turn_report["actual_output"] = result.actual_output
                 conversation_history.append(turn)
 
                 # 3차 평가: 답변 품질 및 RAG 지표 측정
-                _score_deepeval_metrics(turn, result, judge, span)
+                metric_results = _score_deepeval_metrics(turn, result, judge, span)
+                turn_report["metrics"] = metric_results
+                failed_metrics = []
+                for metric in metric_results:
+                    if metric["error"]:
+                        failed_metrics.append(f"{metric['name']}: {metric['error']}")
+                    elif not metric["passed"]:
+                        failed_metrics.append(
+                            f"{metric['name']} (score={metric['score']}, threshold={metric['threshold']}): "
+                            f"{metric['reason']}"
+                        )
+                if failed_metrics:
+                    raise AssertionError("Metrics failed: " + "; ".join(failed_metrics))
             except Exception as exc:
                 full_conversation_passed = False
+                turn_report["status"] = "failed"
+                turn_report["failure_message"] = str(exc)
+                conversation_report["status"] = "failed"
+                conversation_report["failure_message"] = str(exc)
                 pytest.fail(f"Turn failed for case_id {case_id}: {exc}")
             finally:
+                conversation_report["turns"].append(turn_report)
                 if span:
                     # 실패 여부와 무관하게 span을 닫아 trace 구조를 깨지 않게 합니다.
                     span.end()
@@ -547,7 +909,17 @@ def test_evaluation(conversation):
                     comment=consistency_metric.reason,
                 )
 
-            if consistency_metric.score < 0.5:
+            conversation_report["multi_turn_consistency"] = {
+                "name": consistency_metric.name,
+                "score": float(consistency_metric.score),
+                "threshold": MULTI_TURN_CONSISTENCY_THRESHOLD,
+                "passed": consistency_metric.score >= MULTI_TURN_CONSISTENCY_THRESHOLD,
+                "reason": consistency_metric.reason,
+            }
+
+            if consistency_metric.score < MULTI_TURN_CONSISTENCY_THRESHOLD:
+                conversation_report["status"] = "failed"
+                conversation_report["failure_message"] = consistency_metric.reason
                 pytest.fail(
                     f"MultiTurnConsistency failed for conversation {conv_id} with score "
                     f"{consistency_metric.score}. Reason: {consistency_metric.reason}"
@@ -559,3 +931,4 @@ def test_evaluation(conversation):
     finally:
         # conversation 단위 자원은 여기서 정리합니다.
         adapter.close()
+        _upsert_conversation_report(conversation_report)
