@@ -884,15 +884,15 @@ def test_evaluation(conversation):
 Jenkins 파이프라인은 전체 평가 프로세스를 조율하는 오케스트라 지휘자 역할을 합니다. 운영자는 Jenkins UI를 통해 간단한 파라미터만 입력하면, 복잡한 평가 과정이 자동으로 실행됩니다.
 
 - **파라미터 설명**:
-  - `TARGET_URL`: 평가할 AI 에이전트의 엔드포인트 주소입니다.
-  - `TARGET_TYPE`: 에이전트의 종류를 선택합니다 (`http` API 또는 `ui_chat` 웹 UI).
-  - `API_KEY`: API 인증이 필요한 경우 사용합니다.
-  - `TARGET_AUTH_HEADER`: `Authorization: Bearer xxx` 형태처럼 전체 인증 헤더를 그대로 넘기고 싶을 때 사용합니다.
-  - `JUDGE_MODEL`: Active Choices Plugin(`uno-choice`)이 `OLLAMA_BASE_URL/api/tags`를 조회해 동적으로 구성하는 드롭다운입니다.
-  - `OLLAMA_BASE_URL`: 로컬에서 실행 중인 Ollama 서버의 주소입니다.
-  - `ANSWER_RELEVANCY_THRESHOLD`: `AnswerRelevancyMetric`의 합격 기준 점수입니다. 기본값은 `0.7`입니다.
-  - `GOLDEN_CSV_PATH`: 평가의 기준이 되는 시험지(CSV 파일)의 컨테이너 내부 경로입니다.
-  - `UPLOADED_GOLDEN_DATASET`: 로컬 PC의 시험지 파일을 직접 업로드할 때 사용합니다.
+  - `TARGET_URL`: 평가 대상 엔드포인트 주소입니다. 예: `http://host.docker.internal:8000/invoke`
+  - `TARGET_TYPE`: 평가 방식입니다. API면 `http`, 웹 채팅 UI면 `ui_chat`를 선택합니다.
+  - `API_KEY`: 대상 API가 `x-api-key` 같은 별도 키 인증을 요구할 때 입력합니다. 예: `sk-test-1234`
+  - `TARGET_AUTH_HEADER`: 전체 인증 헤더를 그대로 넘길 때 사용합니다. 예: `Authorization: Bearer eyJ...`
+  - `JUDGE_MODEL`: Active Choices Plugin(`uno-choice`)이 `OLLAMA_BASE_URL/api/tags`를 조회해 동적으로 구성하는 심판 모델 드롭다운입니다. 예: `qwen3-coder:30b`, `qwen2:7b`
+  - `OLLAMA_BASE_URL`: 채점용 Ollama 서버 주소입니다. 예: `http://host.docker.internal:11434`
+  - `ANSWER_RELEVANCY_THRESHOLD`: `AnswerRelevancyMetric` 합격 기준 점수입니다. 예: `0.7`은 보통, `0.8`은 엄격한 기준입니다.
+  - `GOLDEN_CSV_PATH`: 컨테이너 내부 시험지 경로입니다. 예: `/var/knowledges/eval/data/golden.csv`
+  - `UPLOADED_GOLDEN_DATASET`: 로컬 PC의 `golden.csv`를 직접 업로드할 때 사용합니다. 업로드하면 `GOLDEN_CSV_PATH` 위치로 복사됩니다.
 
 - **파이프라인 단계**:
   1. **시험지 준비**: 운영자가 직접 업로드한 시험지 파일이 있으면, 이를 지정된 경로(`GOLDEN_CSV_PATH`)로 복사합니다.
