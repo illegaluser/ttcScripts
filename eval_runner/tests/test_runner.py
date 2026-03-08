@@ -176,6 +176,12 @@ SUMMARY_TRANSLATE_TO_KOREAN = os.environ.get("SUMMARY_TRANSLATE_TO_KOREAN", "tru
     "false",
     "no",
 )
+SUMMARY_TRANSLATOR_MODEL = os.environ.get("SUMMARY_TRANSLATOR_MODEL", "").strip() or JUDGE_MODEL
+SUMMARY_REWRITE_FOR_READABILITY = os.environ.get("SUMMARY_REWRITE_FOR_READABILITY", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
 _SUMMARY_TRANSLATION_CACHE = {}
 
@@ -460,11 +466,67 @@ def _needs_translation_to_korean(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    if bool(re.search(r"[가-힣]", stripped)):
-        return False
+    # 한글이 일부 포함되어 있어도 중국어가 섞여 있으면 번역 대상으로 봅니다.
     if bool(re.search(r"[\u4e00-\u9fff]", stripped)):
         return True
-    return bool(re.search(r"[A-Za-z]", stripped))
+    # 영문이 길게 포함된 경우도 번역 대상으로 처리합니다.
+    english_chunks = re.findall(r"[A-Za-z]{4,}", stripped)
+    if english_chunks:
+        return True
+    return False
+
+
+def _cleanup_translated_text(text: str) -> str:
+    """
+    모델이 번역 지시문까지 함께 출력하는 경우를 제거합니다.
+    """
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return cleaned
+
+    cleaned = re.sub(r"^\s*번역\s*[:：]\s*", "", cleaned)
+    cleaned = cleaned.replace("코드, 숫자, 고유명사(case_id, 모델명, URL)는 유지", "")
+    cleaned = cleaned.replace("출력은 번역문만 작성", "")
+    cleaned = cleaned.replace("원문:", "")
+    cleaned = cleaned.replace("번역문:", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _translate_with_ollama(prompt: str) -> str:
+    """
+    Ollama generate 호출을 공통화합니다.
+    """
+    response = requests.post(
+        f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+        json={
+            "model": SUMMARY_TRANSLATOR_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 512},
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    return ((response.json() or {}).get("response") or "").strip()
+
+
+def _fallback_localize_common_phrases(text: str) -> str:
+    """
+    번역기가 불안정할 때 자주 등장하는 영문 고정 문구를 최소한 한국어로 치환합니다.
+    """
+    localized = str(text or "")
+    replacements = [
+        (r"Expected failure observed at case_id", "예상 실패가 case_id"),
+        (r"TaskCompletion failed with score", "TaskCompletion이 점수"),
+        (r"Metrics failed:", "지표 평가 실패:"),
+        (r"Promptfoo policy checks reported (\d+) failure\(s\)\.", r"Promptfoo 정책 검사에서 \1건 실패가 보고되었습니다."),
+        (r"Reason:", "이유:"),
+        (r"Skipped because", "다음 이유로 건너뜀:"),
+    ]
+    for pattern, replacement in replacements:
+        localized = re.sub(pattern, replacement, localized)
+    return localized
 
 
 def _translate_text_to_korean(text: str) -> str:
@@ -484,32 +546,49 @@ def _translate_text_to_korean(text: str) -> str:
         return _SUMMARY_TRANSLATION_CACHE[cache_key]
 
     try:
-        prompt = (
-            "다음 문장을 의미 손실 없이 자연스러운 한국어로 번역하세요.\n"
-            "- 코드, 숫자, 고유명사(case_id, 모델명, URL)는 유지\n"
-            "- 출력은 번역문만 작성\n\n"
-            f"{cache_key}"
-        )
-        response = requests.post(
-            f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
-            json={
-                "model": JUDGE_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0},
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        translated = ((response.json() or {}).get("response") or "").strip()
-        if translated:
+        if SUMMARY_REWRITE_FOR_READABILITY:
+            primary_prompt = (
+                "아래 원문을 한국어로 번역하고, 평가 리포트에 맞게 가독성 높은 문장으로 재구성해라.\n"
+                "규칙:\n"
+                "- 의미/사실/원인/판정(pass/fail/skip) 유지\n"
+                "- score, threshold, case_id, metric 이름, 숫자, URL, 모델명은 원문과 동일하게 유지\n"
+                "- 새로운 주장/해석/추측 추가 금지\n"
+                "- 중국어/영어 문장을 남기지 말 것\n"
+                "- 설명 없이 한국어 결과만 출력\n\n"
+                f"원문:\n{cache_key}"
+            )
+        else:
+            primary_prompt = (
+                "아래 원문을 한국어로만 번역해라. "
+                "원문의 코드/숫자/case_id/URL/모델명은 유지하고, 자연어만 한국어로 번역해라. "
+                "중국어 한자나 영어 문장을 남기지 마라. "
+                "설명 없이 번역 결과 한 문단만 출력해라.\n\n"
+                f"원문:\n{cache_key}"
+            )
+        translated = _cleanup_translated_text(_translate_with_ollama(primary_prompt))
+
+        # 1차 결과에 중국어가 남거나 번역 지시문이 섞이면 재시도합니다.
+        if translated and not re.search(r"[\u4e00-\u9fff]", translated) and "코드, 숫자, 고유명사" not in translated:
             _SUMMARY_TRANSLATION_CACHE[cache_key] = translated
             return translated
+
+        retry_prompt = (
+            "다음 문장을 한국어로 다시 번역해라. "
+            "중국어/영어 문장을 남기지 말고, 한국어 문장만 출력해라. "
+            "score/threshold/case_id/metric 이름/숫자/URL은 유지해라. "
+            "설명/주석/머리말 없이 번역문만 출력해라.\n\n"
+            f"{cache_key}"
+        )
+        retried = _cleanup_translated_text(_translate_with_ollama(retry_prompt))
+        if retried:
+            _SUMMARY_TRANSLATION_CACHE[cache_key] = retried
+            return retried
     except Exception:
         pass
 
-    _SUMMARY_TRANSLATION_CACHE[cache_key] = raw
-    return raw
+    fallback = _fallback_localize_common_phrases(raw)
+    _SUMMARY_TRANSLATION_CACHE[cache_key] = fallback
+    return fallback
 
 
 def _render_summary_html():
@@ -583,6 +662,9 @@ def _render_summary_html():
             metrics_html = _render_metric_list(_build_deepeval_metrics_display(turn))
             token_usage_html = escape(_format_token_usage(turn.get("usage")))
             actual_output = escape(str(turn.get("actual_output") or ""))
+            failure_raw = str(turn.get("failure_message") or "-")
+            failure_localized = escape(_translate_text_to_korean(failure_raw))
+            failure_raw_escaped = escape(failure_raw)
             _, status_class, status_label = _turn_status_meta(turn.get("status"))
 
             if turn.get("status") == "failed":
@@ -600,7 +682,8 @@ def _render_summary_html():
                 f"<p><strong>과업 달성도</strong><br>{task_completion_html}</p>"
                 f"<p><strong>품질 지표</strong><br>{metrics_html}</p>"
                 f"<p><strong>실제 응답</strong><pre>{actual_output}</pre></p>"
-                f"<p><strong>원본 실패 메시지</strong><br>{escape(_translate_text_to_korean(str(turn.get('failure_message') or '-')))}</p>"
+                f"<p><strong>가독성 요약 사유</strong><br>{failure_localized}</p>"
+                f"<p><strong>원문 실패 메시지</strong><pre>{failure_raw_escaped}</pre></p>"
                 "</details>"
             )
 
