@@ -19,18 +19,22 @@ properties([
                 $class: 'GroovyScript',
                 fallbackScript: [
                     classpath: [],
-                    sandbox: false,
+                    sandbox: true,
                     script: '''
-                        return ['qwen3-coder:30b']
+                        // Active Choices 스크립트 권한 문제가 있어도 드롭다운이 비지 않도록
+                        // 최소 선택지를 항상 반환합니다.
+                        return ['qwen3-coder:30b', 'qwen2:7b']
                     '''
                 ],
                 script: [
                     classpath: [],
-                    sandbox: false,
+                    sandbox: true,
                     script: '''
                         import groovy.json.JsonSlurperClassic
 
-                        def defaultModels = ['qwen3-coder:30b']
+                        // ScriptApproval/네트워크 이슈가 있을 때에도 Build 화면 선택이 가능해야 하므로
+                        // fallback 가능한 기본 목록을 유지합니다.
+                        def defaultModels = ['qwen3-coder:30b', 'qwen2:7b']
                         def baseUrl = (OLLAMA_BASE_URL ?: 'http://host.docker.internal:11434').trim()
                         if (!baseUrl) {
                             return defaultModels

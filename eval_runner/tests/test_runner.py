@@ -1029,7 +1029,10 @@ def test_evaluation(conversation):
     하나의 conversation을 끝까지 평가하는 메인 테스트입니다.
     문서의 흐름대로 어댑터 호출 -> Fail-Fast 검사 -> 과업 완료 -> 심층 평가 -> 멀티턴 평가를 수행합니다.
     """
-    conv_id = conversation[0].get("conversation_id", conversation[0]["case_id"])
+    # conversation_id가 비어 있는 단일턴 케이스는 case_id를 conversation key로 사용해야
+    # summary에서 서로 덮어쓰지 않고 개별 케이스로 집계됩니다.
+    raw_conversation_id = conversation[0].get("conversation_id")
+    conv_id = raw_conversation_id if not _is_blank_value(raw_conversation_id) else conversation[0]["case_id"]
     parent_trace = None
     if langfuse:
         # conversation 단위 상위 trace를 만들고 모든 턴 span을 그 아래에 연결합니다.
@@ -1045,7 +1048,7 @@ def test_evaluation(conversation):
     adapter = AdapterRegistry.get_instance(TARGET_TYPE, TARGET_URL, API_KEY, TARGET_AUTH_HEADER)
     judge = _build_judge_model()
     conversation_report = {
-        "conversation_id": conv_id if conversation[0].get("conversation_id") is not None else None,
+        "conversation_id": raw_conversation_id if not _is_blank_value(raw_conversation_id) else None,
         "conversation_key": str(conv_id),
         "status": "passed",
         "failure_message": "",
