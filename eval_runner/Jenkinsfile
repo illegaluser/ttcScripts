@@ -1,14 +1,17 @@
 properties([
     parameters([
-        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 엔드포인트. direct 모드에서 필수, wrapper 모드에서는 내부 invoke 주소로 자동 대체됨'),
-        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '평가 방식. API면 http, 웹 채팅 UI면 ui_chat. wrapper 모드는 http에서만 지원'),
-        choice(name: 'TARGET_MODE', choices: ['local_ollama_wrapper', 'openai_wrapper', 'direct'], description: '대상 호출 방식. local_ollama_wrapper=Ollama wrapper 자동기동, openai_wrapper=OpenAI wrapper 자동기동, direct=TARGET_URL 직접 호출'),
-        password(name: 'API_KEY', description: '(선택) 대상 API 인증 키. openai_wrapper에서는 OPENAI_API_KEY 미입력 시 fallback으로 사용'),
-        password(name: 'TARGET_AUTH_HEADER', description: '(선택) 전체 인증 헤더를 그대로 전달. 예: Authorization: Bearer eyJ... (주로 direct/http 모드)'),
-        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: 'Ollama 주소. 심판 모델(DeepEval) 공통 사용 + local_ollama_wrapper 대상 모델 호출에도 사용'),
-        string(name: 'OPENAI_BASE_URL', defaultValue: 'https://api.openai.com/v1', description: 'OpenAI API Base URL. openai_wrapper 모드에서 사용'),
-        string(name: 'OPENAI_MODEL', defaultValue: 'gpt-4.1-mini', description: 'openai_wrapper에서 호출할 모델명. 예: gpt-4.1-mini, gpt-4.1'),
-        password(name: 'OPENAI_API_KEY', description: '(선택) openai_wrapper용 OpenAI API Key. 미입력 시 API_KEY를 fallback으로 사용'),
+        string(name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL. direct 모드에서만 필수입니다. 예: http://host.docker.internal:8000/invoke'),
+        choice(name: 'TARGET_TYPE', choices: ['http', 'ui_chat'], description: '대상 형태 선택. API면 http, 웹 채팅 자동화면 ui_chat. wrapper 모드(local_ollama/openai/gemini)는 http만 지원'),
+        choice(name: 'TARGET_MODE', choices: ['local_ollama_wrapper', 'openai_wrapper', 'gemini_wrapper', 'direct'], description: '호출 경로 선택. local_ollama_wrapper=로컬 Ollama 자동기동, openai_wrapper=OpenAI API 자동기동, gemini_wrapper=Gemini API 자동기동, direct=TARGET_URL 직접 호출'),
+        password(name: 'API_KEY', description: '(선택) 공통 API 키. direct 호출 대상이 키를 요구할 때 사용. openai_wrapper/gemini_wrapper에서는 전용 키가 비었을 때 fallback으로 사용'),
+        password(name: 'TARGET_AUTH_HEADER', description: '(선택) 전체 인증 헤더 직접 입력. 예: Authorization: Bearer eyJ... (주로 direct/http 모드)'),
+        string(name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '심판(Judge) 모델용 Ollama 주소. 예: http://host.docker.internal:11434 (local_ollama_wrapper 대상 호출에도 사용)'),
+        string(name: 'OPENAI_BASE_URL', defaultValue: 'https://api.openai.com/v1', description: 'OpenAI API 주소(openai_wrapper). 기본값 그대로 사용 권장'),
+        string(name: 'OPENAI_MODEL', defaultValue: 'gpt-4.1-mini', description: 'openai_wrapper 대상 모델명. 예: gpt-4.1-mini, gpt-4.1'),
+        password(name: 'OPENAI_API_KEY', description: '(선택) OpenAI 전용 키. 예: sk-... 비우면 API_KEY를 fallback으로 사용'),
+        string(name: 'GEMINI_BASE_URL', defaultValue: 'https://generativelanguage.googleapis.com/v1beta', description: 'Gemini API 주소(gemini_wrapper). 기본값 그대로 사용 권장'),
+        string(name: 'GEMINI_MODEL', defaultValue: 'gemini-2.0-flash', description: 'gemini_wrapper 대상 모델명. 예: gemini-2.0-flash, gemini-1.5-pro'),
+        password(name: 'GEMINI_API_KEY', description: '(선택) Gemini 전용 키. 예: AIza... 비우면 API_KEY를 fallback으로 사용'),
         [
             $class: 'CascadeChoiceParameter',
             choiceType: 'PT_SINGLE_SELECT',
@@ -63,9 +66,9 @@ properties([
                 ]
             ]
         ],
-        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: 'AnswerRelevancyMetric 합격 기준(0~1). 예: 0.7=보통, 0.8=엄격'),
-        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '컨테이너 내부 시험지 경로'),
-        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 로컬 golden.csv 업로드. 업로드 시 GOLDEN_CSV_PATH로 복사')
+        string(name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: '답변 관련성 합격 기준(0~1). 초보자 권장: 0.7, 엄격 평가: 0.8'),
+        string(name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '시험지 CSV 경로. 예: /var/knowledges/eval/data/golden.csv'),
+        file(name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 내 PC의 golden.csv 업로드. 업로드하면 GOLDEN_CSV_PATH 위치로 덮어쓰기')
     ])
 ])
 
@@ -163,6 +166,9 @@ PY
                     "OPENAI_BASE_URL=${params.OPENAI_BASE_URL}",
                     "OPENAI_MODEL=${params.OPENAI_MODEL}",
                     "OPENAI_API_KEY=${params.OPENAI_API_KEY ?: ''}",
+                    "GEMINI_BASE_URL=${params.GEMINI_BASE_URL}",
+                    "GEMINI_MODEL=${params.GEMINI_MODEL}",
+                    "GEMINI_API_KEY=${params.GEMINI_API_KEY ?: ''}",
                     "API_KEY=${params.API_KEY ?: ''}",
                     "JUDGE_MODEL=${params.JUDGE_MODEL ?: ''}",
                     "REPORT_DIR=${env.REPORT_DIR}",
@@ -283,6 +289,58 @@ PY
                             EFFECTIVE_TARGET_URL="http://127.0.0.1:8000/invoke"
                             echo "OpenAI wrapper started (pid=$WRAPPER_PID), effective TARGET_URL=$EFFECTIVE_TARGET_URL"
                             ;;
+                        gemini_wrapper)
+                            if [ "$TARGET_TYPE" != "http" ]; then
+                                echo "TARGET_MODE=gemini_wrapper is only supported when TARGET_TYPE=http"
+                                exit 2
+                            fi
+
+                            EFFECTIVE_GEMINI_API_KEY="${GEMINI_API_KEY:-${API_KEY:-}}"
+                            if [ -z "$EFFECTIVE_GEMINI_API_KEY" ]; then
+                                echo "Cannot start gemini_wrapper: GEMINI_API_KEY (or API_KEY fallback) is empty."
+                                exit 2
+                            fi
+
+                            if [ -f "$WRAPPER_PID_FILE" ]; then
+                                OLD_PID="$(cat "$WRAPPER_PID_FILE" || true)"
+                                if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                                    kill "$OLD_PID" 2>/dev/null || true
+                                    sleep 1
+                                    kill -9 "$OLD_PID" 2>/dev/null || true
+                                fi
+                                rm -f "$WRAPPER_PID_FILE"
+                            fi
+
+                            echo "Auto-managing Gemini wrapper"
+                            nohup env \
+                                GEMINI_WRAPPER_HOST=0.0.0.0 \
+                                GEMINI_WRAPPER_PORT=8000 \
+                                GEMINI_BASE_URL="$GEMINI_BASE_URL" \
+                                GEMINI_MODEL="$GEMINI_MODEL" \
+                                GEMINI_API_KEY="$EFFECTIVE_GEMINI_API_KEY" \
+                                python3 /var/jenkins_home/scripts/eval_runner/gemini_wrapper_api.py \
+                                > "$REPORT_DIR/wrapper.log" 2>&1 &
+                            WRAPPER_PID="$!"
+                            echo "$WRAPPER_PID" > "$WRAPPER_PID_FILE"
+
+                            READY="false"
+                            for _ in $(seq 1 20); do
+                                if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+                                    READY="true"
+                                    break
+                                fi
+                                sleep 1
+                            done
+
+                            if [ "$READY" != "true" ]; then
+                                echo "Gemini wrapper startup failed. See $REPORT_DIR/wrapper.log"
+                                tail -n 100 "$REPORT_DIR/wrapper.log" || true
+                                exit 1
+                            fi
+
+                            EFFECTIVE_TARGET_URL="http://127.0.0.1:8000/invoke"
+                            echo "Gemini wrapper started (pid=$WRAPPER_PID), effective TARGET_URL=$EFFECTIVE_TARGET_URL"
+                            ;;
                         direct)
                             if [ -z "$TARGET_URL" ]; then
                                 echo "TARGET_MODE=direct requires TARGET_URL."
@@ -391,6 +449,10 @@ PY
                         if [ "${params.TARGET_MODE}" = "openai_wrapper" ]; then
                           echo "OPENAI_BASE_URL: ${params.OPENAI_BASE_URL}"
                           echo "OPENAI_MODEL: ${params.OPENAI_MODEL}"
+                        fi
+                        if [ "${params.TARGET_MODE}" = "gemini_wrapper" ]; then
+                          echo "GEMINI_BASE_URL: ${params.GEMINI_BASE_URL}"
+                          echo "GEMINI_MODEL: ${params.GEMINI_MODEL}"
                         fi
                         echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
                         echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
