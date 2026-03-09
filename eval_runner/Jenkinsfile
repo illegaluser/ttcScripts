@@ -12,6 +12,10 @@ properties([
         [$class: 'StringParameterDefinition', name: 'GEMINI_BASE_URL', defaultValue: 'https://generativelanguage.googleapis.com/v1beta', description: 'Gemini API 주소(gemini_wrapper). 기본값 그대로 사용 권장'],
         [$class: 'StringParameterDefinition', name: 'GEMINI_MODEL', defaultValue: 'gemini-2.0-flash', description: 'gemini_wrapper 대상 모델명. 예: gemini-2.0-flash, gemini-1.5-pro'],
         [$class: 'PasswordParameterDefinition', name: 'GEMINI_API_KEY', description: '(선택) Gemini 전용 키. 예: AIza... 비우면 API_KEY를 fallback으로 사용'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_MIN_INTERVAL_SEC', defaultValue: '1.0', description: 'Gemini 호출 최소 간격(초). 429가 나면 1.5~3.0으로 올리세요'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_MAX_RETRIES', defaultValue: '5', description: 'Gemini 429 재시도 횟수. 예: 5~8'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_RETRY_BASE_SEC', defaultValue: '1.0', description: 'Gemini 백오프 시작 지연(초). 예: 1.0'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_RETRY_MAX_SEC', defaultValue: '20.0', description: 'Gemini 백오프 최대 지연(초). 예: 20.0~60.0'],
         [
             $class: 'CascadeChoiceParameter',
             choiceType: 'PT_SINGLE_SELECT',
@@ -165,15 +169,17 @@ PY
                     "OLLAMA_BASE_URL=${params.OLLAMA_BASE_URL}",
                     "OPENAI_BASE_URL=${params.OPENAI_BASE_URL}",
                     "OPENAI_MODEL=${params.OPENAI_MODEL}",
-                    "OPENAI_API_KEY=${params.OPENAI_API_KEY ?: ''}",
                     "GEMINI_BASE_URL=${params.GEMINI_BASE_URL}",
                     "GEMINI_MODEL=${params.GEMINI_MODEL}",
-                    "GEMINI_API_KEY=${params.GEMINI_API_KEY ?: ''}",
-                    "API_KEY=${params.API_KEY ?: ''}",
+                    "GEMINI_MIN_INTERVAL_SEC=${params.GEMINI_MIN_INTERVAL_SEC}",
+                    "GEMINI_MAX_RETRIES=${params.GEMINI_MAX_RETRIES}",
+                    "GEMINI_RETRY_BASE_SEC=${params.GEMINI_RETRY_BASE_SEC}",
+                    "GEMINI_RETRY_MAX_SEC=${params.GEMINI_RETRY_MAX_SEC}",
                     "JUDGE_MODEL=${params.JUDGE_MODEL ?: ''}",
                     "REPORT_DIR=${env.REPORT_DIR}",
                 ]) {
                     sh '''
+                    set +x
                     set -eu
                     EFFECTIVE_TARGET_URL="$TARGET_URL"
                     WRAPPER_PID_FILE=".wrapper_pid"
@@ -318,6 +324,10 @@ PY
                                 GEMINI_BASE_URL="$GEMINI_BASE_URL" \
                                 GEMINI_MODEL="$GEMINI_MODEL" \
                                 GEMINI_API_KEY="$EFFECTIVE_GEMINI_API_KEY" \
+                                GEMINI_MIN_INTERVAL_SEC="$GEMINI_MIN_INTERVAL_SEC" \
+                                GEMINI_MAX_RETRIES="$GEMINI_MAX_RETRIES" \
+                                GEMINI_RETRY_BASE_SEC="$GEMINI_RETRY_BASE_SEC" \
+                                GEMINI_RETRY_MAX_SEC="$GEMINI_RETRY_MAX_SEC" \
                                 python3 /var/jenkins_home/scripts/eval_runner/gemini_wrapper_api.py \
                                 > "$REPORT_DIR/wrapper.log" 2>&1 &
                             WRAPPER_PID="$!"
@@ -367,6 +377,7 @@ import requests
 
 target_url = os.environ.get("EFFECTIVE_TARGET_URL", "").strip()
 target_type = os.environ.get("TARGET_TYPE", "http").strip()
+target_mode = os.environ.get("TARGET_MODE", "").strip()
 
 if not target_url:
     raise SystemExit("EFFECTIVE_TARGET_URL is empty.")
@@ -406,14 +417,38 @@ if not tcp_reachable:
     )
 
 try:
+    wrapper_modes = {"local_ollama_wrapper", "openai_wrapper", "gemini_wrapper"}
     if target_type == "http":
-        # 인증/스키마 오류와 무관하게 엔드포인트 응답성만 확인합니다.
-        response = requests.post(target_url, json={"input": "ping"}, timeout=5)
+        if target_mode in wrapper_modes:
+            # wrapper 모드에서는 먼저 로컬 wrapper 프로세스 상태를 확인합니다.
+            parsed_health = urlparse(target_url)
+            health_url = f"{parsed_health.scheme}://{parsed_health.netloc}/health"
+            health_response = requests.get(health_url, timeout=5)
+            print(f"Wrapper health probe response: HTTP {health_response.status_code}")
+            if health_response.status_code >= 400:
+                compact_body = " ".join((health_response.text or "").split())
+                raise SystemExit(
+                    f"{target_mode} health probe failed with HTTP {health_response.status_code}. "
+                    f"body={compact_body[:500]}"
+                )
+
+            # 이후 실제 invoke를 1회 호출해 upstream LLM 인증/쿼터 문제를 pytest 전에 빠르게 감지합니다.
+            response = requests.post(target_url, json={"input": "ping"}, timeout=20)
+            print(f"Wrapper invoke probe response: HTTP {response.status_code}")
+        else:
+            # direct 모드에서는 인증/스키마 오류와 무관하게 엔드포인트 응답성만 확인합니다.
+            response = requests.post(target_url, json={"input": "ping"}, timeout=5)
     else:
         response = requests.get(target_url, timeout=5)
     print(f"TARGET_URL probe response: HTTP {response.status_code}")
+    if target_mode in wrapper_modes and response.status_code >= 400:
+        compact_body = " ".join((response.text or "").split())
+        raise SystemExit(
+            f"{target_mode} probe failed with HTTP {response.status_code}. "
+            f"body={compact_body[:500]}"
+        )
 except requests.RequestException as exc:
-    print(f"TARGET_URL TCP reachable, but probe request failed: {exc}")
+    raise SystemExit(f"TARGET_URL TCP reachable, but probe request failed: {exc}")
 PY
                     '''
                 }
@@ -453,6 +488,10 @@ PY
                         if [ "${params.TARGET_MODE}" = "gemini_wrapper" ]; then
                           echo "GEMINI_BASE_URL: ${params.GEMINI_BASE_URL}"
                           echo "GEMINI_MODEL: ${params.GEMINI_MODEL}"
+                          echo "GEMINI_MIN_INTERVAL_SEC: ${params.GEMINI_MIN_INTERVAL_SEC}"
+                          echo "GEMINI_MAX_RETRIES: ${params.GEMINI_MAX_RETRIES}"
+                          echo "GEMINI_RETRY_BASE_SEC: ${params.GEMINI_RETRY_BASE_SEC}"
+                          echo "GEMINI_RETRY_MAX_SEC: ${params.GEMINI_RETRY_MAX_SEC}"
                         fi
                         echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
                         echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
@@ -460,8 +499,8 @@ PY
                         echo "--------------------------------------------------"
                         export TARGET_URL="\$EFFECTIVE_TARGET_URL"
                         export TARGET_TYPE='${params.TARGET_TYPE}'
-                        export API_KEY='${params.API_KEY}'
-                        export TARGET_AUTH_HEADER='${params.TARGET_AUTH_HEADER}'
+                        export API_KEY="${API_KEY:-}"
+                        export TARGET_AUTH_HEADER="${TARGET_AUTH_HEADER:-}"
                         export JUDGE_MODEL="\$EFFECTIVE_JUDGE_MODEL"
                         export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
                         export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'

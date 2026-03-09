@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import json
 import os
+import random
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
@@ -15,6 +18,13 @@ GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_GENERATE_URL = f"{GEMINI_BASE_URL}/models/{quote(GEMINI_MODEL, safe='')}:generateContent"
+GEMINI_MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "5"))
+GEMINI_RETRY_BASE_SEC = float(os.environ.get("GEMINI_RETRY_BASE_SEC", "1.0"))
+GEMINI_RETRY_MAX_SEC = float(os.environ.get("GEMINI_RETRY_MAX_SEC", "20.0"))
+GEMINI_MIN_INTERVAL_SEC = float(os.environ.get("GEMINI_MIN_INTERVAL_SEC", "1.0"))
+
+_REQUEST_LOCK = threading.Lock()
+_LAST_REQUEST_TS = 0.0
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
@@ -104,16 +114,84 @@ def _extract_block_reason(data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _response_detail(response: requests.Response) -> str:
+    text = (response.text or "").strip()
+    if not text:
+        return f"HTTP {response.status_code}"
+    compact = " ".join(text.split())
+    return compact[:600]
+
+
+def _looks_like_quota_exhausted(detail_text: str) -> bool:
+    text = detail_text.lower()
+    quota_hints = [
+        "exceeded your current quota",
+        "quota",
+        "billing",
+        "insufficient",
+        "resource_exhausted",
+    ]
+    return any(hint in text for hint in quota_hints)
+
+
+def _wait_min_interval() -> None:
+    global _LAST_REQUEST_TS
+    with _REQUEST_LOCK:
+        now = time.monotonic()
+        wait_sec = GEMINI_MIN_INTERVAL_SEC - (now - _LAST_REQUEST_TS)
+        if wait_sec > 0:
+            time.sleep(wait_sec)
+        _LAST_REQUEST_TS = time.monotonic()
+
+
+def _compute_retry_wait(response: requests.Response, attempt: int) -> float:
+    retry_after = response.headers.get("Retry-After", "").strip()
+    if retry_after:
+        try:
+            retry_after_sec = float(retry_after)
+            if retry_after_sec > 0:
+                return min(retry_after_sec, GEMINI_RETRY_MAX_SEC)
+        except ValueError:
+            pass
+    exponential = GEMINI_RETRY_BASE_SEC * (2 ** max(attempt - 1, 0))
+    jitter = random.uniform(0.0, 0.5)
+    return min(exponential + jitter, GEMINI_RETRY_MAX_SEC)
+
+
 def _call_gemini(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is empty.")
 
-    response = requests.post(
-        f"{GEMINI_GENERATE_URL}?key={GEMINI_API_KEY}",
-        json=_build_gemini_request(payload),
-        headers={"Content-Type": "application/json"},
-        timeout=300,
-    )
+    request_payload = _build_gemini_request(payload)
+    response: Optional[requests.Response] = None
+    detail = ""
+    for attempt in range(1, GEMINI_MAX_RETRIES + 1):
+        _wait_min_interval()
+        response = requests.post(
+            f"{GEMINI_GENERATE_URL}?key={GEMINI_API_KEY}",
+            json=request_payload,
+            headers={"Content-Type": "application/json"},
+            timeout=300,
+        )
+        if response.status_code != 429:
+            break
+
+        detail = _response_detail(response)
+        if _looks_like_quota_exhausted(detail):
+            raise RuntimeError(f"gemini quota exceeded (HTTP 429): {detail}")
+
+        if attempt >= GEMINI_MAX_RETRIES:
+            break
+        time.sleep(_compute_retry_wait(response, attempt))
+
+    if response is None:
+        raise RuntimeError("gemini request failed before response was created.")
+
+    if response.status_code == 429:
+        detail = detail or _response_detail(response)
+        raise RuntimeError(
+            f"gemini rate limit exceeded (HTTP 429) after {GEMINI_MAX_RETRIES} retries: {detail}"
+        )
     response.raise_for_status()
     data = response.json() or {}
 
@@ -154,6 +232,8 @@ class GeminiWrapperHandler(BaseHTTPRequestHandler):
                     "model": GEMINI_MODEL,
                     "gemini_base_url": GEMINI_BASE_URL,
                     "has_api_key": bool(GEMINI_API_KEY),
+                    "max_retries": GEMINI_MAX_RETRIES,
+                    "min_interval_sec": GEMINI_MIN_INTERVAL_SEC,
                 },
             )
             return
@@ -181,6 +261,15 @@ class GeminiWrapperHandler(BaseHTTPRequestHandler):
             _json_response(self, status_code, {"error": f"gemini http error: {detail}"})
         except requests.RequestException as exc:
             _json_response(self, HTTPStatus.BAD_GATEWAY, {"error": f"gemini connection error: {exc}"})
+        except RuntimeError as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if "quota exceeded" in lowered or "rate limit exceeded" in lowered:
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {"error": message})
+            elif "api_key is empty" in lowered:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {"error": message})
+            else:
+                _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": message})
         except Exception as exc:
             _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 

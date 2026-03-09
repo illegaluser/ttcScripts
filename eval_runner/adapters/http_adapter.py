@@ -73,6 +73,29 @@ class GenericHttpAdapter(BaseAdapter):
             return [str(item) for item in docs]
         return []
 
+    @staticmethod
+    def _extract_error_detail(data: Dict, raw_response: str) -> str:
+        """
+        4xx/5xx 응답에서 사람이 바로 원인을 파악할 수 있도록 요약 에러 메시지를 구성합니다.
+        """
+        if isinstance(data, dict):
+            err_obj = data.get("error")
+            if isinstance(err_obj, dict):
+                for key in ("message", "detail", "reason", "error"):
+                    value = err_obj.get(key)
+                    if value:
+                        return str(value)[:500]
+            elif err_obj:
+                return str(err_obj)[:500]
+
+            for key in ("message", "detail", "reason"):
+                value = data.get(key)
+                if value:
+                    return str(value)[:500]
+
+        compact = " ".join((raw_response or "").split())
+        return compact[:500]
+
     def _build_headers(self) -> Dict[str, str]:
         """
         요청 헤더를 조립합니다.
@@ -143,12 +166,16 @@ class GenericHttpAdapter(BaseAdapter):
 
             if response.status_code >= 400:
                 # 실패 응답도 리포트에 남길 수 있도록 가능한 정보를 최대한 담아 반환합니다.
+                detail = self._extract_error_detail(data, raw_response)
+                error_message = f"HTTP {response.status_code}"
+                if detail:
+                    error_message = f"{error_message}: {detail}"
                 return UniversalEvalOutput(
                     input=input_text,
                     actual_output=actual_output or str(data),
                     http_status=response.status_code,
                     raw_response=raw_response,
-                    error=f"HTTP {response.status_code}",
+                    error=error_message,
                     latency_ms=latency_ms,
                     usage=usage,
                 )
