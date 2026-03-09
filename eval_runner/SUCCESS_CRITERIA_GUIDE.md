@@ -33,6 +33,13 @@
 
 이 우선순위는 LLM 오판(예: 실제 응답에 키워드가 있는데도 없다고 판단)을 줄이기 위한 운영 규칙입니다.
 
+### 2.2 `expected_output`과의 우선순위
+
+같은 row에 `success_criteria`와 `expected_output`이 모두 있을 때:
+
+- **TaskCompletion 판정은 `success_criteria`를 우선** 사용합니다.
+- `expected_output`은 주로 보고서 비교/가독성 용도로 사용됩니다.
+
 ## 3. 지원 조건 상세
 
 ### 3.1. `status_code=<숫자>`

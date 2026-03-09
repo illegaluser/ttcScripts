@@ -24,6 +24,7 @@
 
 - **다중 턴:** `golden.csv` 파일에 `conversation_id`와 `turn_id` 컬럼을 추가하면, 시스템이 자동으로 다중 턴 대화로 인식하여 평가합니다.
 - **과업 완료:** `success_criteria`가 `응답에 X가 포함되어야 함` 패턴이면 규칙 기반으로 먼저 판정하고, 그 외 자연어 기준은 `GEval`이 채점합니다.
+  - 같은 row에 `success_criteria`와 `expected_output`이 함께 있을 때, **TaskCompletion 판정은 `success_criteria`를 우선 사용**합니다.
 
 #### 다중 턴 시험지 작성 규칙
 
@@ -1147,6 +1148,7 @@ PY
 
 - **Jenkins UI**: 빌드 상세 페이지의 **Artifacts** 에서 `eval-reports/build-<BUILD_NUMBER>/summary.html`, `summary.json`, `results.xml`을 확인합니다.
 - **`summary.html`**: conversation/turn 단위 상태, metric별 score/threshold/reason과 함께 각 턴의 `입력값`, `기대값(expected_output)`, `성공조건(success_criteria)`, `실제 AI 응답(actual_output)`을 함께 보여주는 보고서입니다.
+  - 위 4개 컬럼은 비교 가능성을 위해 **원문 그대로 표시**하며, 자동 번역/재구성을 적용하지 않습니다.
 - **AI Eval Summary 탭**: `htmlpublisher` 플러그인이 있으면 Jenkins 빌드 화면에 `AI Eval Summary` 탭이 생성되어 `summary.html`을 바로 열 수 있습니다.
 - **`summary.json`**: 후처리 자동화나 외부 대시보드 적재를 위한 기계 판독용 원본입니다.
 - **`results.xml`**: Jenkins의 JUnit 테스트 결과 뷰와 연동되는 표준 결과 파일입니다.

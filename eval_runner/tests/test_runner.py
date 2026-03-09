@@ -623,8 +623,10 @@ def _render_summary_html():
     metric_averages = SUMMARY_STATE["metric_averages"]
     all_conversations = SUMMARY_STATE.get("conversations", [])
 
-    def _short_text(value, limit=180):
-        text = _translate_text_to_korean(str(value or "")).strip()
+    def _short_text(value, limit=180, translate=True):
+        text = str(value or "").strip()
+        if translate:
+            text = _translate_text_to_korean(text).strip()
         if not text:
             return "-"
         return text if len(text) <= limit else f"{text[:limit]}..."
@@ -707,10 +709,10 @@ def _render_summary_html():
             expected_output_text = str(turn.get("expected_output") or "-")
             success_criteria_text = str(turn.get("success_criteria") or "-")
             actual_output_text = str(turn.get("actual_output") or turn.get("raw_response") or "-")
-            input_preview = _escape_with_linebreaks(_short_text(input_text, limit=220), max_line_len=60)
-            expected_preview = _escape_with_linebreaks(_short_text(expected_output_text, limit=180), max_line_len=60)
-            success_criteria_preview = _escape_with_linebreaks(_short_text(success_criteria_text, limit=180), max_line_len=60)
-            output_preview = _escape_with_linebreaks(_short_text(actual_output_text, limit=260), max_line_len=60)
+            input_preview = _escape_with_linebreaks(_short_text(input_text, limit=220, translate=False), max_line_len=60)
+            expected_preview = _escape_with_linebreaks(_short_text(expected_output_text, limit=180, translate=False), max_line_len=60)
+            success_criteria_preview = _escape_with_linebreaks(_short_text(success_criteria_text, limit=180, translate=False), max_line_len=60)
+            output_preview = _escape_with_linebreaks(_short_text(actual_output_text, limit=260, translate=False), max_line_len=60)
             actual_output = escape(actual_output_text)
             input_full = escape(input_text)
             expected_output_full = escape(expected_output_text)
@@ -1199,19 +1201,7 @@ def _evaluate_simple_contains_criteria(criteria: str, actual_output: str):
         return None
 
     criteria_text = str(criteria).strip()
-    patterns = [
-        r"응답에\s*[\"'“”‘’]?(?P<keyword>.+?)[\"'“”‘’]?\s*(?:이|가|을|를)?\s*포함되어야\s*함",
-        r"응답에\s*[\"'“”‘’]?(?P<keyword>.+?)[\"'“”‘’]?\s*(?:이|가|을|를)?\s*포함되어야\s*합니다",
-        r"(?:response|output)\s+must\s+include\s+[\"']?(?P<keyword>.+?)[\"']?$",
-    ]
-
-    keyword = None
-    for pattern in patterns:
-        match = re.search(pattern, criteria_text, re.IGNORECASE)
-        if match:
-            keyword = (match.group("keyword") or "").strip()
-            break
-
+    keyword = _extract_simple_contains_keyword(criteria_text)
     if not keyword:
         return None
 
@@ -1220,6 +1210,23 @@ def _evaluate_simple_contains_criteria(criteria: str, actual_output: str):
     if not normalized_keyword:
         return None
     return normalized_keyword in normalized_actual
+
+
+def _extract_simple_contains_keyword(criteria_text: str):
+    """
+    '응답에 X가 포함되어야 함/합니다' 패턴에서 X 키워드를 추출합니다.
+    """
+    patterns = [
+        r"응답에\s*[\"'“”‘’]?(?P<keyword>.+?)[\"'“”‘’]?\s*(?:이|가|을|를)?\s*포함되어야\s*함",
+        r"응답에\s*[\"'“”‘’]?(?P<keyword>.+?)[\"'“”‘’]?\s*(?:이|가|을|를)?\s*포함되어야\s*합니다",
+        r"(?:response|output)\s+must\s+include\s+[\"']?(?P<keyword>.+?)[\"']?$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, criteria_text, re.IGNORECASE)
+        if match:
+            return (match.group("keyword") or "").strip()
+    return None
 
 
 def _json_get_path(obj, path: str):
@@ -1305,12 +1312,12 @@ def _score_task_completion(turn, result, judge, span=None):
     elif criteria_mode == "geval":
         simple_contains_result = _evaluate_simple_contains_criteria(success_criteria, result.actual_output)
         if simple_contains_result is not None:
+            matched_keyword = _extract_simple_contains_keyword(str(success_criteria or "")) or ""
             score = 1.0 if simple_contains_result else 0.0
-            reason = "Rule-based natural-language contains check"
+            reason = f"규칙 기반 포함 검사 통과: 응답에 '{matched_keyword}'가 포함되어 있습니다."
             if not simple_contains_result:
                 reason = (
-                    f"Rule-based natural-language contains check failed. "
-                    f"criteria={success_criteria!r}, actual_output={result.actual_output!r}"
+                    f"규칙 기반 포함 검사 실패: 응답에 '{matched_keyword}'가 포함되어야 하나 찾지 못했습니다."
                 )
         else:
             # 문서가 권장하는 자연어 success_criteria는 GEval 심판이 판정합니다.
