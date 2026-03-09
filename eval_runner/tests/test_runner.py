@@ -1180,6 +1180,48 @@ def _parse_success_criteria_mode(criteria: str) -> str:
     return "geval"
 
 
+def _normalize_match_text(text: str) -> str:
+    """
+    포함 여부 비교용 정규화:
+    - 대소문자 무시
+    - 공백/개행 제거
+    """
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _evaluate_simple_contains_criteria(criteria: str, actual_output: str):
+    """
+    자연어 success_criteria 중 '응답에 X가 포함되어야 함' 패턴은
+    LLM 심판 오판을 피하기 위해 결정론적으로 먼저 판정합니다.
+    매칭 가능한 규칙이면 True/False, 아니면 None을 반환합니다.
+    """
+    if not criteria:
+        return None
+
+    criteria_text = str(criteria).strip()
+    patterns = [
+        r"응답에\s*[\"'“”‘’]?(?P<keyword>.+?)[\"'“”‘’]?\s*(?:이|가|을|를)?\s*포함되어야\s*함",
+        r"응답에\s*[\"'“”‘’]?(?P<keyword>.+?)[\"'“”‘’]?\s*(?:이|가|을|를)?\s*포함되어야\s*합니다",
+        r"(?:response|output)\s+must\s+include\s+[\"']?(?P<keyword>.+?)[\"']?$",
+    ]
+
+    keyword = None
+    for pattern in patterns:
+        match = re.search(pattern, criteria_text, re.IGNORECASE)
+        if match:
+            keyword = (match.group("keyword") or "").strip()
+            break
+
+    if not keyword:
+        return None
+
+    normalized_actual = _normalize_match_text(actual_output)
+    normalized_keyword = _normalize_match_text(keyword)
+    if not normalized_keyword:
+        return None
+    return normalized_keyword in normalized_actual
+
+
 def _json_get_path(obj, path: str):
     """
     json.foo.bar[0] 형태의 단순 경로 문법을 따라 값을 추출합니다.
@@ -1261,26 +1303,36 @@ def _score_task_completion(turn, result, judge, span=None):
         score = 1.0 if _evaluate_rule_based_criteria(success_criteria, result) else 0.0
         reason = "Rule-based success_criteria evaluation"
     elif criteria_mode == "geval":
-        # 문서가 권장하는 자연어 success_criteria는 GEval 심판이 판정합니다.
-        task_completion_metric = GEval(
-            name="TaskCompletion",
-            criteria=TASK_COMPLETION_CRITERIA,
-            evaluation_params=[
-                LLMTestCaseParams.INPUT,
-                LLMTestCaseParams.ACTUAL_OUTPUT,
-                LLMTestCaseParams.EXPECTED_OUTPUT,
-            ],
-            model=judge,
-            async_mode=False,
-        )
-        completion_test_case = LLMTestCase(
-            input=turn["input"],
-            actual_output=result.actual_output,
-            expected_output=success_criteria,
-        )
-        task_completion_metric.measure(completion_test_case)
-        score = float(task_completion_metric.score)
-        reason = task_completion_metric.reason
+        simple_contains_result = _evaluate_simple_contains_criteria(success_criteria, result.actual_output)
+        if simple_contains_result is not None:
+            score = 1.0 if simple_contains_result else 0.0
+            reason = "Rule-based natural-language contains check"
+            if not simple_contains_result:
+                reason = (
+                    f"Rule-based natural-language contains check failed. "
+                    f"criteria={success_criteria!r}, actual_output={result.actual_output!r}"
+                )
+        else:
+            # 문서가 권장하는 자연어 success_criteria는 GEval 심판이 판정합니다.
+            task_completion_metric = GEval(
+                name="TaskCompletion",
+                criteria=TASK_COMPLETION_CRITERIA,
+                evaluation_params=[
+                    LLMTestCaseParams.INPUT,
+                    LLMTestCaseParams.ACTUAL_OUTPUT,
+                    LLMTestCaseParams.EXPECTED_OUTPUT,
+                ],
+                model=judge,
+                async_mode=False,
+            )
+            completion_test_case = LLMTestCase(
+                input=turn["input"],
+                actual_output=result.actual_output,
+                expected_output=success_criteria,
+            )
+            task_completion_metric.measure(completion_test_case)
+            score = float(task_completion_metric.score)
+            reason = task_completion_metric.reason
     else:
         score = 1.0 if result.http_status < 400 else 0.0
         reason = "No success_criteria provided; falling back to HTTP success."
