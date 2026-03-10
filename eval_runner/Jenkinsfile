@@ -499,8 +499,8 @@ PY
                         echo "--------------------------------------------------"
                         export TARGET_URL="\$EFFECTIVE_TARGET_URL"
                         export TARGET_TYPE='${params.TARGET_TYPE}'
-                        export API_KEY="${API_KEY:-}"
-                        export TARGET_AUTH_HEADER="${TARGET_AUTH_HEADER:-}"
+                        export API_KEY="\${API_KEY:-}"
+                        export TARGET_AUTH_HEADER="\${TARGET_AUTH_HEADER:-}"
                         export JUDGE_MODEL="\$EFFECTIVE_JUDGE_MODEL"
                         export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
                         export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'
