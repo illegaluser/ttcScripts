@@ -1,0 +1,83 @@
+pipeline {
+  agent any
+
+  parameters {
+    string(name: 'SONAR_PROJECT_KEY', defaultValue: 'dscore-ttc-sample', description: 'SonarQube Project Key')
+    string(name: 'SEVERITIES', defaultValue: 'BLOCKER,CRITICAL', description: 'Sonar severities')
+    string(name: 'STATUSES', defaultValue: 'OPEN,REOPENED,CONFIRMED', description: 'Sonar statuses')
+    string(name: 'MAX_ISSUES', defaultValue: '1', description: 'PoC: Dify에 보낼 이슈 건수(기본 1)')
+    string(name: 'GITLAB_PROJECT', defaultValue: 'root/dscore-ttc-sample', description: 'GitLab project path (예: group/project)')
+  }
+
+  environment {
+    SONAR_HOST_URL  = 'http://sonarqube:9000'
+    DIFY_API_BASE   = 'http://api:5001/v1'
+    GITLAB_HOST_URL = 'http://gitlab:8929'
+    SCRIPTS_DIR     = '/var/jenkins_home/scripts'
+  }
+
+  stages {
+    stage('(1) Export Sonar Issues') {
+      steps {
+        withCredentials([string(credentialsId: 'sonarqube-token', variable: 'SONAR_TOKEN')]) {
+          sh """
+            set -e
+            python3 ${SCRIPTS_DIR}/sonar_issue_exporter.py \
+              --sonar-host-url "${SONAR_HOST_URL}" \
+              --sonar-token "${SONAR_TOKEN}" \
+              --project-key "${params.SONAR_PROJECT_KEY}" \
+              --severities "${params.SEVERITIES}" \
+              --statuses "${params.STATUSES}" \
+              --output "sonar_issues.json"
+          """
+        }
+      }
+    }
+
+    stage('(2) Analyze by Dify Workflow') {
+      steps {
+        withCredentials([string(credentialsId: 'dify-workflow-key', variable: 'DIFY_API_KEY')]) {
+          sh """
+            set -e
+            python3 ${SCRIPTS_DIR}/dify_sonar_issue_analyzer.py \
+              --dify-api-base "${DIFY_API_BASE}" \
+              --dify-api-key "${DIFY_API_KEY}" \
+              --input "sonar_issues.json" \
+              --output "llm_analysis.jsonl" \
+              --user "jenkins" \
+              --response-mode "blocking" \
+              --timeout 1000 \
+              --max-issues ${params.MAX_ISSUES} \
+              --print-first-errors 5
+          """
+        }
+      }
+    }
+
+    stage('(3) Create GitLab Issues (Dedup)') {
+      steps {
+        sh """
+          set -e
+          # PoC: PAT 하드코딩 유지
+          set +x
+          GITLAB_TOKEN="glpat-M_J3Ze9BeZsbFcHd6GkuO286MQp1OjEH.01.0w013cs97"
+
+          python3 ${SCRIPTS_DIR}/gitlab_issue_creator.py \
+            --gitlab-host-url "${GITLAB_HOST_URL}" \
+            --gitlab-token "\$GITLAB_TOKEN" \
+            --gitlab-project "${params.GITLAB_PROJECT}" \
+            --input "llm_analysis.jsonl" \
+            --output "gitlab_issues_created.json" \
+            --sonar-host-url "${SONAR_HOST_URL}" \
+            --sonar-public-url "http://localhost:9000"
+        """
+      }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'sonar_issues.json,llm_analysis.jsonl,gitlab_issues_created.json', fingerprint: true
+    }
+  }
+}

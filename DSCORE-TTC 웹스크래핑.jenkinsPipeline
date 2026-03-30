@@ -1,0 +1,82 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'ROOT_URL', 
+            defaultValue: '', 
+            description: '웹 수집 URL (예: https://ko.wikipedia.org/wiki/프로젝트_관리)'
+        )
+    }
+
+    environment {
+        SCRIPTS_DIR = '/var/jenkins_home/scripts'
+        RESULT_DIR = '/var/knowledges/docs/result'
+        DIFY_DOC_FORM = "text_model"
+        DIFY_DOC_LANGUAGE = "Korean"
+    }
+
+    stages {
+        stage("0. Precheck") {
+            steps {
+                echo "[Precheck] 환경 및 Dify 연결 확인"
+                sh """
+                    set -e
+                    python3 -m playwright install-deps chromium || true
+                    curl -sS -o /dev/null -w "%{http_code}\\n" http://api:5001/ || true
+                """
+            }
+        }
+
+        stage("1. Local Document Conversion") {
+            steps {
+                echo "[Convert] 로컬 문서 변환 시작 (기존 result 폴더 초기화 포함)"
+                sh "python3 ${SCRIPTS_DIR}/doc_processor.py convert"
+            }
+        }
+
+        stage("2. Web Scraping & Refinement") {
+            when { expression { params.ROOT_URL != '' } }
+            steps {
+                withEnv(["TARGET_URL=${params.ROOT_URL}"]) {
+                    echo "[Crawl] 웹 수집 데이터를 result 폴더에 추가"
+                    sh "python3 ${SCRIPTS_DIR}/domain_knowledge_builder.py \"${TARGET_URL}\""
+                }
+            }
+        }
+
+        stage("3. Manual Approval") {
+            steps {
+                script {
+                    input message: "로컬 및 웹 지식이 모두 수집되었습니다. /var/knowledges/docs/result 를 확인 후 업로드를 승인하시겠습니까?", 
+                          ok: "승인 및 업로드",
+                          submitter: "admin,KYUNGSUK_LEE"
+                }
+            }
+        }
+
+        stage("4. Final Upload to Dify") {
+            steps {
+                withCredentials([
+                    string(credentialsId: "dify-knowledge-key", variable: "DIFY_API_KEY"),
+                    string(credentialsId: "dify-dataset-id", variable: "DIFY_DATASET_ID")
+                ]) {
+                    echo "[Upload] Dify 업로드 시작"
+                    // [중요] 인자 순서 수정: <API_KEY> <DATASET_ID> 순서여야 합니다.
+                    sh '''
+                        python3 /var/jenkins_home/scripts/doc_processor.py upload \
+                        "$DIFY_API_KEY" "$DIFY_DATASET_ID" "$DIFY_DOC_FORM" "$DIFY_DOC_LANGUAGE"
+                    '''
+                    echo "[Upload] 지식 동기화 완료"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "[Post-Action] 최종 결과물 폴더 상태:"
+            sh "ls -R /var/knowledges/docs/result || echo 'No files found'"
+        }
+    }
+}

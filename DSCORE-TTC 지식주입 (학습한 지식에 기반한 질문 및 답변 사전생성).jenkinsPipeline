@@ -1,0 +1,68 @@
+pipeline {
+    agent any
+
+    environment {
+        // 스크립트가 위치한 컨테이너 내부 경로
+        SCRIPTS_DIR = '/var/jenkins_home/scripts'
+        
+        // [수정] Q&A형 지식 주입이므로 qa_model로 설정
+        DIFY_DOC_FORM = "qa_model"
+        DIFY_DOC_LANG = "Korean"
+    }
+
+    stages {
+        stage("0. Precheck") {
+            steps {
+                echo "[Precheck] Jenkins 컨테이너 및 네트워크 상태 확인"
+                sh """
+                    echo "Current User: \$(whoami)"
+                    python3 --version
+                    echo "[Check] 지식 저장소 디렉터리 상태"
+                    ls -al /var/knowledges/docs/org || true
+                    ls -al /var/knowledges/docs/result || true
+                    
+                    echo "[Check] Dify API 연결성 확인 (DNS: api)"
+                    curl -sS -o /dev/null -w "%{http_code}\\n" http://api:5001/ || true
+                """
+            }
+        }
+
+        stage("1. Convert Documents") {
+            steps {
+                echo "[Convert] 원본 문서(PDF/PPTX/DOCX 등)를 Markdown으로 변환 시작"
+                sh "python3 ${SCRIPTS_DIR}/doc_processor.py convert"
+                
+                echo "[Convert] 변환 완료 파일 목록"
+                sh "ls -al /var/knowledges/docs/result || true"
+            }
+        }
+
+        stage("2. Upload to Dify") {
+            steps {
+                // [수정] QA 전용 Credentials ID를 사용하고, 변수명을 sh 블록과 일치시킵니다.
+                withCredentials([
+                    string(credentialsId: "dify-knowledge-key-qa", variable: 'DIFY_API_KEY_QA'),
+                    string(credentialsId: "dify-dataset-id-qa", variable: 'DIFY_DATASET_ID_QA')
+                ]) {
+                    echo "[Upload] Dify Q&A 지식베이스 전송 시작"
+                    
+                    // doc_processor.py 순서: upload <API_KEY> <DATASET_ID> <doc_form> <doc_language>
+                    sh """
+                        python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                            "${DIFY_API_KEY_QA}" \
+                            "${DIFY_DATASET_ID_QA}" \
+                            "${DIFY_DOC_FORM}" \
+                            "${DIFY_DOC_LANG}"
+                    """
+                    echo "[Upload] 모든 작업이 완료되었습니다."
+                }
+            }
+        }
+    }
+    
+    post {
+        failure {
+            echo "[Alert] 파이프라인 실행 중 오류가 발생했습니다. Console Output을 확인하세요."
+        }
+    }
+}
