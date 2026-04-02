@@ -4,41 +4,27 @@ networks:
 
 services:
   # ==========================================
-  # 1. ClickHouse & Zookeeper (인증 및 매크로 해결)
+  # 1. Langfuse용 ClickHouse (Windows 대응 단일 노드)
   # ==========================================
-  zookeeper:
-    image: zookeeper:3.9
-    container_name: zookeeper
-    networks:
-      - devops-net
-    restart: unless-stopped
-
   clickhouse-langfuse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24.12
     container_name: clickhouse-langfuse
-    depends_on:
-      - zookeeper
-    user: "root"
+    user: "101:101"
     environment:
-      # [팩트] 이 환경변수들은 컨테이너가 '처음' 생성될 때만 유효합니다.
       CLICKHOUSE_DB: langfuse
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: langfusepassword
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
-    command: >
-      /bin/bash -c "
-      mkdir -p /etc/clickhouse-server/config.d &&
-      printf '<clickhouse>\n  <zookeeper>\n    <node>\n      <host>zookeeper</host>\n      <port>2181</port>\n    </node>\n  </zookeeper>\n  <macros>\n    <shard>1</shard>\n    <replica>node1</replica>\n  </macros>\n</clickhouse>' > /etc/clickhouse-server/config.d/infra.xml &&
-      exec /entrypoint.sh"
     volumes:
-      - ./data/clickhouse-langfuse:/var/lib/clickhouse
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
     networks:
       - devops-net
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--user", "default", "--password", "langfusepassword", "--query", "SELECT 1"]
+      test: ["CMD-SHELL", "clickhouse-client --host 127.0.0.1 --port 9000 --user default --password langfusepassword --query 'SELECT 1'"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 20
+      start_period: 40s
     restart: unless-stopped
 
   # ==========================================
@@ -49,6 +35,11 @@ services:
     container_name: redis-langfuse
     networks:
       - devops-net
+    healthcheck:                                            # 추가
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
     restart: unless-stopped
 
   minio:
@@ -57,15 +48,22 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadminpassword
-    command: server /data --console-address ":9001"
+    entrypoint: sh                                          # 추가
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'  # 변경
     volumes:
       - ./data/minio:/data
     networks:
       - devops-net
+    healthcheck:                                            # 추가
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
   # ==========================================
-  # 3. Langfuse Server (500 및 Auth 에러 해결본)
+  # 3. Langfuse Server + PostgreSQL
   # ==========================================
   db-langfuse:
     image: postgres:15-alpine
@@ -78,52 +76,72 @@ services:
       - ./data/postgres-langfuse:/var/lib/postgresql/data
     networks:
       - devops-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
   langfuse-server:
-    image: langfuse/langfuse:latest
+    image: langfuse/langfuse:3                              # latest → 3
     container_name: langfuse-server
     depends_on:
       clickhouse-langfuse:
         condition: service_healthy
       db-langfuse:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy                          # service_started → service_healthy
+      minio:
+        condition: service_healthy                          # service_started → service_healthy
     ports:
       - "3000:3000"
-    environment:
+    environment: &langfuse-env                              # 앵커 추가 (worker 재사용)
       DATABASE_URL: "postgresql://postgres:postgrespassword@db-langfuse:5432/langfuse"
-      # [해결] 공식 가이드 규격: 64자리 16진수 키
-      ENCRYPTION_KEY: "66141315807908c691f148e652a926f743770335661601a4e5251c890f845a75" 
+      ENCRYPTION_KEY: "66141315807908c691f148e652a926f743770335661601a4e5251c890f845a75"
       SALT: "dscore_secure_salt_2026"
-      
       NEXTAUTH_URL: "http://localhost:3000"
       NEXTAUTH_SECRET: "dscore_super_secret_key"
-      
-      # Redis 및 ClickHouse 연결 정보
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
-      CLICKHOUSE_URL: "http://default:langfusepassword@clickhouse-langfuse:8123/langfuse"
-      CLICKHOUSE_MIGRATION_URL: "clickhouse://default:langfusepassword@clickhouse-langfuse:9000/langfuse"
+      CLICKHOUSE_URL: "http://clickhouse-langfuse:8123"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse-langfuse:9000"
       CLICKHOUSE_USER: "default"
       CLICKHOUSE_PASSWORD: "langfusepassword"
       CLICKHOUSE_DB: "langfuse"
-      
-      # MinIO/S3 설정
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://minio:9000"
       LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "minioadmin"
       LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "minioadminpassword"
       LANGFUSE_S3_EVENT_UPLOAD_REGION: "us-east-1"
-      
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       TELEMETRY_ENABLED: "false"
     networks:
       - devops-net
     restart: unless-stopped
 
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3                       # V3 필수 컨테이너
+    container_name: langfuse-worker
+    depends_on:
+      clickhouse-langfuse:
+        condition: service_healthy
+      db-langfuse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *langfuse-env                                     # langfuse-server와 동일 환경변수
+    networks:
+      - devops-net
+    restart: unless-stopped
   # ==========================================
-  # 4. DevOps Stack (원래 설정 완전 복구)
+  # 4. DevOps Stack
   # ==========================================
   postgres-sonar:
     image: postgres:15-alpine
@@ -146,7 +164,7 @@ services:
       SONAR_JDBC_URL: jdbc:postgresql://postgres-sonar:5432/sonar
       SONAR_JDBC_USERNAME: sonar
       SONAR_JDBC_PASSWORD: sonarpassword
-      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true" # 필수 복구
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
     ports:
       - "9000:9000"
     volumes:
@@ -160,7 +178,6 @@ services:
     image: gitlab/gitlab-ce:18.6.2-ce.0
     container_name: gitlab
     hostname: gitlab.local
-    platform: linux/arm64 # 필수 복구
     environment:
       GITLAB_OMNIBUS_CONFIG: |
         external_url 'http://localhost:8929'
@@ -180,6 +197,9 @@ services:
       - devops-net
     shm_size: "256m"
 
+  # ==========================================
+  # 5. 통합 평가 환경이 빌드된 Jenkins
+  # ==========================================
   jenkins:
     build:
       context: .
@@ -191,8 +211,12 @@ services:
       - "50000:50000"
     volumes:
       - ./data/jenkins:/var/jenkins_home
-      - /var/run/docker.sock:/var/run/docker.sock # 필수 복구
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - devops-net
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+volumes:
+  clickhouse_data:
+  clickhouse_logs:
