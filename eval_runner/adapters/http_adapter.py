@@ -1,3 +1,17 @@
+"""
+http_adapter.py — HTTP API 기반 AI 에이전트 평가 어댑터
+
+평가 대상 AI가 REST API(예: Dify Chatflow, Ollama Wrapper, OpenAI 호환 API)인 경우
+이 어댑터를 사용합니다.
+
+[주요 기능]
+- 다중 턴 대화 지원: 이전 대화 이력을 messages 배열로 포함하여 전송
+- 다양한 API 호환: query/input/messages를 동시에 전송하여 대부분의 LLM API와 호환
+- 응답 정규화: 다양한 응답 형식(answer/response/text/output/message)에서 답변을 추출
+- 토큰 사용량 추출: prompt_tokens/completion_tokens를 표준화된 형식으로 변환
+- 에러 처리: HTTP 4xx/5xx 응답도 구조화하여 리포트에 실패 원인이 남도록 처리
+"""
+
 import json
 import time
 from typing import Dict, List, Optional
@@ -9,7 +23,8 @@ from .base import BaseAdapter, UniversalEvalOutput
 
 class GenericHttpAdapter(BaseAdapter):
     """
-    대상 AI가 API일 때 작동하며, 대화 기록(history)을 포함한 다중 턴 요청을 지원합니다.
+    HTTP API 기반 AI 에이전트를 호출하고 결과를 UniversalEvalOutput으로 표준화하는 어댑터.
+    대화 기록(history)을 포함한 다중 턴 요청을 지원합니다.
     """
 
     @staticmethod

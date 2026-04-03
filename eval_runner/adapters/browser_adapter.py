@@ -1,3 +1,23 @@
+"""
+browser_adapter.py — 웹 브라우저 UI 기반 AI 에이전트 평가 어댑터
+
+평가 대상 AI가 웹 채팅 UI(예: Dify 챗봇, 사내 AI 어시스턴트)인 경우 이 어댑터를 사용합니다.
+실제 사용자와 동일하게 브라우저에서 질문을 입력하고 화면에 표시되는 답변을 수집합니다.
+
+[주요 기능]
+- Playwright 기반 브라우저 자동화 (Chromium headless)
+- 멀티턴 대화를 위한 세션 유지: 같은 conversation 동안 동일한 브라우저 탭 유지
+- 환경변수 기반 셀렉터 설정: 사이트마다 다른 DOM 구조에 코드 수정 없이 대응
+- 입력(textarea) → 전송(버튼/Enter) → 응답 대기 → 텍스트 추출의 자연스러운 흐름
+
+[환경변수 설정]
+- UI_INPUT_SELECTOR: 질문 입력 필드 CSS 셀렉터 (기본: "textarea, input[type='text']")
+- UI_SUBMIT_SELECTOR: 전송 버튼 CSS 셀렉터 (빈 값이면 Enter 키 사용)
+- UI_RESPONSE_SELECTOR: AI 응답 영역 CSS 셀렉터 (빈 값이면 body 텍스트 사용)
+- UI_RESPONSE_WAIT_MS: 응답 대기 시간 (기본: 3000ms)
+- UI_RESPONSE_TIMEOUT_MS: 응답 타임아웃 (기본: 10000ms)
+"""
+
 import os
 import time
 from typing import Dict, List, Optional

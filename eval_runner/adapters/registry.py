@@ -1,3 +1,11 @@
+"""
+registry.py — 어댑터 팩토리 (문자열 → 어댑터 인스턴스 변환)
+
+Jenkins 파이프라인에서 TARGET_TYPE 환경변수로 전달되는 문자열("http" 또는 "ui_chat")을
+실제 어댑터 클래스(GenericHttpAdapter 또는 BrowserUIAdapter)로 변환합니다.
+알 수 없는 타입이 입력되면 기본값으로 HTTP 어댑터를 사용합니다.
+"""
+
 from .browser_adapter import BrowserUIAdapter
 from .http_adapter import GenericHttpAdapter
 

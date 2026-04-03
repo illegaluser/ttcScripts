@@ -1,3 +1,18 @@
+"""
+base.py — AI 평가 어댑터 공통 인터페이스 및 데이터 모델
+
+이 모듈은 eval_runner의 어댑터 계층에서 사용하는 두 가지 핵심 요소를 정의합니다:
+
+1. UniversalEvalOutput: 어떤 방식(HTTP API / 웹 브라우저)으로 AI와 통신하든,
+   평가 결과를 동일한 구조로 표현하기 위한 데이터 클래스입니다.
+   test_runner.py의 평가 로직은 이 표준 출력만 다루므로,
+   새로운 통신 방식이 추가되어도 평가 코드를 수정할 필요가 없습니다.
+
+2. BaseAdapter: 모든 어댑터가 구현해야 하는 추상 인터페이스입니다.
+   invoke() 메서드로 질문을 전송하고 UniversalEvalOutput을 반환합니다.
+   close() 메서드로 세션 자원(브라우저 등)을 정리합니다.
+"""
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 

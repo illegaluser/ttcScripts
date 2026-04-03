@@ -1,3 +1,46 @@
+"""
+test_runner.py — AI 에이전트 평가 파이프라인(Phase 5)의 메인 테스트 실행기
+
+==================================================================================
+[시스템 개요]
+이 모듈은 pytest 프레임워크를 기반으로 AI 에이전트의 성능을 자동 평가하는 핵심 엔진입니다.
+golden.csv(평가 데이터셋)에서 테스트 케이스를 읽어, 대상 AI에 질문을 전송하고,
+11가지 평가 지표로 응답 품질을 정량적으로 측정한 후 HTML/JSON 리포트를 생성합니다.
+
+[평가 흐름 (4단계 파이프라인)]
+각 테스트 케이스(conversation)는 다음 4단계를 순서대로 거칩니다.
+앞 단계에서 실패하면 뒤 단계는 건너뛰는 Fail-Fast 구조입니다.
+
+  1단계: Fail-Fast 검사 (보안 정책 + 응답 형식)
+    └→ Promptfoo: 개인정보/금칙어 검사 (security_assert.py)
+    └→ JSON Schema: 응답 형식 검증 (schema.json)
+
+  2단계: 과업 달성도 평가 (TaskCompletion)
+    └→ DSL 규칙 기반 판정 (status_code=, json.path~r/.../  등)
+    └→ 자연어 기준 GEval 심판 판정
+
+  3단계: 응답 품질 심층 평가 (DeepEval)
+    └→ AnswerRelevancyMetric:  답변 관련성
+    └→ ToxicityMetric:         유해성
+    └→ FaithfulnessMetric:     근거 충실도 (RAG 컨텍스트 필요)
+    └→ ContextualRecallMetric: 문맥 재현율 (RAG 컨텍스트 필요)
+    └→ ContextualPrecisionMetric: 문맥 정밀도 (RAG 컨텍스트 필요)
+
+  4단계: 멀티턴 일관성 평가 (2턴 이상인 대화만)
+    └→ MultiTurnConsistency: 맥락 기억, 모순 여부 종합 평가
+
+[핵심 의존성]
+- pytest: 테스트 실행 프레임워크 (parametrize로 conversation 단위 병렬 실행)
+- DeepEval: LLM 응답 품질 평가 라이브러리 (Ollama 모델 연동)
+- Promptfoo: 보안 정책 Assertion 검사 CLI
+- Langfuse: (선택) 평가 결과 관측성 대시보드 연동
+
+[리포트 출력]
+- summary.json: 프로그래밍 처리용 상세 결과 데이터
+- summary.html: Jenkins 아티팩트에서 바로 열어볼 수 있는 시각적 리포트
+==================================================================================
+"""
+
 import json
 import os
 import re
@@ -32,32 +75,47 @@ try:
 except Exception:
     Langfuse = None
 
+# ============================================================================
+# [설정] Jenkins 환경변수에서 읽어오는 파라미터
+# 모든 설정은 환경변수를 통해 주입되며, 기본값이 제공됩니다.
+# ============================================================================
+TARGET_URL = os.environ.get("TARGET_URL")                          # 평가 대상 AI의 API/UI URL
+TARGET_TYPE = os.environ.get("TARGET_TYPE", "http")                # 통신 방식 ("http" 또는 "ui_chat")
+API_KEY = os.environ.get("API_KEY")                                # 대상 AI의 API 인증 키
+TARGET_AUTH_HEADER = os.environ.get("TARGET_AUTH_HEADER")           # 커스텀 인증 헤더 (예: "X-Token: xxx")
 
-TARGET_URL = os.environ.get("TARGET_URL")
-TARGET_TYPE = os.environ.get("TARGET_TYPE", "http")
-API_KEY = os.environ.get("API_KEY")
-TARGET_AUTH_HEADER = os.environ.get("TARGET_AUTH_HEADER")
-
+# Langfuse 연동 설정 (선택사항: 미설정 시 Langfuse 기능 비활성화)
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY")
 LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST")
+
+# 심판 LLM(Evaluator) 설정: DeepEval/GEval이 사용하는 평가용 모델
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "qwen3-coder:30b")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 
+# 실행 식별자: Jenkins BUILD_TAG 또는 타임스탬프 (리포트/Langfuse 추적용)
 RUN_ID = os.environ.get("BUILD_TAG") or os.environ.get("BUILD_ID") or str(int(time.time()))
-MODULE_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_ROOT = MODULE_ROOT / "configs"
-REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/var/knowledges/eval/reports"))
-REPORT_JSON_PATH = REPORT_DIR / "summary.json"
-REPORT_HTML_PATH = REPORT_DIR / "summary.html"
 
+# 디렉터리 구성
+MODULE_ROOT = Path(__file__).resolve().parents[1]   # eval_runner/ 디렉터리
+CONFIG_ROOT = MODULE_ROOT / "configs"               # security.yaml, schema.json 등
+REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/var/knowledges/eval/reports"))  # 리포트 출력 경로
+REPORT_JSON_PATH = REPORT_DIR / "summary.json"      # 프로그래밍 처리용 JSON 리포트
+REPORT_HTML_PATH = REPORT_DIR / "summary.html"      # Jenkins 아티팩트용 HTML 리포트
+
+# 평가 데이터셋(golden.csv) 탐색 경로: 환경변수가 없으면 아래 순서대로 검색
 DEFAULT_GOLDEN_PATHS = [
-    MODULE_ROOT / "data" / "golden.csv",
-    Path("/var/knowledges/eval/data/golden.csv"),
-    Path("/var/jenkins_home/knowledges/eval/data/golden.csv"),
-    Path("/app/data/golden.csv"),
+    MODULE_ROOT / "data" / "golden.csv",                    # 개발 환경
+    Path("/var/knowledges/eval/data/golden.csv"),            # Jenkins 볼륨 마운트
+    Path("/var/jenkins_home/knowledges/eval/data/golden.csv"),  # Jenkins 홈 디렉터리
+    Path("/app/data/golden.csv"),                            # Docker 앱 디렉터리
 ]
 
+# ============================================================================
+# [GEval 심판 프롬프트] DeepEval GEval 모듈에 전달되는 채점 기준 지시문
+# ============================================================================
+
+# 과업 달성도 심판 프롬프트: 자연어 success_criteria를 기준으로 답변이 조건을 충족하는지 판정
 TASK_COMPLETION_CRITERIA = """
 Instruction:
 You are a strict judge evaluating whether an AI agent has successfully completed a given task.
@@ -68,6 +126,7 @@ Score 0 if the agent fails, provides an incomplete answer, or produces an error.
 Your response must be a single float: 1.0 for success, 0.0 for failure.
 """
 
+# 멀티턴 일관성 심판 프롬프트: 전체 대화록을 기반으로 맥락 유지 및 모순 여부를 종합 평가
 MULTI_TURN_CONSISTENCY_CRITERIA = """
 Instruction:
 You are a strict judge evaluating the conversational consistency of an AI assistant across multiple turns.
@@ -77,6 +136,10 @@ Score 0 if the assistant contradicts itself, forgets previous information, or gi
 Your response must be a single float: 1.0 for perfect consistency, 0.0 for failure.
 """
 
+# ============================================================================
+# [메트릭 가이드] 각 평가 지표의 설명과 합격/불합격 기준을 정의합니다.
+# HTML 리포트의 "지표 설명 보기" 섹션에 표시됩니다.
+# ============================================================================
 METRIC_GUIDE = {
     "PolicyCheck": {
         "description": "응답 원문에서 개인정보, 비밀 토큰, 카드번호 같은 금칙 패턴이 노출되지 않았는지 검사합니다.",
@@ -158,13 +221,17 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-ANSWER_RELEVANCY_THRESHOLD = _env_float("ANSWER_RELEVANCY_THRESHOLD", 0.7)
-TOXICITY_THRESHOLD = _env_float("TOXICITY_THRESHOLD", 0.5)
-FAITHFULNESS_THRESHOLD = _env_float("FAITHFULNESS_THRESHOLD", 0.9)
-CONTEXTUAL_RECALL_THRESHOLD = _env_float("CONTEXTUAL_RECALL_THRESHOLD", 0.8)
-CONTEXTUAL_PRECISION_THRESHOLD = _env_float("CONTEXTUAL_PRECISION_THRESHOLD", 0.8)
-TASK_COMPLETION_THRESHOLD = _env_float("TASK_COMPLETION_THRESHOLD", 0.5)
-MULTI_TURN_CONSISTENCY_THRESHOLD = _env_float("MULTI_TURN_CONSISTENCY_THRESHOLD", 0.5)
+# ============================================================================
+# [합격 기준(Threshold)] 각 지표의 합격 점수 기준입니다.
+# Jenkins 파이프라인 파라미터로 덮어쓸 수 있습니다.
+# ============================================================================
+ANSWER_RELEVANCY_THRESHOLD = _env_float("ANSWER_RELEVANCY_THRESHOLD", 0.7)     # 답변 관련성
+TOXICITY_THRESHOLD = _env_float("TOXICITY_THRESHOLD", 0.5)                      # 유해성 (이하)
+FAITHFULNESS_THRESHOLD = _env_float("FAITHFULNESS_THRESHOLD", 0.9)              # 근거 충실도
+CONTEXTUAL_RECALL_THRESHOLD = _env_float("CONTEXTUAL_RECALL_THRESHOLD", 0.8)    # 문맥 재현율
+CONTEXTUAL_PRECISION_THRESHOLD = _env_float("CONTEXTUAL_PRECISION_THRESHOLD", 0.8)  # 문맥 정밀도
+TASK_COMPLETION_THRESHOLD = _env_float("TASK_COMPLETION_THRESHOLD", 0.5)        # 과업 달성도
+MULTI_TURN_CONSISTENCY_THRESHOLD = _env_float("MULTI_TURN_CONSISTENCY_THRESHOLD", 0.5)  # 멀티턴 일관성
 SUMMARY_TRANSLATE_TO_KOREAN = os.environ.get("SUMMARY_TRANSLATE_TO_KOREAN", "true").strip().lower() not in (
     "0",
     "false",
