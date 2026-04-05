@@ -1,90 +1,102 @@
 // =============================================================================
-// DSCORE-ZeroTouch-QA Jenkinsfile (v2.5 - Stable)
+// DSCORE-ZeroTouch-QA Jenkinsfile (v3.4)
 //
 // 변경 내역
-// - [Fix] CSP 보안 이슈 대응을 위해 빌드 설명을 단순 텍스트 링크로 변경
-// - [Fix] 파이썬 의존성 및 브라우저 자동 설치 보장
+// - [v3.4] Dify Brain 기반 아키텍처로 전면 전환 (Ollama 직접 호출 제거)
+// - [v3.4] Mac Local Agent (mac-ui-tester) 기반 Headed 브라우저 실행
+// - [v3.4] Flow 1 (Doc) 파일 업로드, Flow 2 (Chat) 자연어 입력 지원
+// - [v3.4] HTML 리포트 자동 게시, Langfuse 관측성 연동
+// - [v3.4] Python venv 캐싱, regression_test.py 자동 생성
 // =============================================================================
 
 pipeline {
-    agent any
+    agent { label 'mac-ui-tester' }
 
     parameters {
+        choice(
+            name: 'RUN_MODE',
+            choices: ['chat', 'doc'],
+            description: '테스트 진입 방식 (레코딩은 로컬 터미널에서 --mode record로 실행)'
+        )
         string(
             name: 'TARGET_URL',
-            defaultValue: 'https://www.naver.com',
-            description: '테스트 대상 웹앱 URL (http:// 또는 https:// 필수)'
+            defaultValue: 'https://www.google.com',
+            description: '테스트 시작 URL'
         )
-        // 텍스트 입력 방식 (안전함)
         text(
             name: 'SRS_TEXT',
-            description: '자연어 요구사항(SRS) 내용을 여기에 붙여넣으세요.',
-            defaultValue: ''
+            defaultValue: '검색창에 DSCORE 입력 후 엔터',
+            description: '[Chat] 자연어 요구사항'
         )
-        string(
-            name: 'MODEL_NAME',
-            defaultValue: 'qwen3-coder:30b',
-            description: 'Ollama LLM 모델명'
-        )
-        choice(
-            name: 'HEAL_MODE',
-            choices: ['on', 'off'],
-            description: 'Self-Healing 활성화 여부'
-        )
-        string(
-            name: 'MAX_HEAL_ATTEMPTS',
-            defaultValue: '2',
-            description: '최대 복구 시도 횟수'
+        base64File(
+            name: 'DOC_FILE',
+            description: '[Doc] 기획서 문서 업로드 (PDF/Docx). File Parameter 플러그인 필요.'
         )
     }
 
     environment {
-        SCRIPTS_DIR = '/var/jenkins_home/scripts'
-        REPORT_DIR  = "${WORKSPACE}/qa_reports"
-        OLLAMA_HOST = 'http://host.docker.internal:11434'
-        SRS_FILENAME = 'srs_input.txt'
-        
-        // 서버 환경이므로 Headless 모드 고정
-        HEADLESS = 'true'
+        AGENT_HOME    = "/Users/luuuuunatic/Developer/automation/local_qa"
+        DIFY_API_KEY  = credentials('dify-qa-api-token')
+
+        // Langfuse 관측성 (선택사항: Credential 미등록 시 자동 비활성)
+        LANGFUSE_PUBLIC_KEY = credentials('langfuse-public-key')
+        LANGFUSE_SECRET_KEY = credentials('langfuse-secret-key')
+        LANGFUSE_HOST       = 'http://host.docker.internal:3000'
     }
 
     stages {
-        stage('1. Prepare Output Directory') {
+        stage('1. 환경 동기화 및 캐싱') {
             steps {
-                sh "mkdir -p ${REPORT_DIR}"
+                sh """
+                    cd ${AGENT_HOME}
+
+                    # 이전 실행 아티팩트 초기화
+                    rm -rf artifacts/* || true
+                    mkdir -p artifacts
+
+                    # 파이썬 Venv 캐시 활용 (최초 실행 시에만 생성)
+                    if [ ! -d "venv" ]; then
+                        echo "[Setup] Creating new virtual environment..."
+                        python3 -m venv venv
+                        source venv/bin/activate
+                        pip install requests playwright pillow langfuse
+                        playwright install chromium
+                    else
+                        echo "[Setup] Using existing virtual environment."
+                    fi
+                """
             }
         }
 
-        stage('2. Run Zero-Touch QA Agent') {
+        stage('2. 문서 파일 준비 (Doc 모드)') {
+            when {
+                expression { params.RUN_MODE == 'doc' && params.DOC_FILE != '' }
+            }
+            steps {
+                withFileParameter('DOC_FILE') {
+                    sh "cp \$DOC_FILE ${AGENT_HOME}/upload.pdf"
+                }
+            }
+        }
+
+        stage('3. 자율 주행 QA 엔진 가동 (Execute & Heal)') {
             steps {
                 script {
-                    // 1. SRS 텍스트 파일 저장
-                    if (params.SRS_TEXT?.trim()) {
-                        writeFile file: "${WORKSPACE}/${SRS_FILENAME}", text: params.SRS_TEXT, encoding: 'UTF-8'
-                    } else {
-                        error "SRS_TEXT is empty. Please input requirements."
-                    }
-
-                    // 2. 실행 (의존성 설치 포함)
                     sh """
-                    # 의존성 확인 (안전장치)
-                    pip3 install ollama playwright --break-system-packages || true
-                    playwright install chromium || true
+                        cd ${AGENT_HOME}
+                        source venv/bin/activate
 
-                    export HEAL_MODE="${params.HEAL_MODE}"
-                    export MAX_HEAL_ATTEMPTS="${params.MAX_HEAL_ATTEMPTS}"
-                    export OLLAMA_HOST="${env.OLLAMA_HOST}"
-                    export MODEL_NAME="${params.MODEL_NAME}"
-                    export HEADLESS="${env.HEADLESS}"
+                        export RUN_MODE="${params.RUN_MODE}"
+                        export TARGET_URL="${params.TARGET_URL}"
+                        export SRS_TEXT="${params.SRS_TEXT}"
 
-                    echo ">>> Starting QA Agent..."
-                    
-                    python3 ${SCRIPTS_DIR}/autonomous_qa.py \
-                        --url "${params.TARGET_URL}" \
-                        --srs_file "${WORKSPACE}/${SRS_FILENAME}" \
-                        --out "${REPORT_DIR}" \
-                        --ollama_host "${env.OLLAMA_HOST}" \
-                        --model "${params.MODEL_NAME}"
+                        FILE_ARG=""
+                        if [ "${params.RUN_MODE}" = "doc" ] && [ -f "upload.pdf" ]; then
+                            FILE_ARG="--file upload.pdf"
+                        fi
+
+                        echo "[Engine] QA 엔진 구동 시작 (RUN_MODE=${params.RUN_MODE})"
+                        python3 mac_local_executor.py --mode execute \$FILE_ARG
                     """
                 }
             }
@@ -93,36 +105,38 @@ pipeline {
 
     post {
         always {
-            // 1. 호스트 볼륨 백업 (선택 사항)
+            // 호스트 볼륨 백업
             script {
                 sh """
-                mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER}
-                cp -r ${REPORT_DIR}/* /var/knowledges/qa_reports/${BUILD_NUMBER}/
+                    mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER} || true
+                    cp -r ${AGENT_HOME}/artifacts/* /var/knowledges/qa_reports/${BUILD_NUMBER}/ || true
                 """
             }
 
-            // 2. HTML 리포트 게시
+            // HTML 리포트 게시 (v3.4: mac_local_executor.py가 생성한 index.html)
             publishHTML([
                 allowMissing: true,
                 alwaysLinkToLastBuild: true,
                 keepAll: true,
-                reportDir: "${REPORT_DIR}",
+                reportDir: "${AGENT_HOME}/artifacts",
                 reportFiles: 'index.html',
                 reportName: 'Zero-Touch QA Report'
             ])
 
-            // 3. Artifact 아카이빙 (모든 파일 포함)
+            // 모든 산출물 영구 보관
             archiveArtifacts(
-                artifacts: "qa_reports/**/*",
+                artifacts: "${AGENT_HOME}/artifacts/**/*",
                 fingerprint: true,
                 allowEmptyArchive: true
             )
 
-            // 4. [Fix] 빌드 설명 단순화 (HTML 태그 제거)
+            // 빌드 설명
             script {
                 def reportUrl = "${BUILD_URL}Zero-Touch_20QA_20Report"
-                currentBuild.description = "Test Finished. Report: ${reportUrl}"
+                currentBuild.description = "ZT-QA v3.4 | Mode: ${params.RUN_MODE} | Report: ${reportUrl}"
             }
+
+            echo "테스트 종료. Jenkins 빌드 결과에서 Artifacts를 확인하십시오."
         }
     }
 }

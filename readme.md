@@ -73,7 +73,7 @@
 * **온프레미스 DevOps 인프라:** 개발/테스트/배포가 가능한 완전한 환경
 * **AI 기반 지식 관리:** 문서, 코드, 웹 지식의 자동 학습 및 검색
 * **자동화된 품질 분석:** 정적 분석 → LLM 진단 → Issue 등록의 전 과정 자동화
-* **Zero-Touch QA v3.3:** Dify Brain + 3-Flow(Doc/Chat/Record) 진입 + 7단계 시맨틱 탐색 + 3단계 하이브리드 Self-Healing
+* **Zero-Touch QA v3.4:** Dify Brain + 3-Flow(Doc/Chat/Record) 진입 + 7단계 시맨틱 탐색 + 3단계 하이브리드 Self-Healing + Langfuse 관측성 + HTML 리포트 + Regression Test 자동 생성
 * **AI 에이전트 평가:** 11대 지표(Policy/Task/Relevancy/Toxicity/Faithfulness 등) 자동 채점 + Langfuse 관측
 
 ---
@@ -4998,6 +4998,7 @@ AI의 환각(Hallucination)을 원천 차단하기 위해 두 계층은 다음 9
 | v3.1 | 7단계 LocatorResolver, 3단계 하이브리드 Self-Healing, 9대 액션 완전 매핑, 산출물 6종 체계 |
 | v3.2 | dict target 방어 코드, 미지원 액션 예외 처리, scenario.healed.json 저장, Candidate Search 액션별 분기 |
 | v3.3 | Flow 1 파일 업로드 API 연동, Record 캡처 엔진 고도화(input/change/select), Base64 이미지 압축(Pillow), Dify heal 변수 구조 명확화, CLI `--file` 인자 추가 |
+| v3.4 | Langfuse 관측성 연동(Trace/Span), `index.html` HTML 리포트 자동 생성, `regression_test.py` 자동 생성, Candidate Search 셀렉터 확장(select/hover), `target_url` Dify 전달, detached element 방어, Jenkinsfile v3.4 전면 개편 |
 
 
 #### 5.8.2 시스템 아키텍처 구성도
@@ -6162,7 +6163,7 @@ python3 mac_local_executor.py --mode execute
 ```
 
 
-#### 5.8.10 후속 작업 (v3.4 로드맵)
+#### 5.8.10 후속 작업 및 완료 이력
 
 ##### 5.8.10.1 v3.3에서 완료된 항목
 
@@ -6173,14 +6174,24 @@ python3 mac_local_executor.py --mode execute
 | Base64 페이로드 이미지 압축 (Pillow) | v3.3 완료 |
 | Dify heal 모드 변수 구조 명확화 | v3.3 완료 |
 
-##### 5.8.10.2 미완료 항목
+##### 5.8.10.2 v3.4에서 완료된 항목
+
+| 항목 | 설명 | 상태 |
+| --- | --- | --- |
+| `regression_test.py` 자동 생성 | 성공 시나리오를 LLM 없이 재실행 가능한 독립 Playwright 스크립트로 변환. `_generate_regression_test()` 메서드 및 `_target_to_playwright_code()` 시맨틱 타겟 변환 유틸 구현. | v3.4 완료 |
+| `index.html` 리포트 생성 | Jenkins에 게시할 시각적 HTML 리포트. eval_runner의 CSS/레이아웃 패턴 이식. 스텝별 상태 배지, 스크린샷 링크, 대시보드 카드 포함. `_build_html_report()` 메서드 구현. | v3.4 완료 |
+| Candidate Search 셀렉터 확장 | select 액션에 `option, [role='option']` 추가. hover 액션에 `[role='menu'], nav a, [aria-haspopup], [role='tooltip']` 추가. detached element 예외 방어 추가. | v3.4 완료 |
+| Langfuse 연동 | eval_runner의 Trace/Span 패턴 이식. 실행 단위 Trace + 스텝별 Span + HealAttempt Score. 선택적 의존성(미설치 시 자동 비활성). Jenkinsfile에 Langfuse Credentials 연동. | v3.4 완료 |
+| Jenkinsfile v3.4 전면 개편 | v2.5(Ollama/Docker)에서 v3.4(Dify Brain/Mac Agent)로 전환. HTML Report publishHTML, Langfuse 환경 변수, venv 캐싱, Doc 모드 파일 업로드 지원. | v3.4 완료 |
+| `target_url` Dify 전달 | Dify Planner에 TARGET_URL을 payload로 전달하여 navigate 액션의 정확도 향상. | v3.4 완료 |
+
+##### 5.8.10.3 미완료 항목 (v3.5 로드맵)
 
 | 항목 | 설명 | 난이도 |
 | --- | --- | --- |
-| `regression_test.py` 자동 생성 | 성공한 시나리오를 LLM 없이 재실행 가능한 독립 Playwright 스크립트로 변환 | 중간 |
-| `index.html` 리포트 생성 | Jenkins에 게시할 시각적 HTML 리포트 (기존 `build_html_report()` 패턴 이식) | 중간 |
-| Candidate Search 셀렉터 확장 | select/hover 액션에 대한 검색 대상 요소 추가 | 낮음 |
-| Langfuse 연동 | 기존 eval_runner의 Langfuse 관측성 체계를 Zero-Touch QA에도 적용 | 중간 |
+| 시나리오 캐시 재실행 | `scenario.healed.json`을 입력으로 받아 Dify 호출 없이 즉시 재실행하는 `--scenario` CLI 옵션 추가 | 낮음 |
+| 멀티 시나리오 배치 실행 | 여러 시나리오를 순차/병렬 실행하고 통합 리포트를 생성 | 중간 |
+| Langfuse 대시보드 커스텀 | Zero-Touch QA 전용 Langfuse 대시보드 프리셋 (치유율, 평균 스텝 수, 실패 패턴 등) | 낮음 |
 
 > 상세 가이드 원본: `eval_runner/zeroTouchQA_v3.3.md`
 
