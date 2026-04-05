@@ -4998,7 +4998,7 @@ AI의 환각(Hallucination)을 원천 차단하기 위해 두 계층은 다음 9
 | v3.1 | 7단계 LocatorResolver, 3단계 하이브리드 Self-Healing, 9대 액션 완전 매핑, 산출물 6종 체계 |
 | v3.2 | dict target 방어 코드, 미지원 액션 예외 처리, scenario.healed.json 저장, Candidate Search 액션별 분기 |
 | v3.3 | Flow 1 파일 업로드 API 연동, Record 캡처 엔진 고도화(input/change/select), Base64 이미지 압축(Pillow), Dify heal 변수 구조 명확화, CLI `--file` 인자 추가 |
-| v3.4 | `index.html` HTML 리포트 자동 생성, `regression_test.py` 자동 생성, Candidate Search 셀렉터 확장(select/hover), `target_url` Dify 전달, detached element 방어, Jenkinsfile v3.4 전면 개편(Dify Brain/Mac Agent) |
+| v3.4 | `index.html` HTML 리포트 자동 생성, `regression_test.py` 자동 생성, Candidate Search 셀렉터 확장(select/hover), `target_url` Dify 전달, detached element 방어, Jenkinsfile v3.4 전면 개편(Dify Brain/Mac Agent), Flow 3 `convert` 모드(Playwright codegen → DSL 변환), `--scenario` 직접 실행 옵션 |
 
 
 #### 5.8.2 시스템 아키텍처 구성도
@@ -5110,11 +5110,13 @@ AI의 환각(Hallucination)을 원천 차단하기 위해 두 계층은 다음 9
     (모호 시 Dify HITL → 사용자에게 되물음 → 재시도)
 ```
 
-**Flow 3: Record-to-Test**
+**Flow 3: Record-to-Test (Playwright codegen 기반)**
 
 ```
-브라우저 조작 → [JS 이벤트 캡처 + Red Box 스크린샷] → action_log
-    → [Vision Refactor LLM] → 시맨틱 DSL JSON → scenario.json 저장
+playwright codegen https://target-app.com --output recorded.py  (로컬에서 녹화)
+    → python3 mac_local_executor.py --mode convert --file recorded.py
+    → 정규식 파서가 Playwright API를 9대 DSL JSON으로 변환 → scenario.json 저장
+    → [Python Executor] → LocatorResolver → 브라우저 실행 → 산출물
 ```
 
 **Self-Healing 흐름**
@@ -5147,11 +5149,11 @@ AI의 환각(Hallucination)을 원천 차단하기 위해 두 계층은 다음 9
 - **사용자 행동:** Dify 채팅창에 자연어로 입력한다. (예: "네이버 검색창에 DSCORE 치고 엔터 눌러줘")
 - **시스템 흐름:** Planner LLM이 즉시 의도를 파악해 9대 DSL로 번역한다. 대상이 모호할 경우 Dify가 채팅으로 사용자에게 되묻는다(HITL). 파이썬 엔진이 실행한다.
 
-##### 5.8.3.3 Flow 3: 스마트 레코딩 (Record-to-Test)
+##### 5.8.3.3 Flow 3: Playwright 녹화 변환 (Record-to-Test)
 
-- **목적:** 복잡한 UI 인터랙션을 시각적으로 캡처하여 영구 자산화
-- **사용자 행동:** 맥북 터미널에서 `--mode record` 옵션으로 스크립트를 실행한 후 브라우저를 평소처럼 조작한다.
-- **시스템 흐름:** 파이썬이 주입한 JS가 클릭/입력 시마다 붉은 테두리(Red Box)를 그리고 화면을 캡처한다. 브라우저 종료 시 Dify Vision LLM이 스크린샷과 원시 이벤트 로그를 교차 검증하여 의미론적 DSL로 정제한다. 최종 스크립트를 `scenario.json`으로 저장한다.
+- **목적:** 복잡한 UI 인터랙션을 녹화하여 재사용 가능한 테스트 자산으로 변환
+- **사용자 행동:** 로컬 터미널에서 `playwright codegen` 명령으로 브라우저를 열고 평소처럼 조작한다. Playwright가 조작을 Python 스크립트로 자동 기록한다.
+- **시스템 흐름:** 녹화된 `.py` 스크립트를 `--mode convert`로 변환하면, 정규식 파서가 Playwright API 호출(`get_by_role`, `fill`, `click` 등)을 9대 DSL로 1:1 매핑하여 `scenario.json`을 생성한다. LLM 호출 없이 로컬에서 즉시 변환된다. 생성된 시나리오는 Jenkins에 업로드하거나 `--scenario` 옵션으로 즉시 실행할 수 있다.
 
 
 #### 5.8.4 Jenkins 인프라 및 에이전트 구축 가이드 (Mac Local)
@@ -6359,9 +6361,9 @@ Zero-Touch QA를 실행하기 전에 아래 항목이 모두 완료되어 있어
 
 > **주의:** `DOC_FILE` 파라미터를 사용하려면 Jenkins에 `file-parameters` 플러그인이 설치되어 있어야 한다.
 
-##### 5.8.9.4 Flow 3: Record 모드 (로컬 터미널 전용)
+##### 5.8.9.4 Flow 3: Record + Convert 모드 (Playwright codegen 기반)
 
-브라우저 조작을 녹화하여 재사용 가능한 시나리오로 변환한다. Jenkins가 아닌 **맥북 터미널에서 직접 실행**한다.
+브라우저 조작을 녹화하여 재사용 가능한 시나리오로 변환한다. 녹화는 로컬에서, 변환+실행은 로컬 또는 Jenkins에서 수행할 수 있다.
 
 **최초 1회: 환경 구성**
 
@@ -6375,22 +6377,41 @@ pip install requests playwright pillow
 playwright install chromium
 ```
 
-**레코딩 실행**
+**Step 1: Playwright codegen으로 녹화**
+
+```bash
+# 브라우저가 열리면 평소처럼 조작한다. 우측 패널에 Python 코드가 실시간 생성된다.
+playwright codegen https://target-app.com --output recorded.py
+```
+
+1. 브라우저와 Playwright Inspector 패널이 동시에 열린다.
+2. 브라우저에서 **평소처럼 조작**한다 (클릭, 입력, 선택 등).
+3. 우측 Inspector 패널에 Python 코드가 실시간으로 생성되는 것을 확인한다.
+4. 조작이 끝나면 **브라우저 창을 닫는다**. `recorded.py` 파일이 저장된다.
+
+**Step 2: DSL 변환 (로컬)**
 
 ```bash
 cd /Users/luuuuunatic/Developer/automation/local_qa
 source venv/bin/activate
-export DIFY_API_KEY="app-xxxxxxxxx"   # Dify에서 발급받은 API Key
 
-python3 mac_local_executor.py --mode record --url https://target-app.com
+python3 mac_local_executor.py --mode convert --file recorded.py
 ```
 
-1. 브라우저가 열리면 **평소처럼 조작**한다 (클릭, 입력, 선택 등).
-2. 조작할 때마다 대상 요소에 **붉은 테두리(Red Box)**가 표시되고, 스크린샷이 자동 캡처된다.
-3. 테스트가 끝나면 **브라우저 창을 닫는다** (X 버튼).
-4. Vision LLM이 캡처 데이터를 정제하여 `artifacts/scenario.json`에 DSL 시나리오를 저장한다.
+정규식 파서가 Playwright API 호출을 9대 DSL로 변환하여 `artifacts/scenario.json`에 저장한다. LLM 호출 없이 즉시 완료된다.
 
-> 생성된 `scenario.json`은 이후 Chat 모드에서 재사용하거나, `regression_test.py`로 변환하여 독립 실행할 수 있다.
+**Step 3: 변환된 시나리오 실행 (로컬)**
+
+```bash
+python3 mac_local_executor.py --mode execute --scenario artifacts/scenario.json
+```
+
+**Step 3 (대안): Jenkins에서 실행**
+
+1. Jenkins에서 `DSCORE-ZeroTouch-QA` Job > `Build with Parameters`를 연다.
+2. `RUN_MODE`를 `convert`로 선택한다.
+3. `DOC_FILE`에 `recorded.py` 파일을 업로드한다.
+4. `빌드` 버튼을 누르면 Jenkins가 자동으로 변환 → 실행 → 리포트 생성까지 수행한다.
 
 ##### 5.8.9.5 로컬 CLI 실행 (디버깅)
 

@@ -4,7 +4,7 @@
 // 변경 내역
 // - [v3.4] Dify Brain 기반 아키텍처로 전면 전환 (Ollama 직접 호출 제거)
 // - [v3.4] Mac Local Agent (mac-ui-tester) 기반 Headed 브라우저 실행
-// - [v3.4] Flow 1 (Doc) 파일 업로드, Flow 2 (Chat) 자연어 입력 지원
+// - [v3.4] Flow 1 (Doc), Flow 2 (Chat), Flow 3 (Convert) 3대 진입 경로 지원
 // - [v3.4] HTML 리포트 자동 게시, regression_test.py 자동 생성
 // - [v3.4] Python venv 캐싱
 // =============================================================================
@@ -15,8 +15,8 @@ pipeline {
     parameters {
         choice(
             name: 'RUN_MODE',
-            choices: ['chat', 'doc'],
-            description: '테스트 진입 방식 (레코딩은 로컬 터미널에서 --mode record로 실행)'
+            choices: ['chat', 'doc', 'convert'],
+            description: 'chat: 자연어 입력, doc: 기획서 업로드, convert: Playwright 녹화 스크립트 변환 후 실행'
         )
         string(
             name: 'TARGET_URL',
@@ -30,7 +30,7 @@ pipeline {
         )
         base64File(
             name: 'DOC_FILE',
-            description: '[Doc] 기획서 문서 업로드 (PDF/Docx). File Parameter 플러그인 필요.'
+            description: '[Doc/Convert] 기획서(PDF/Docx) 또는 Playwright 녹화 스크립트(.py) 업로드'
         )
     }
 
@@ -63,18 +63,21 @@ pipeline {
             }
         }
 
-        stage('2. 문서 파일 준비 (Doc 모드)') {
+        stage('2. 파일 준비 (Doc/Convert 모드)') {
             when {
-                expression { params.RUN_MODE == 'doc' && params.DOC_FILE != '' }
+                expression { params.RUN_MODE in ['doc', 'convert'] && params.DOC_FILE != '' }
             }
             steps {
                 withFileParameter('DOC_FILE') {
-                    sh "cp \$DOC_FILE ${AGENT_HOME}/upload.pdf"
+                    script {
+                        def ext = params.RUN_MODE == 'convert' ? '.py' : '.pdf'
+                        sh "cp \$DOC_FILE ${AGENT_HOME}/upload${ext}"
+                    }
                 }
             }
         }
 
-        stage('3. 자율 주행 QA 엔진 가동 (Execute & Heal)') {
+        stage('3. 자율 주행 QA 엔진 가동') {
             steps {
                 script {
                     sh """
@@ -85,13 +88,22 @@ pipeline {
                         export TARGET_URL="${params.TARGET_URL}"
                         export SRS_TEXT="${params.SRS_TEXT}"
 
-                        FILE_ARG=""
-                        if [ "${params.RUN_MODE}" = "doc" ] && [ -f "upload.pdf" ]; then
-                            FILE_ARG="--file upload.pdf"
-                        fi
+                        if [ "${params.RUN_MODE}" = "convert" ]; then
+                            # Flow 3: Playwright 스크립트 → DSL 변환 → 즉시 실행
+                            echo "[Engine] Flow 3: Convert + Execute"
+                            python3 mac_local_executor.py --mode convert --file upload.py
+                            python3 mac_local_executor.py --mode execute --scenario artifacts/scenario.json
 
-                        echo "[Engine] QA 엔진 구동 시작 (RUN_MODE=${params.RUN_MODE})"
-                        python3 mac_local_executor.py --mode execute \$FILE_ARG
+                        elif [ "${params.RUN_MODE}" = "doc" ] && [ -f "upload.pdf" ]; then
+                            # Flow 1: 기획서 업로드 → Dify Planner → 실행
+                            echo "[Engine] Flow 1: Doc-to-Test"
+                            python3 mac_local_executor.py --mode execute --file upload.pdf
+
+                        else
+                            # Flow 2: 자연어 → Dify Planner → 실행
+                            echo "[Engine] Flow 2: Chat-to-Test"
+                            python3 mac_local_executor.py --mode execute
+                        fi
                     """
                 }
             }
