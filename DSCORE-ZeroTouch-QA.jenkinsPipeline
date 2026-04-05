@@ -5,8 +5,8 @@
 // - [v3.4] Dify Brain 기반 아키텍처로 전면 전환 (Ollama 직접 호출 제거)
 // - [v3.4] Mac Local Agent (mac-ui-tester) 기반 Headed 브라우저 실행
 // - [v3.4] Flow 1 (Doc) 파일 업로드, Flow 2 (Chat) 자연어 입력 지원
-// - [v3.4] HTML 리포트 자동 게시, Langfuse 관측성 연동
-// - [v3.4] Python venv 캐싱, regression_test.py 자동 생성
+// - [v3.4] HTML 리포트 자동 게시, regression_test.py 자동 생성
+// - [v3.4] Python venv 캐싱
 // =============================================================================
 
 pipeline {
@@ -35,13 +35,8 @@ pipeline {
     }
 
     environment {
-        AGENT_HOME    = "/Users/luuuuunatic/Developer/automation/local_qa"
-        DIFY_API_KEY  = credentials('dify-qa-api-token')
-
-        // Langfuse 관측성 (선택사항: Credential 미등록 시 자동 비활성)
-        LANGFUSE_PUBLIC_KEY = credentials('langfuse-public-key')
-        LANGFUSE_SECRET_KEY = credentials('langfuse-secret-key')
-        LANGFUSE_HOST       = 'http://host.docker.internal:3000'
+        AGENT_HOME   = "/Users/luuuuunatic/Developer/automation/local_qa"
+        DIFY_API_KEY = credentials('dify-qa-api-token')
     }
 
     stages {
@@ -59,7 +54,7 @@ pipeline {
                         echo "[Setup] Creating new virtual environment..."
                         python3 -m venv venv
                         source venv/bin/activate
-                        pip install requests playwright pillow langfuse
+                        pip install requests playwright pillow
                         playwright install chromium
                     else
                         echo "[Setup] Using existing virtual environment."
@@ -105,27 +100,27 @@ pipeline {
 
     post {
         always {
-            // 호스트 볼륨 백업
+            // 산출물을 workspace 상대 경로로 복사 (Jenkins 아카이빙 요건)
             script {
                 sh """
-                    mkdir -p /var/knowledges/qa_reports/${BUILD_NUMBER} || true
-                    cp -r ${AGENT_HOME}/artifacts/* /var/knowledges/qa_reports/${BUILD_NUMBER}/ || true
+                    mkdir -p qa_reports
+                    cp -r ${AGENT_HOME}/artifacts/* qa_reports/ || true
                 """
             }
 
-            // HTML 리포트 게시 (v3.4: mac_local_executor.py가 생성한 index.html)
+            // HTML 리포트 게시
             publishHTML([
                 allowMissing: true,
                 alwaysLinkToLastBuild: true,
                 keepAll: true,
-                reportDir: "${AGENT_HOME}/artifacts",
+                reportDir: 'qa_reports',
                 reportFiles: 'index.html',
                 reportName: 'Zero-Touch QA Report'
             ])
 
             // 모든 산출물 영구 보관
             archiveArtifacts(
-                artifacts: "${AGENT_HOME}/artifacts/**/*",
+                artifacts: 'qa_reports/**/*',
                 fingerprint: true,
                 allowEmptyArchive: true
             )
@@ -133,7 +128,7 @@ pipeline {
             // 빌드 설명
             script {
                 def reportUrl = "${BUILD_URL}Zero-Touch_20QA_20Report"
-                currentBuild.description = "ZT-QA v3.4 | Mode: ${params.RUN_MODE} | Report: ${reportUrl}"
+                currentBuild.description = "ZT-QA v3.4 | ${params.RUN_MODE} | Report: ${reportUrl}"
             }
 
             echo "테스트 종료. Jenkins 빌드 결과에서 Artifacts를 확인하십시오."

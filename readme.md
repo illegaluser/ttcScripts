@@ -73,7 +73,7 @@
 * **온프레미스 DevOps 인프라:** 개발/테스트/배포가 가능한 완전한 환경
 * **AI 기반 지식 관리:** 문서, 코드, 웹 지식의 자동 학습 및 검색
 * **자동화된 품질 분석:** 정적 분석 → LLM 진단 → Issue 등록의 전 과정 자동화
-* **Zero-Touch QA v3.4:** Dify Brain + 3-Flow(Doc/Chat/Record) 진입 + 7단계 시맨틱 탐색 + 3단계 하이브리드 Self-Healing + Langfuse 관측성 + HTML 리포트 + Regression Test 자동 생성
+* **Zero-Touch QA v3.4:** Dify Brain + 3-Flow(Doc/Chat/Record) 진입 + 7단계 시맨틱 탐색 + 3단계 하이브리드 Self-Healing + HTML 리포트 + Regression Test 자동 생성
 * **AI 에이전트 평가:** 11대 지표(Policy/Task/Relevancy/Toxicity/Faithfulness 등) 자동 채점 + Langfuse 관측
 
 ---
@@ -4998,7 +4998,7 @@ AI의 환각(Hallucination)을 원천 차단하기 위해 두 계층은 다음 9
 | v3.1 | 7단계 LocatorResolver, 3단계 하이브리드 Self-Healing, 9대 액션 완전 매핑, 산출물 6종 체계 |
 | v3.2 | dict target 방어 코드, 미지원 액션 예외 처리, scenario.healed.json 저장, Candidate Search 액션별 분기 |
 | v3.3 | Flow 1 파일 업로드 API 연동, Record 캡처 엔진 고도화(input/change/select), Base64 이미지 압축(Pillow), Dify heal 변수 구조 명확화, CLI `--file` 인자 추가 |
-| v3.4 | Langfuse 관측성 연동(Trace/Span), `index.html` HTML 리포트 자동 생성, `regression_test.py` 자동 생성, Candidate Search 셀렉터 확장(select/hover), `target_url` Dify 전달, detached element 방어, Jenkinsfile v3.4 전면 개편 |
+| v3.4 | `index.html` HTML 리포트 자동 생성, `regression_test.py` 자동 생성, Candidate Search 셀렉터 확장(select/hover), `target_url` Dify 전달, detached element 방어, Jenkinsfile v3.4 전면 개편(Dify Brain/Mac Agent) |
 
 
 #### 5.8.2 시스템 아키텍처 구성도
@@ -6108,49 +6108,121 @@ pipeline {
 ```
 
 
-#### 5.8.9 운영 가이드
+#### 5.8.9 운영 가이드 (v3.4)
 
-##### 5.8.9.1 Jenkins에서 실행 (CI 모드)
+이 섹션은 Zero-Touch QA를 처음 사용하는 사람이 따라 할 수 있도록, 사전 준비부터 결과 확인까지 전 과정을 단계별로 안내한다.
+
+##### 5.8.9.1 사전 준비 체크리스트
+
+Zero-Touch QA를 실행하기 전에 아래 항목이 모두 완료되어 있어야 한다.
+
+| # | 항목 | 확인 방법 | 미완료 시 참고 |
+| --- | --- | --- | --- |
+| 1 | Mac Agent 연결 | Jenkins > Nodes에서 `mac-ui-tester` 상태가 Connected | Section 5.8.4 |
+| 2 | macOS 보안 권한 | 시스템 설정 > 개인정보 보호 > 화면 기록 + 접근성에 Terminal, Java 허용 | Section 5.8.4.3 |
+| 3 | Dify Chatflow 생성 | Dify 콘솔에서 ZeroTouch QA Chatflow 앱 생성 및 API Key 발급 | Section 5.8.5 |
+| 4 | Jenkins Credential 등록 | `Jenkins 관리` > `Credentials`에 `dify-qa-api-token` (Secret text) 등록 | Section 5.8.7.3 |
+| 5 | Jenkins 플러그인 설치 | `file-parameters` (Doc 모드용), `htmlpublisher` (리포트 게시용) | Jenkins 플러그인 관리 |
+| 6 | Pipeline Job 생성 | Jenkins에 `DSCORE-ZeroTouch-QA` Pipeline Job을 생성하고 Script에 Jenkinsfile 붙여넣기 | 바로 아래 참고 |
+
+**Jenkins Pipeline Job 생성 절차:**
+
+1. Jenkins 메인 > `새로운 Item` > 이름: `DSCORE-ZeroTouch-QA` > `Pipeline` 선택 > `OK`
+2. Pipeline 섹션에서 Definition: `Pipeline script` 선택
+3. Script 입력란에 `DSCORE-ZeroTouch-QA.jenkinsPipeline` 파일 내용을 그대로 붙여넣기
+4. `저장` 클릭
+
+##### 5.8.9.2 Flow 2: Chat 모드 실행 (Jenkins)
+
+가장 기본적인 실행 방식이다. 자연어로 테스트 요구사항을 입력하면 AI가 시나리오를 생성하고 자동 실행한다.
 
 1. Jenkins에서 `DSCORE-ZeroTouch-QA` Job을 연다.
-2. `Build with Parameters`를 선택한다.
-3. `RUN_MODE`를 선택하고, `SRS_TEXT`에 자연어 요구사항을 입력한다.
+2. 좌측 메뉴에서 `Build with Parameters`를 선택한다.
+3. 파라미터를 입력한다:
+
+| 파라미터 | 값 | 설명 |
+| --- | --- | --- |
+| `RUN_MODE` | `chat` (기본값) | 자연어 입력 방식 |
+| `TARGET_URL` | 테스트 대상 URL | 예: `https://www.naver.com` |
+| `SRS_TEXT` | 자연어 요구사항 | 예: `네이버 검색창에 DSCORE 입력 후 엔터를 누른다` |
+
 4. `빌드` 버튼을 누른다.
-5. 빌드 완료 후 `Artifacts`에서 산출물을 확인한다.
+5. 빌드 진행 상황은 `Console Output`에서 실시간 확인 가능하다.
+6. 빌드 완료 후 결과 확인:
+   - **Zero-Touch QA Report** (좌측 메뉴): `index.html` 시각적 리포트
+   - **Artifacts**: `qa_reports/` 폴더 내 모든 산출물 다운로드 가능
 
-##### 5.8.9.2 Jenkins에서 Doc 모드 실행 (Flow 1)
+**SRS_TEXT 작성 팁:**
 
-1. Jenkins에서 `DSCORE-ZeroTouch-QA` Job을 연다.
-2. `Build with Parameters`를 선택한다.
-3. `RUN_MODE`를 `doc`으로 선택한다.
-4. `DOC_FILE`에 기획서 파일(PDF/DOCX)을 업로드한다.
-5. `빌드` 버튼을 누른다.
-6. 시스템이 파일을 Dify에 업로드한 후 Planner LLM이 TC를 추출하여 DSL로 변환, 자동 실행한다.
+```
+# 좋은 예 (구체적, 단계별)
+네이버 메인 페이지에서 검색창에 'DSCORE'를 입력하고 엔터를 누른다.
+검색 결과 페이지에서 첫 번째 링크를 클릭한다.
 
-##### 5.8.9.3 로컬에서 Doc 모드 실행 (CLI)
-
-```bash
-cd /Users/luuuuunatic/Developer/automation/local_qa
-source venv/bin/activate
-export DIFY_API_KEY="app-xxxxxxxxx"
-export RUN_MODE="doc"
-
-python3 mac_local_executor.py --mode execute --file ./requirements_spec.pdf
+# 나쁜 예 (모호함)
+네이버에서 검색해줘
 ```
 
-##### 5.8.9.4 로컬에서 레코딩 (Record 모드)
+- 대상 URL이 명확하지 않으면 `TARGET_URL`에 시작 주소를 반드시 입력한다.
+- 여러 단계가 있으면 순서대로 나열한다. AI가 9대 DSL로 변환한다.
+- 로그인이 필요한 경우 ID/PW를 SRS_TEXT에 포함한다 (예: `아이디 test@test.com, 비밀번호 1234로 로그인한다`).
+
+##### 5.8.9.3 Flow 1: Doc 모드 실행 (Jenkins)
+
+기획서(PDF/Word)를 업로드하면 AI가 테스트 케이스를 추출하여 자동 실행한다.
+
+1. Jenkins에서 `DSCORE-ZeroTouch-QA` Job > `Build with Parameters`를 연다.
+2. 파라미터를 입력한다:
+
+| 파라미터 | 값 |
+| --- | --- |
+| `RUN_MODE` | `doc` |
+| `TARGET_URL` | 테스트 대상 URL |
+| `DOC_FILE` | 기획서 파일 업로드 (PDF 또는 DOCX) |
+
+3. `빌드` 버튼을 누른다.
+4. 시스템 흐름: 파일 업로드 → Dify Parser가 TC 추출 → Planner LLM이 DSL 변환 → 브라우저 자동 실행
+
+> **주의:** `DOC_FILE` 파라미터를 사용하려면 Jenkins에 `file-parameters` 플러그인이 설치되어 있어야 한다.
+
+##### 5.8.9.4 Flow 3: Record 모드 (로컬 터미널 전용)
+
+브라우저 조작을 녹화하여 재사용 가능한 시나리오로 변환한다. Jenkins가 아닌 **맥북 터미널에서 직접 실행**한다.
+
+**최초 1회: 환경 구성**
+
+```bash
+cd /Users/luuuuunatic/Developer/automation/local_qa
+
+# venv 생성 (이미 있으면 건너뜀)
+python3 -m venv venv
+source venv/bin/activate
+pip install requests playwright pillow
+playwright install chromium
+```
+
+**레코딩 실행**
 
 ```bash
 cd /Users/luuuuunatic/Developer/automation/local_qa
 source venv/bin/activate
-export DIFY_API_KEY="app-xxxxxxxxx"
+export DIFY_API_KEY="app-xxxxxxxxx"   # Dify에서 발급받은 API Key
 
 python3 mac_local_executor.py --mode record --url https://target-app.com
 ```
 
-브라우저가 열리면 평소처럼 조작한다. 브라우저 창을 닫으면 레코딩이 종료되고, Vision LLM이 정제한 DSL이 `artifacts/scenario.json`에 저장된다.
+1. 브라우저가 열리면 **평소처럼 조작**한다 (클릭, 입력, 선택 등).
+2. 조작할 때마다 대상 요소에 **붉은 테두리(Red Box)**가 표시되고, 스크린샷이 자동 캡처된다.
+3. 테스트가 끝나면 **브라우저 창을 닫는다** (X 버튼).
+4. Vision LLM이 캡처 데이터를 정제하여 `artifacts/scenario.json`에 DSL 시나리오를 저장한다.
 
-##### 5.8.9.5 로컬에서 실행 (디버깅)
+> 생성된 `scenario.json`은 이후 Chat 모드에서 재사용하거나, `regression_test.py`로 변환하여 독립 실행할 수 있다.
+
+##### 5.8.9.5 로컬 CLI 실행 (디버깅)
+
+Jenkins 없이 로컬 터미널에서 직접 실행하여 디버깅할 수 있다.
+
+**Chat 모드 (자연어 입력)**
 
 ```bash
 cd /Users/luuuuunatic/Developer/automation/local_qa
@@ -6158,9 +6230,62 @@ source venv/bin/activate
 export DIFY_API_KEY="app-xxxxxxxxx"
 export RUN_MODE="chat"
 export SRS_TEXT="네이버에서 DSCORE 검색 후 엔터"
+export TARGET_URL="https://www.naver.com"
 
 python3 mac_local_executor.py --mode execute
 ```
+
+**Doc 모드 (기획서 파일)**
+
+```bash
+cd /Users/luuuuunatic/Developer/automation/local_qa
+source venv/bin/activate
+export DIFY_API_KEY="app-xxxxxxxxx"
+export RUN_MODE="doc"
+export TARGET_URL="https://target-app.com"
+
+python3 mac_local_executor.py --mode execute --file ./requirements_spec.pdf
+```
+
+> 로컬 실행 시 `JENKINS_HOME` 환경변수가 없으므로 **headless 모드**로 동작한다. 브라우저 화면을 보려면 `export JENKINS_HOME=1`을 추가한다.
+
+##### 5.8.9.6 결과 확인 및 산출물 활용
+
+실행이 완료되면 `artifacts/` 디렉토리에 아래 산출물이 생성된다.
+
+| 파일 | 용도 | 활용 방법 |
+| --- | --- | --- |
+| `index.html` | 시각적 리포트 | Jenkins Report 탭에서 자동 게시됨. 브라우저로 열어 스텝별 성공/실패/치유 현황 확인. |
+| `scenario.json` | 원본 DSL 시나리오 | Dify가 생성한 원본. 시나리오 검토 및 수정 후 재사용 가능. |
+| `scenario.healed.json` | 치유된 최종 시나리오 | Self-Healing이 반영된 버전. 다음 실행 시 안정적인 시나리오로 재사용 가능. |
+| `regression_test.py` | 독립 회귀 테스트 | LLM 없이 Playwright만으로 재실행 가능한 스크립트. CI에 등록하여 회귀 테스트로 활용. |
+| `run_log.jsonl` | 실행 로그 | 스텝별 상태(PASS/HEALED/FAIL), 치유 단계, 타임스탬프 기록. 디버깅용. |
+| `step_N_pass.png` | 성공 스크린샷 | 각 스텝 성공 시점의 화면 증적. |
+| `step_N_healed.png` | 치유 스크린샷 | 로컬 자가 치유 후 성공 시점의 화면 증적. |
+| `error_final.png` | 에러 스크린샷 | 모든 치유 실패 후 최종 에러 화면. |
+
+**regression_test.py 활용 예시:**
+
+성공한 시나리오는 자동으로 `regression_test.py`가 생성된다. 이 파일은 Dify/LLM 없이 독립 실행이 가능하므로 CI 파이프라인에 등록하여 회귀 테스트로 사용할 수 있다.
+
+```bash
+cd /Users/luuuuunatic/Developer/automation/local_qa/artifacts
+python3 regression_test.py
+# 출력: Regression test passed.
+```
+
+##### 5.8.9.7 트러블슈팅
+
+| 증상 | 원인 | 해결 |
+| --- | --- | --- |
+| 스크린샷이 검게 나옴 | macOS 화면 기록 권한 미부여 | 시스템 설정 > 개인정보 보호 > 화면 기록에 Terminal, Java 추가 |
+| 브라우저 제어가 안 됨 | macOS 접근성 권한 미부여 | 시스템 설정 > 개인정보 보호 > 접근성에 Terminal, Java 추가 |
+| `Dify API 통신 실패` | Dify 서버 미기동 또는 API Key 오류 | `docker compose ps`로 Dify 서비스 상태 확인, API Key 재확인 |
+| `요소 탐색 실패` 연속 | 대상 웹사이트가 SPA로 렌더링 지연 | SRS_TEXT에 `wait` 단계를 추가 (예: `페이지 로딩 후 2초 대기`) |
+| `scenario.json`이 비어 있음 | Dify Planner LLM 응답이 JSON 형식이 아님 | Dify Chatflow에서 Planner 노드의 시스템 프롬프트 확인 (Section 5.8.5.3) |
+| Jenkins에서 `base64File` 오류 | `file-parameters` 플러그인 미설치 | Jenkins 관리 > Plugins > Available에서 `file-parameters` 검색 후 설치 |
+| `regression_test.py` 미생성 | 실행 중 FAIL 스텝이 있었음 | 전체 스텝이 PASS 또는 HEALED여야 생성됨. 실패 원인을 먼저 해결 |
+| Jenkins Report 탭이 안 보임 | `htmlpublisher` 플러그인 미설치 | Jenkins 관리 > Plugins > Available에서 `HTML Publisher` 검색 후 설치 |
 
 
 #### 5.8.10 후속 작업 및 완료 이력
@@ -6181,8 +6306,7 @@ python3 mac_local_executor.py --mode execute
 | `regression_test.py` 자동 생성 | 성공 시나리오를 LLM 없이 재실행 가능한 독립 Playwright 스크립트로 변환. `_generate_regression_test()` 메서드 및 `_target_to_playwright_code()` 시맨틱 타겟 변환 유틸 구현. | v3.4 완료 |
 | `index.html` 리포트 생성 | Jenkins에 게시할 시각적 HTML 리포트. eval_runner의 CSS/레이아웃 패턴 이식. 스텝별 상태 배지, 스크린샷 링크, 대시보드 카드 포함. `_build_html_report()` 메서드 구현. | v3.4 완료 |
 | Candidate Search 셀렉터 확장 | select 액션에 `option, [role='option']` 추가. hover 액션에 `[role='menu'], nav a, [aria-haspopup], [role='tooltip']` 추가. detached element 예외 방어 추가. | v3.4 완료 |
-| Langfuse 연동 | eval_runner의 Trace/Span 패턴 이식. 실행 단위 Trace + 스텝별 Span + HealAttempt Score. 선택적 의존성(미설치 시 자동 비활성). Jenkinsfile에 Langfuse Credentials 연동. | v3.4 완료 |
-| Jenkinsfile v3.4 전면 개편 | v2.5(Ollama/Docker)에서 v3.4(Dify Brain/Mac Agent)로 전환. HTML Report publishHTML, Langfuse 환경 변수, venv 캐싱, Doc 모드 파일 업로드 지원. | v3.4 완료 |
+| Jenkinsfile v3.4 전면 개편 | v2.5(Ollama/Docker)에서 v3.4(Dify Brain/Mac Agent)로 전환. HTML Report publishHTML, venv 캐싱, Doc 모드 파일 업로드 지원. | v3.4 완료 |
 | `target_url` Dify 전달 | Dify Planner에 TARGET_URL을 payload로 전달하여 navigate 액션의 정확도 향상. | v3.4 완료 |
 
 ##### 5.8.10.3 미완료 항목 (v3.5 로드맵)
@@ -6191,7 +6315,6 @@ python3 mac_local_executor.py --mode execute
 | --- | --- | --- |
 | 시나리오 캐시 재실행 | `scenario.healed.json`을 입력으로 받아 Dify 호출 없이 즉시 재실행하는 `--scenario` CLI 옵션 추가 | 낮음 |
 | 멀티 시나리오 배치 실행 | 여러 시나리오를 순차/병렬 실행하고 통합 리포트를 생성 | 중간 |
-| Langfuse 대시보드 커스텀 | Zero-Touch QA 전용 Langfuse 대시보드 프리셋 (치유율, 평균 스텝 수, 실패 패턴 등) | 낮음 |
 
 > 상세 가이드 원본: `eval_runner/zeroTouchQA_v3.3.md`
 
