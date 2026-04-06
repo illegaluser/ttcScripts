@@ -6,93 +6,17 @@
 
 | 검증 단계 | 측정 지표 (Metric) | 평가 방식 | 담당 프레임워크 및 측정 원리 | 코드 위치 |
 | --- | --- | --- | --- | --- |
-| **1. Fail-Fast**<br>
-
-<br>(즉시 차단) | **① Policy Violation**<br>
-
-<br>(보안/금칙어 위반) | 정량 | **[Promptfoo]**<br>
-
-<br>AI의 응답을 임시 파일로 저장한 뒤, 외장 도구인 Promptfoo를 CLI로 호출하여 주민등록번호나 API Key 등 정의된 정규식 패턴이 발견되면 즉시 불합격시킵니다. | `test_runner.py`의<br>
-
-<br>`_promptfoo_check` |
-|  | **② Format Compliance**<br>
-
-<br>(응답 규격 준수) | 정량 | **[jsonschema (Python)]**<br>
-
-<br>대상 AI가 API일 경우, 반환한 JSON 데이터가 우리가 요구한 필수 형태(예: `answer` 키 포함)를 갖추었는지 파이썬 라이브러리로 검사합니다. | `test_runner.py`의<br>
-
-<br>`_schema_check` |
-| **2. 과업 검사**<br>
-
-<br>(Agent 전용) | **③ Task Completion**<br>
-
-<br>(지시 과업 달성도) | 정량 +<br>
-
-<br>LLM as Judge | **[Python Custom Logic + DeepEval GEval]**<br>
-
-<br>DSL 규칙(`status_code=200`, `raw~r/완료/`, `json.path~r/정규식/`)으로 먼저 정량 판정을 시도하고, 자연어 기준일 경우 GEval이 로컬 LLM을 심판관으로 기용하여 과업 달성 여부를 채점합니다. | `test_runner.py`의<br>
-
-<br>`_evaluate_agent_criteria` |
-| **3. 심층 평가**<br>
-
-<br>(문맥 채점) | **④ Answer Relevancy**<br>
-
-<br>(동문서답 여부) | LLM as Judge | **[DeepEval + Ollama]**<br>
-
-<br>DeepEval 프레임워크가 로컬 LLM(Ollama)을 심판관으로 기용하여, AI의 대답이 질문 의도에 부합하는지 0~1점 사이의 실수로 정밀 채점합니다. | `test_runner.py`의<br>
-
-<br>`AnswerRelevancyMetric` |
-|  | **⑤ Toxicity**<br>
-
-<br>(유해성 검사) | LLM as Judge | **[DeepEval + Ollama]**<br>
-
-<br>AI의 응답에 혐오, 차별, 공격적 표현 등 유해한 내용이 포함되어 있는지 로컬 LLM이 채점합니다. 점수가 낮을수록 안전한 응답입니다. | `test_runner.py`의<br>
-
-<br>`ToxicityMetric` |
-|  | **⑥ Faithfulness**<br>
-
-<br>(환각/거짓말 여부) | LLM as Judge | **[DeepEval + Ollama]**<br>
-
-<br>답변 내용이 백그라운드에서 검색된 원문(`docs`)에 명시된 사실인지, 지어낸 말인지 채점합니다. (※ 대상 시스템이 원문을 반환하지 않으면 오탐 방지를 위해 생략합니다.) | `test_runner.py`의<br>
-
-<br>`FaithfulnessMetric` |
-|  | **⑦ Contextual Recall**<br>
-
-<br>(정보 검색력) | LLM as Judge | **[DeepEval + Ollama]**<br>
-
-<br>질문에 답하기 위해 AI가 충분하고 올바른 정보(원문)를 검색해 왔는지 채점합니다. (※ 검색 원문 확인이 가능한 API 모드 전용입니다.) | `test_runner.py`의<br>
-
-<br>`ContextualRecallMetric` |
-|  | **⑧ Contextual Precision**<br>
-
-<br>(검색 정밀도) | LLM as Judge | **[DeepEval + Ollama]**<br>
-
-<br>AI가 검색해 온 문맥에 불필요한 노이즈가 적고, 질문에 관련된 핵심 근거가 중심인지 채점합니다. (※ 검색 원문 확인이 가능한 API 모드 전용입니다.) | `test_runner.py`의<br>
-
-<br>`ContextualPrecisionMetric` |
-| **4. 멀티턴 일관성**<br>
-
-<br>(대화 맥락 평가) | **⑨ Multi-turn Consistency**<br>
-
-<br>(대화 일관성) | LLM as Judge | **[DeepEval GEval + Ollama]**<br>
-
-<br>2턴 이상의 대화에서 AI가 이전 턴의 정보를 기억하고, 모순 없이 일관된 응답을 유지하는지 전체 대화록을 기반으로 종합 채점합니다. (※ 단일턴 대화는 생략합니다.) | `test_runner.py`의<br>
-
-<br>`GEval` (멀티턴) |
-| **5. 운영 관제** | **⑩ Latency**<br>
-
-<br>(응답 소요 시간) | 정량 | **[Python `time` + Langfuse]**<br>
-
-<br>질문을 던진 시점부터 답변 수신(또는 화면 렌더링) 완료까지의 체감 시간을 밀리초(ms)로 재고 Langfuse에 전송합니다. | `adapters/` 내부의<br>
-
-<br>타이머 변수 |
-|  | **⑪ Token Usage**<br>
-
-<br>(토큰 사용량) | 정량 | **[Python + API 응답]**<br>
-
-<br>대상 AI가 응답에 포함한 토큰 사용량(입력/출력/합계)을 수집하여 비용 추적 및 효율성 분석에 활용합니다. (※ 정보성 지표이며 합격/불합격 기준은 없습니다.) | `test_runner.py`의<br>
-
-<br>usage 추출 로직 |
+| **1. Fail-Fast**<br>(즉시 차단) | **① Policy Violation**<br>(보안/금칙어 위반) | 정량 | **[Promptfoo]**<br>AI의 응답을 임시 파일로 저장한 뒤, 외장 도구인 Promptfoo를 CLI로 호출하여 주민등록번호나 API Key 등 정의된 정규식 패턴이 발견되면 즉시 불합격시킵니다. | `test_runner.py`의<br>`_promptfoo_check` |
+|  | **② Format Compliance**<br>(응답 규격 준수) | 정량 | **[jsonschema (Python)]**<br>대상 AI가 API일 경우, 반환한 JSON 데이터가 우리가 요구한 필수 형태(예: `answer` 키 포함)를 갖추었는지 파이썬 라이브러리로 검사합니다. | `test_runner.py`의<br>`_schema_check` |
+| **2. 과업 검사**<br>(Agent 전용) | **③ Task Completion**<br>(지시 과업 달성도) | 정량 + LLM as Judge | **[Python Custom Logic + DeepEval GEval]**<br>DSL 규칙(`status_code=200`, `raw~r/완료/`, `json.path~r/정규식/`)으로 먼저 정량 판정을 시도하고, 자연어 기준일 경우 GEval이 로컬 LLM을 심판관으로 기용하여 과업 달성 여부를 채점합니다. | `test_runner.py`의<br>`_evaluate_agent_criteria` |
+| **3. 심층 평가**<br>(문맥 채점) | **④ Answer Relevancy**<br>(동문서답 여부) | LLM as Judge | **[DeepEval + Ollama]**<br>DeepEval 프레임워크가 로컬 LLM(Ollama)을 심판관으로 기용하여, AI의 대답이 질문 의도에 부합하는지 0~1점 사이의 실수로 정밀 채점합니다. | `test_runner.py`의<br>`AnswerRelevancyMetric` |
+|  | **⑤ Toxicity**<br>(유해성 검사) | LLM as Judge | **[DeepEval + Ollama]**<br>AI의 응답에 혐오, 차별, 공격적 표현 등 유해한 내용이 포함되어 있는지 로컬 LLM이 채점합니다. 점수가 낮을수록 안전한 응답입니다. | `test_runner.py`의<br>`ToxicityMetric` |
+|  | **⑥ Faithfulness**<br>(환각/거짓말 여부) | LLM as Judge | **[DeepEval + Ollama]**<br>답변 내용이 백그라운드에서 검색된 원문(`docs`)에 명시된 사실인지, 지어낸 말인지 채점합니다. (※ 대상 시스템이 원문을 반환하지 않으면 오탐 방지를 위해 생략합니다.) | `test_runner.py`의<br>`FaithfulnessMetric` |
+|  | **⑦ Contextual Recall**<br>(정보 검색력) | LLM as Judge | **[DeepEval + Ollama]**<br>질문에 답하기 위해 AI가 충분하고 올바른 정보(원문)를 검색해 왔는지 채점합니다. (※ 검색 원문 확인이 가능한 API 모드 전용입니다.) | `test_runner.py`의<br>`ContextualRecallMetric` |
+|  | **⑧ Contextual Precision**<br>(검색 정밀도) | LLM as Judge | **[DeepEval + Ollama]**<br>AI가 검색해 온 문맥에 불필요한 노이즈가 적고, 질문에 관련된 핵심 근거가 중심인지 채점합니다. (※ 검색 원문 확인이 가능한 API 모드 전용입니다.) | `test_runner.py`의<br>`ContextualPrecisionMetric` |
+| **4. 멀티턴 일관성**<br>(대화 맥락 평가) | **⑨ Multi-turn Consistency**<br>(대화 일관성) | LLM as Judge | **[DeepEval GEval + Ollama]**<br>2턴 이상의 대화에서 AI가 이전 턴의 정보를 기억하고, 모순 없이 일관된 응답을 유지하는지 전체 대화록을 기반으로 종합 채점합니다. (※ 단일턴 대화는 생략합니다.) | `test_runner.py`의<br>`GEval` (멀티턴) |
+| **5. 운영 관제** | **⑩ Latency**<br>(응답 소요 시간) | 정량 | **[Python `time` + Langfuse]**<br>질문을 던진 시점부터 답변 수신(또는 화면 렌더링) 완료까지의 체감 시간을 밀리초(ms)로 재고 Langfuse에 전송합니다. | `adapters/` 내부의<br>타이머 변수 |
+|  | **⑪ Token Usage**<br>(토큰 사용량) | 정량 | **[Python + API 응답]**<br>대상 AI가 응답에 포함한 토큰 사용량(입력/출력/합계)을 수집하여 비용 추적 및 효율성 분석에 활용합니다. (※ 정보성 지표이며 합격/불합격 기준은 없습니다.) | `test_runner.py`의<br>usage 추출 로직 |
 
 ---
 
