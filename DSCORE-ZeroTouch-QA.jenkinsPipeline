@@ -1,12 +1,13 @@
 // =============================================================================
-// DSCORE-ZeroTouch-QA Jenkinsfile (v3.4)
+// DSCORE-ZeroTouch-QA Jenkinsfile (v4.0)
 //
 // 변경 내역
-// - [v3.4] Dify Brain 기반 아키텍처로 전면 전환 (Ollama 직접 호출 제거)
-// - [v3.4] Mac Local Agent (mac-ui-tester) 기반 Headed 브라우저 실행
-// - [v3.4] Flow 1 (Doc), Flow 2 (Chat), Flow 3 (Convert) 3대 진입 경로 지원
-// - [v3.4] HTML 리포트 자동 게시, regression_test.py 자동 생성
-// - [v3.4] Python venv 캐싱
+// - [v4.0] 모듈화된 Python 패키지(zero_touch_qa)로 전면 전환
+// - [v4.0] python3 -m zero_touch_qa 방식 실행
+// - [v4.0] Mac Local Agent (mac-ui-tester) 기반 Headed 브라우저 실행
+// - [v4.0] Flow 1 (Doc), Flow 2 (Chat), Flow 3 (Convert) 3대 진입 경로 지원
+// - [v4.0] HTML 리포트 자동 게시, regression_test.py 자동 생성
+// - [v4.0] Python venv 캐싱
 // =============================================================================
 
 pipeline {
@@ -37,6 +38,7 @@ pipeline {
     environment {
         AGENT_HOME   = "/Users/luuuuunatic/Developer/automation/local_qa"
         DIFY_API_KEY = credentials('dify-qa-api-token')
+        DIFY_BASE_URL = "http://localhost/v1"
     }
 
     stages {
@@ -77,35 +79,33 @@ pipeline {
             }
         }
 
-        stage('3. 자율 주행 QA 엔진 가동') {
+        stage('3. Zero-Touch QA 엔진 가동') {
             steps {
-                script {
-                    sh """
-                        cd ${AGENT_HOME}
-                        source venv/bin/activate
+                sh """
+                    cd ${AGENT_HOME}
+                    source venv/bin/activate
 
-                        export RUN_MODE="${params.RUN_MODE}"
-                        export TARGET_URL="${params.TARGET_URL}"
-                        export SRS_TEXT="${params.SRS_TEXT}"
+                    # zero_touch_qa 패키지를 PYTHONPATH에 추가
+                    export PYTHONPATH="${WORKSPACE}/data/jenkins/scripts"
+                    export ARTIFACTS_DIR="${AGENT_HOME}/artifacts"
+                    export TARGET_URL="${params.TARGET_URL}"
+                    export SRS_TEXT='${params.SRS_TEXT}'
 
-                        if [ "${params.RUN_MODE}" = "convert" ]; then
-                            # Flow 3: Playwright 스크립트 → DSL 변환 → 즉시 실행
+                    case "${params.RUN_MODE}" in
+                        convert)
                             echo "[Engine] Flow 3: Convert + Execute"
-                            python3 mac_local_executor.py --mode convert --file upload.py
-                            python3 mac_local_executor.py --mode execute --scenario artifacts/scenario.json
-
-                        elif [ "${params.RUN_MODE}" = "doc" ] && [ -f "upload.pdf" ]; then
-                            # Flow 1: 기획서 업로드 → Dify Planner → 실행
+                            python3 -m zero_touch_qa --mode convert --file upload.py
+                            ;;
+                        doc)
                             echo "[Engine] Flow 1: Doc-to-Test"
-                            python3 mac_local_executor.py --mode execute --file upload.pdf
-
-                        else
-                            # Flow 2: 자연어 → Dify Planner → 실행
+                            python3 -m zero_touch_qa --mode doc --file upload.pdf
+                            ;;
+                        chat)
                             echo "[Engine] Flow 2: Chat-to-Test"
-                            python3 mac_local_executor.py --mode execute
-                        fi
-                    """
-                }
+                            python3 -m zero_touch_qa --mode chat
+                            ;;
+                    esac
+                """
             }
         }
     }
@@ -140,7 +140,7 @@ pipeline {
             // 빌드 설명
             script {
                 def reportUrl = "${BUILD_URL}Zero-Touch_20QA_20Report"
-                currentBuild.description = "ZT-QA v3.4 | ${params.RUN_MODE} | Report: ${reportUrl}"
+                currentBuild.description = "ZT-QA v4.0 | ${params.RUN_MODE} | Report: ${reportUrl}"
             }
 
             echo "테스트 종료. Jenkins 빌드 결과에서 Artifacts를 확인하십시오."
