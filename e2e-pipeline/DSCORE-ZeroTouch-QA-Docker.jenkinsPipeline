@@ -1,0 +1,195 @@
+// =============================================================================
+// DSCORE-ZeroTouch-QA-Docker Jenkinsfile (v2.1)
+//
+// 변경 내역
+// - [v1.0] 독립 E2E 스택(e2e-net)에서 동작
+// - [v1.1] 아티팩트 공유: bind-mount → named volume (e2e-jenkins-ws)
+// - [v2.0] 아키텍처 롤백: e2e-runner 컨테이너 제거
+//          mac-ui-tester 에이전트에서 python -m zero_touch_qa 직접 실행
+// - [v2.1] 경로 하드코딩 제거 — 어떤 PC에서도 수정 없이 동작
+//          AGENT_HOME: ${WORKSPACE}/.qa_home 으로 자동 결정
+//          SCRIPTS_HOME: Jenkins 노드 환경변수로 주입 (Jenkinsfile 수정 불필요)
+// =============================================================================
+
+pipeline {
+    agent { label 'mac-ui-tester' }
+
+    parameters {
+        choice(
+            name: 'RUN_MODE',
+            choices: ['chat', 'doc', 'convert', 'execute'],
+            description: 'chat: 자연어 입력, doc: 기획서 업로드, convert: Playwright 녹화 변환, execute: 기존 시나리오 재실행'
+        )
+        string(
+            name: 'TARGET_URL',
+            defaultValue: 'https://www.google.com',
+            description: '테스트 대상 URL'
+        )
+        text(
+            name: 'SRS_TEXT',
+            defaultValue: '검색창에 DSCORE 입력 후 엔터',
+            description: '[Chat] 자연어 요구사항'
+        )
+        base64File(
+            name: 'DOC_FILE',
+            description: '[Doc/Convert] 기획서(PDF) 또는 Playwright 녹화 스크립트(.py) / [Execute] scenario.json'
+        )
+        booleanParam(
+            name: 'HEADLESS',
+            defaultValue: false,
+            description: '체크 해제(기본값): 실제 브라우저 표시 / 체크: headless 모드'
+        )
+    }
+
+    environment {
+        // AGENT_HOME: Jenkins workspace 아래 자동 생성 — 수정 불필요
+        //   venv 와 artifacts 를 잡별(Job)로 분리하여 관리한다.
+        AGENT_HOME    = "${WORKSPACE}/.qa_home"
+
+        // SCRIPTS_HOME: Jenkins 노드 환경변수에서 자동 주입 — 수정 불필요
+        //   설정 위치: Jenkins 관리 → 노드 관리 → mac-ui-tester
+        //              → Node Properties → 환경변수 → SCRIPTS_HOME = /path/to/e2e-pipeline
+        //   (이 값은 zero_touch_qa/ 패키지가 들어있는 e2e-pipeline/ 폴더의 절대 경로)
+
+        // Jenkins Credentials 에 저장된 Dify QA Chatflow API 키
+        DIFY_API_KEY  = credentials('dify-qa-api-token')
+        // e2e 독립 스택 Dify 엔드포인트
+        DIFY_BASE_URL = "http://localhost:18081/v1"
+    }
+
+    stages {
+
+        // ──────────────────────────────────────────────────────────────────
+        // Stage 1: 환경 검증 및 Python venv 캐싱
+        // SCRIPTS_HOME 미설정 시 명확한 오류 메시지로 즉시 중단
+        // venv 는 WORKSPACE 아래에 캐싱 — 빌드 간 재사용
+        // ──────────────────────────────────────────────────────────────────
+        stage('1. 환경 동기화 및 캐싱') {
+            steps {
+                sh """
+                    # SCRIPTS_HOME 설정 여부 검증
+                    if [ -z "\${SCRIPTS_HOME:-}" ]; then
+                        echo "======================================================"
+                        echo "[ERROR] SCRIPTS_HOME 환경변수가 설정되지 않았습니다."
+                        echo "  Jenkins 관리 → 노드 관리 → mac-ui-tester"
+                        echo "  → Node Properties → 환경변수"
+                        echo "  → SCRIPTS_HOME = /path/to/e2e-pipeline"
+                        echo "======================================================"
+                        exit 1
+                    fi
+
+                    mkdir -p '${AGENT_HOME}/artifacts'
+                    rm -rf '${AGENT_HOME}/artifacts'/*
+
+                    if [ ! -d '${AGENT_HOME}/venv' ]; then
+                        echo "[Setup] Creating new virtual environment..."
+                        python3 -m venv '${AGENT_HOME}/venv'
+                        source '${AGENT_HOME}/venv/bin/activate'
+                        pip install requests playwright pillow
+                        playwright install chromium
+                    else
+                        echo "[Setup] Using existing virtual environment."
+                    fi
+                """
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────
+        // Stage 2: 파일 준비 (doc / convert / execute 모드)
+        // ──────────────────────────────────────────────────────────────────
+        stage('2. 파일 준비') {
+            when {
+                allOf {
+                    expression { params.RUN_MODE in ['doc', 'convert', 'execute'] }
+                    expression { params.DOC_FILE != null && params.DOC_FILE != '' }
+                }
+            }
+            steps {
+                withFileParameter('DOC_FILE') {
+                    script {
+                        def ext = (params.RUN_MODE == 'convert') ? '.py'
+                                : (params.RUN_MODE == 'execute') ? '.json'
+                                : '.pdf'
+                        sh "cp \"\$DOC_FILE\" '${AGENT_HOME}/upload${ext}'"
+                    }
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────
+        // Stage 3: Zero-Touch QA 엔진 실행
+        // PYTHONPATH = SCRIPTS_HOME (노드 환경변수) → zero_touch_qa 패키지 탐색
+        // ──────────────────────────────────────────────────────────────────
+        stage('3. Zero-Touch QA 엔진 가동') {
+            steps {
+                sh """
+                    source '${AGENT_HOME}/venv/bin/activate'
+
+                    export PYTHONPATH="\${SCRIPTS_HOME}"
+                    export ARTIFACTS_DIR='${AGENT_HOME}/artifacts'
+                    export TARGET_URL='${params.TARGET_URL}'
+                    export SRS_TEXT='${params.SRS_TEXT}'
+
+                    BROWSER_FLAG="${params.HEADLESS ? '--headless' : '--headed'}"
+
+                    case "${params.RUN_MODE}" in
+                        chat)
+                            echo "[Engine] Chat 모드"
+                            python3 -m zero_touch_qa --mode chat \$BROWSER_FLAG
+                            ;;
+                        doc)
+                            echo "[Engine] Doc 모드"
+                            python3 -m zero_touch_qa --mode doc --file '${AGENT_HOME}/upload.pdf' \$BROWSER_FLAG
+                            ;;
+                        convert)
+                            echo "[Engine] Convert 모드"
+                            python3 -m zero_touch_qa --mode convert --file '${AGENT_HOME}/upload.py' \$BROWSER_FLAG
+                            ;;
+                        execute)
+                            echo "[Engine] Execute 모드"
+                            python3 -m zero_touch_qa --mode execute --scenario '${AGENT_HOME}/upload.json' \$BROWSER_FLAG
+                            ;;
+                    esac
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh """
+                mkdir -p 'qa_reports/build-${BUILD_NUMBER}'
+                cp -r '${AGENT_HOME}/artifacts/'* 'qa_reports/build-${BUILD_NUMBER}/' || true
+            """
+
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: "qa_reports/build-${BUILD_NUMBER}",
+                reportFiles: 'index.html',
+                reportName: 'Zero-Touch QA Report'
+            ])
+
+            archiveArtifacts(
+                artifacts: "qa_reports/build-${BUILD_NUMBER}/**/*",
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
+
+            script {
+                def browserMode = params.HEADLESS ? 'headless' : 'headed'
+                currentBuild.description = "ZT-QA | ${params.RUN_MODE} | ${browserMode} | ${params.TARGET_URL}"
+            }
+
+            echo "테스트 종료. Jenkins 빌드 결과에서 Artifacts 를 확인하십시오."
+        }
+
+        failure {
+            archiveArtifacts(
+                artifacts: "qa_reports/build-${BUILD_NUMBER}/**/*",
+                allowEmptyArchive: true
+            )
+        }
+    }
+}

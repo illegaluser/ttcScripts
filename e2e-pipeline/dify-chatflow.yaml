@@ -1,0 +1,375 @@
+# =============================================================================
+# DSCORE Zero-Touch QA — Dify Chatflow DSL (v0.1.3)
+#
+# 이 파일은 setup.sh가 Dify에 자동으로 import하는 Chatflow 정의다.
+# 수동 import: Dify 콘솔 → 스튜디오 → 앱 만들기 → DSL 파일에서 가져오기
+#
+# 모델 플레이스홀더: {{OLLAMA_MODEL}}
+#   setup.sh 실행 시 sed로 실제 모델명으로 치환된다.
+#   수동 import 시 이 값을 실제 모델명(예: qwen2.5-coder:14b)으로 바꿔서 사용한다.
+#
+# Chatflow 구조:
+#   Start → IF/ELSE ─── IF (run_mode = heal) ──→ Healer LLM → Answer (Heal)
+#                    └── ELSE (chat / doc)  ──→ Planner LLM → Answer (Plan)
+# =============================================================================
+
+kind: app
+version: 0.1.3
+app:
+  description: 'Zero-Touch QA — 자연어/기획서를 9대 DSL로 변환하고 실패 시 자가 치유 셀렉터를 제안한다.'
+  icon: robot
+  icon_background: '#FFEAD5'
+  mode: advanced-chat
+  name: ZeroTouch QA Brain
+  use_icon_as_answer_icon: false
+
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+
+  graph:
+    # ──────────────────────────────────────────
+    # 엣지 (노드 간 연결 관계)
+    # ──────────────────────────────────────────
+    edges:
+      - data:
+          isInIteration: false
+          sourceType: start
+          targetType: if-else
+        id: edge-start-to-ifelse
+        source: start
+        sourceHandle: source
+        target: ifelse
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+      - data:
+          isInIteration: false
+          sourceType: if-else
+          targetType: llm
+        id: edge-ifelse-to-healer
+        source: ifelse
+        sourceHandle: "true"
+        target: healer
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+      - data:
+          isInIteration: false
+          sourceType: if-else
+          targetType: llm
+        id: edge-ifelse-to-planner
+        source: ifelse
+        sourceHandle: "false"
+        target: planner
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+      - data:
+          isInIteration: false
+          sourceType: llm
+          targetType: answer
+        id: edge-healer-to-answer
+        source: healer
+        sourceHandle: source
+        target: answer-heal
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+      - data:
+          isInIteration: false
+          sourceType: llm
+          targetType: answer
+        id: edge-planner-to-answer
+        source: planner
+        sourceHandle: source
+        target: answer-plan
+        targetHandle: target
+        type: custom
+        zIndex: 0
+
+    # ──────────────────────────────────────────
+    # 노드
+    # ──────────────────────────────────────────
+    nodes:
+
+      # ── Start 노드 ──────────────────────────
+      - data:
+          desc: ''
+          selected: false
+          title: Start
+          type: start
+          variables:
+            - label: run_mode
+              max_length: 48
+              options:
+                - chat
+                - doc
+                - heal
+              required: true
+              type: select
+              variable: run_mode
+            - label: srs_text
+              max_length: 2000
+              options: []
+              required: false
+              type: paragraph
+              variable: srs_text
+            - label: target_url
+              max_length: 256
+              options: []
+              required: false
+              type: text-input
+              variable: target_url
+            - label: error
+              max_length: 2000
+              options: []
+              required: false
+              type: paragraph
+              variable: error
+            - label: dom
+              max_length: 10000
+              options: []
+              required: false
+              type: paragraph
+              variable: dom
+            - label: failed_step
+              max_length: 2000
+              options: []
+              required: false
+              type: paragraph
+              variable: failed_step
+        height: 310
+        id: start
+        position:
+          x: 80
+          y: 260
+        positionAbsolute:
+          x: 80
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+
+      # ── IF/ELSE 노드 ─────────────────────────
+      - data:
+          cases:
+            - case_id: "true"
+              conditions:
+                - comparison_operator: is
+                  id: cond-run-mode-heal
+                  value: heal
+                  variable_selector:
+                    - start
+                    - run_mode
+              id: "true"
+              logical_operator: and
+          desc: 'run_mode = heal → Healer / 그 외 → Planner'
+          selected: false
+          title: IF/ELSE
+          type: if-else
+        height: 126
+        id: ifelse
+        position:
+          x: 390
+          y: 260
+        positionAbsolute:
+          x: 390
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+
+      # ── Planner LLM 노드 ─────────────────────
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: '자연어/기획서 → 9대 DSL JSON 배열 생성'
+          memory:
+            query_prompt_template: ''
+            role_prefix:
+              assistant: ''
+              user: ''
+            window:
+              enabled: false
+              size: 50
+          model:
+            completion_params:
+              temperature: 0.3
+            mode: chat
+            name: "{{OLLAMA_MODEL}}"
+            provider: ollama
+          prompt_template:
+            - id: planner-system
+              role: system
+              text: |
+                당신은 테스트 자동화 아키텍트입니다. 제공된 요구사항(SRS)을 분석하여 아래의 [9대 표준 액션]만 사용하는 JSON 배열을 작성하십시오.
+
+                [9대 표준 액션]: navigate, click, fill, press, select, check, hover, wait, verify
+
+                [규칙]:
+                - 각 스텝은 "step"(숫자), "action"(문자열), "target"(문자열 또는 객체), "value"(문자열), "description"(문자열), "fallback_targets"(문자열 배열) 키를 가져야 합니다.
+                - target은 가능한 한 의미론적 선택자를 사용하십시오. 예: "role=button, name=로그인", "label=이메일", "text=검색"
+                - CSS 셀렉터나 XPath는 의미론적 선택자가 불가능한 경우에만 사용하십시오.
+                - 첫 번째 스텝은 반드시 navigate 액션으로 시작하십시오.
+                - fallback_targets에는 target이 실패할 경우를 대비한 대체 로케이터를 2~3개 제공하십시오. 실행 엔진이 target 실패 시 이 목록을 순서대로 시도합니다.
+
+                [액션별 target/value 규칙]:
+                - navigate: target은 빈 문자열, value에 URL을 넣으십시오.
+                - fill: target은 입력할 요소, value에 입력할 텍스트를 넣으십시오.
+                - press: target은 키를 누를 대상 요소(직전에 fill한 요소와 동일), value에 키 이름(예: "Enter", "Tab")을 넣으십시오.
+                - click/hover/check/select/verify: target은 대상 요소, value는 해당 액션의 값입니다.
+                - wait: target은 빈 문자열, value에 대기 밀리초를 넣으십시오.
+
+                [엄수 사항]:
+                - 반드시 유효한 JSON 배열([...]) 형태만 출력하십시오.
+                - 마크다운 코드블록(```)이나 부연 설명은 절대 금지합니다.
+            - id: planner-user
+              role: user
+              text: "대상 URL: {{#start.target_url#}}\n요구사항: {{#start.srs_text#}}"
+          selected: false
+          title: Planner
+          type: llm
+          variables: []
+          vision:
+            enabled: false
+        height: 98
+        id: planner
+        position:
+          x: 700
+          y: 380
+        positionAbsolute:
+          x: 700
+          y: 380
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+
+      # ── Healer LLM 노드 ──────────────────────
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: 'DOM 분석 → 대체 셀렉터 JSON 제안'
+          memory:
+            query_prompt_template: ''
+            role_prefix:
+              assistant: ''
+              user: ''
+            window:
+              enabled: false
+              size: 50
+          model:
+            completion_params:
+              temperature: 0.1
+            mode: chat
+            name: "{{OLLAMA_MODEL}}"
+            provider: ollama
+          prompt_template:
+            - id: healer-system
+              role: system
+              text: |
+                당신은 자가 치유(Self-Healing) 시스템입니다. 에러 메시지, 실패한 스텝 정보, 그리고 HTML DOM 스냅샷을 분석하십시오.
+
+                [작업]:
+                - 실패한 스텝(failed_step)의 원래 액션과 타겟을 확인하십시오.
+                - 에러 메시지를 바탕으로 기존 요소를 찾지 못한 이유를 파악하십시오.
+                - DOM 내에서 의도에 가장 부합하는 대체 셀렉터를 찾으십시오.
+                - DOM에 실제로 존재하는 요소만 제안하십시오.
+
+                [출력 형식]:
+                - 순수 JSON 객체({...}) 형식으로만 출력하십시오.
+                - "target" 키(새 로케이터)와 "fallback_targets" 키(대체 로케이터 배열 2~3개)를 포함하십시오.
+                - 부연 설명은 절대 금지합니다.
+            - id: healer-user
+              role: user
+              text: "에러: {{#start.error#}}\n\n실패한 스텝:\n{{#start.failed_step#}}\n\nDOM 스냅샷:\n{{#start.dom#}}"
+          selected: false
+          title: Healer
+          type: llm
+          variables: []
+          vision:
+            enabled: false
+        height: 98
+        id: healer
+        position:
+          x: 700
+          y: 130
+        positionAbsolute:
+          x: 700
+          y: 130
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+
+      # ── Answer (Heal) 노드 ───────────────────
+      - data:
+          answer: "{{#healer.text#}}"
+          desc: ''
+          selected: false
+          title: Answer (Heal)
+          type: answer
+          variables: []
+        height: 107
+        id: answer-heal
+        position:
+          x: 1010
+          y: 130
+        positionAbsolute:
+          x: 1010
+          y: 130
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+
+      # ── Answer (Plan) 노드 ───────────────────
+      - data:
+          answer: "{{#planner.text#}}"
+          desc: ''
+          selected: false
+          title: Answer (Plan)
+          type: answer
+          variables: []
+        height: 107
+        id: answer-plan
+        position:
+          x: 1010
+          y: 380
+        positionAbsolute:
+          x: 1010
+          y: 380
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244

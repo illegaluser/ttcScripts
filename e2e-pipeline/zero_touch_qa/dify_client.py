@@ -1,0 +1,122 @@
+import json
+import logging
+import os
+
+import requests
+
+from .config import Config
+from .utils import extract_json_safely
+
+log = logging.getLogger(__name__)
+
+
+class DifyConnectionError(Exception):
+    """Dify API 통신 실패 시 발생한다."""
+
+
+class DifyClient:
+    """
+    Dify Chatflow API 통신 계층.
+    - /v1/files/upload : Doc 모드 문서 업로드
+    - /v1/chat-messages : 시나리오 생성 및 치유 요청 (blocking)
+    """
+
+    def __init__(self, config: Config):
+        self.base_url = config.dify_base_url
+        self.headers = {"Authorization": f"Bearer {config.dify_api_key}"}
+
+    # ── Doc 모드: 문서 파일 업로드 ──
+    def upload_file(self, file_path: str) -> str:
+        """Dify Files API에 문서를 업로드하고 upload_file_id를 반환한다."""
+        log.info("[Doc] 문서 업로드 중... (%s)", file_path)
+        try:
+            with open(file_path, "rb") as f:
+                res = requests.post(
+                    f"{self.base_url}/files/upload",
+                    headers=self.headers,
+                    files={"file": (os.path.basename(file_path), f, "application/pdf")},
+                    data={"user": "mac-agent"},
+                    timeout=60,
+                )
+                res.raise_for_status()
+        except requests.RequestException as e:
+            raise DifyConnectionError(f"파일 업로드 실패: {e}") from e
+
+        file_id = res.json().get("id")
+        log.info("[Doc] 문서 업로드 완료 (ID: %s)", file_id)
+        return file_id
+
+    # ── 시나리오 생성 (chat / doc 모드) ──
+    def generate_scenario(
+        self,
+        run_mode: str,
+        srs_text: str,
+        target_url: str,
+        file_id: str | None = None,
+    ) -> list[dict]:
+        """Dify Chatflow에 시나리오 생성을 요청하고 DSL 스텝 배열을 반환한다."""
+        payload = {
+            "inputs": {
+                "run_mode": run_mode,
+                "srs_text": srs_text,
+                "target_url": target_url,
+            },
+            "query": "실행을 요청합니다.",
+            "response_mode": "blocking",
+            "user": "mac-agent",
+        }
+        if file_id:
+            payload["files"] = [
+                {
+                    "type": "document",
+                    "transfer_method": "local_file",
+                    "upload_file_id": file_id,
+                }
+            ]
+
+        answer = self._call(payload)
+        scenario = extract_json_safely(answer)
+        if not scenario or not isinstance(scenario, list):
+            raise DifyConnectionError(
+                f"시나리오 파싱 실패. Dify 원본 응답:\n{answer[:500]}"
+            )
+        return scenario
+
+    # ── 치유 요청 (heal 모드) ──
+    def request_healing(
+        self,
+        error_msg: str,
+        dom_snapshot: str,
+        failed_step: dict,
+    ) -> dict | None:
+        """실패한 스텝의 치유를 요청하고, 새 target 정보를 반환한다."""
+        payload = {
+            "inputs": {
+                "run_mode": "heal",
+                "error": error_msg,
+                "dom": dom_snapshot,
+                "failed_step": json.dumps(failed_step, ensure_ascii=False),
+            },
+            "query": "실행을 요청합니다.",
+            "response_mode": "blocking",
+            "user": "mac-agent",
+        }
+        answer = self._call(payload)
+        return extract_json_safely(answer)
+
+    # ── 내부: Chatflow API 호출 ──
+    def _call(self, payload: dict) -> str:
+        try:
+            res = requests.post(
+                f"{self.base_url}/chat-messages",
+                json=payload,
+                headers={
+                    **self.headers,
+                    "Content-Type": "application/json",
+                },
+                timeout=120,
+            )
+            res.raise_for_status()
+            return res.json().get("answer", "")
+        except requests.RequestException as e:
+            raise DifyConnectionError(f"Dify API 통신 실패: {e}") from e
