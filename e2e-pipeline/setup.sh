@@ -134,10 +134,15 @@ cat > docker-compose.override.yaml << 'OVERRIDE_YAML'
 # setup.sh가 생성한 파일 — 첫 설치 시 Setup Wizard를 우회하고
 # jenkins-init/ 폴더의 Groovy 스크립트를 자동 실행한다.
 # 설치 완료 후에도 유지해도 무방하다 (runSetupWizard=false는 안전).
+#
+# CSP="" : publishHTML로 게시한 HTML 리포트에서 JS가 동작하도록 허용한다.
+#   Script Console로 적용하면 재시작 시 초기화되므로 JAVA_OPTS에 영구 설정한다.
 services:
   jenkins:
     environment:
-      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+      JAVA_OPTS: >-
+        -Djenkins.install.runSetupWizard=false
+        -Dhudson.model.DirectoryBrowserSupport.CSP=
     volumes:
       - ./jenkins-init:/var/jenkins_home/init.groovy.d
 OVERRIDE_YAML
@@ -151,9 +156,13 @@ ok "컨테이너 기동 명령 완료"
 # ─────────────────────────────────────────────────────────────────────────────
 log "=== Phase 2: 서비스 준비 대기 ==="
 
-# Dify: DB 마이그레이션 포함 최대 5분 대기
-log "Dify API 준비 대기 (DB 마이그레이션 포함, 최대 5분)..."
-wait_http "${DIFY_URL}/health" "Dify API" 360
+# Dify: nginx 응답 확인 (web 레이어가 뜨는지 먼저 체크)
+log "Dify 웹 레이어 준비 대기..."
+wait_http "${DIFY_URL}" "Dify Web" 180
+
+# Dify API: DB 마이그레이션 완료 확인 (/v1/health 는 api:5001 이 실제로 준비됐을 때만 200 반환)
+log "Dify API 준비 대기 (DB 마이그레이션 포함, 최대 6분)..."
+wait_http "${DIFY_URL}/v1/health" "Dify API(/v1/health)" 360
 
 # Jenkins: Groovy init 스크립트 실행 포함 대기
 log "Jenkins 준비 대기..."
@@ -352,8 +361,10 @@ else
   ok "Jenkins API 연결 확인"
 
   # 5-1. 플러그인 설치
-  log "5-1. Jenkins 플러그인 설치 (file-parameters, htmlpublisher)..."
-  PLUGIN_XML='<jenkins><install plugin="file-parameters@latest"/><install plugin="htmlpublisher@latest"/></jenkins>'
+  log "5-1. Jenkins 플러그인 설치 (workflow-aggregator, file-parameters, htmlpublisher)..."
+  # workflow-aggregator: Pipeline 실행에 필수 (workflow-job, workflow-cps 등 포함)
+  # Setup Wizard를 우회할 경우 이 메타 플러그인이 없으면 Pipeline Job 생성 자체가 실패한다
+  PLUGIN_XML='<jenkins><install plugin="workflow-aggregator@latest"/><install plugin="file-parameters@latest"/><install plugin="htmlpublisher@latest"/></jenkins>'
   curl -sf -X POST "${JENKINS_URL}/pluginManager/installNecessaryPlugins" \
     -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
     -H "Content-Type: text/xml" \
@@ -361,9 +372,9 @@ else
     && ok "플러그인 설치 요청 완료 (백그라운드 처리)" \
     || warn "플러그인 설치 요청 실패 — GUIDE.md §8.2 참조"
 
-  # 플러그인 설치 완료 대기 후 재시작
-  log "플러그인 설치 완료 대기 (30초)..."
-  sleep 30
+  # workflow-aggregator는 의존 플러그인이 많아 설치에 시간이 필요하다
+  log "플러그인 설치 완료 대기 (60초)..."
+  sleep 60
   log "Jenkins 재시작..."
   docker restart e2e-jenkins >/dev/null 2>&1 || true
   log "Jenkins 재시작 후 준비 대기..."
@@ -400,15 +411,10 @@ else
     warn "Dify API Key 없음 — Credentials를 수동으로 등록하십시오 (GUIDE.md §8.3)"
   fi
 
-  # 5-3. CSP 완화 (HTML 리포트 JavaScript 허용)
-  log "5-3. Jenkins CSP 완화..."
-  curl -sf -X POST "${JENKINS_URL}/scriptText" \
-    -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    --data-urlencode 'script=System.setProperty("hudson.model.DirectoryBrowserSupport.CSP", "")' \
-    >/dev/null 2>&1 \
-    && ok "CSP 완화 설정 완료" \
-    || warn "CSP 설정 실패 — GUIDE.md §8.4 참조"
+  # 5-3. CSP 완화 확인 (JAVA_OPTS로 영구 적용됨)
+  # docker-compose.override.yaml의 JAVA_OPTS에 -Dhudson.model.DirectoryBrowserSupport.CSP= 이 설정되어 있으므로
+  # 재시작 후에도 유지된다. Script Console 방식(재시작 시 초기화)은 사용하지 않는다.
+  ok "CSP 완화: docker-compose.override.yaml JAVA_OPTS에 영구 적용됨"
 
   # 5-4. Pipeline Job 생성
   log "5-4. Pipeline Job 'DSCORE-ZeroTouch-QA-Docker' 생성..."
@@ -458,7 +464,7 @@ if (instance.getNode('mac-ui-tester') != null) {
     return
 }
 
-def launcher = new JNLPLauncher(false)   // false = TCP 모드 (agent.jar 기본값과 일치)
+def launcher = new JNLPLauncher()   // 기본값 = TCP 모드 (agent.jar 기본값과 일치, 최신 Jenkins 호환)
 def node = new DumbSlave(
     "mac-ui-tester",
     "Playwright E2E Test Agent",
