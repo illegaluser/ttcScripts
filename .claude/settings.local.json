@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(grep -E \"\\\\.\\(sh|py\\)$\")",
+      "Bash(ls /c/Users/csr68/OneDrive/문서/dscore-ttc/ttcScripts/*.jenkinsPipeline)",
+      "Bash(rm -f Dockerfile.e2e docker-compose.e2e.yaml DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline)",
+      "Bash(rm -rf nginx)",
+      "Bash(mkdir -p e2e-pipeline/nginx)",
+      "Bash(chmod +x \"c:/Users/csr68/OneDrive/문서/dscore-ttc/ttcScripts/e2e-pipeline/setup.sh\")",
+      "Bash(bash -n \"c:/Users/csr68/OneDrive/문서/dscore-ttc/ttcScripts/e2e-pipeline/setup.sh\")",
+      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('c:/Users/csr68/OneDrive/문서/dscore-ttc/ttcScripts/e2e-pipeline/dify-chatflow.yaml'\\)\\)\")",
+      "Bash(python3.exe -c \"import yaml; yaml.safe_load\\(open\\('c:/Users/csr68/OneDrive/문서/dscore-ttc/ttcScripts/e2e-pipeline/dify-chatflow.yaml'\\)\\)\")",
+      "Bash(where python:*)",
+      "Bash(where py:*)",
+      "Bash(C:/Users/csr68/AppData/Local/Programs/Python/Python311/python.exe -c ':*)",
+      "Bash(bash -c:*)"
+    ]
+  }
+}
