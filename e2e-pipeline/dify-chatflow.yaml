@@ -1,12 +1,12 @@
 # =============================================================================
-# DSCORE Zero-Touch QA — Dify Chatflow DSL (v0.1.3)
+# DSCORE Zero-Touch QA — Dify Chatflow DSL (v0.1.4)
 #
-# 이 파일은 setup.sh가 Dify에 자동으로 import하는 Chatflow 정의다.
 # 수동 import: Dify 콘솔 → 스튜디오 → 앱 만들기 → DSL 파일에서 가져오기
 #
-# 모델 플레이스홀더: {{OLLAMA_MODEL}}
-#   setup.sh 실행 시 sed로 실제 모델명으로 치환된다.
-#   수동 import 시 이 값을 실제 모델명(예: qwen2.5-coder:14b)으로 바꿔서 사용한다.
+# 모델: 호스트 Ollama 모드 기본 가정 — `qwen3.5:4b` 로 고정
+#   호스트 머신에 `qwen3.5:4b` 가 설치되어 있어야 하고,
+#   Dify 콘솔의 Ollama 공급자에도 동일 Model Name 으로 등록되어 있어야 한다.
+#   다른 모델을 쓰려면 아래 Planner/Healer LLM 노드의 `name:` 을 일괄 교체한다.
 #
 # Chatflow 구조:
 #   Start → IF/ELSE ─── IF (run_mode = heal) ──→ Healer LLM → Answer (Heal)
@@ -221,7 +221,7 @@ workflow:
             completion_params:
               temperature: 0.3
             mode: chat
-            name: "{{OLLAMA_MODEL}}"
+            name: "qwen3.5:4b"
             provider: ollama
           prompt_template:
             - id: planner-system
@@ -289,7 +289,7 @@ workflow:
             completion_params:
               temperature: 0.1
             mode: chat
-            name: "{{OLLAMA_MODEL}}"
+            name: "qwen3.5:4b"
             provider: ollama
           prompt_template:
             - id: healer-system

@@ -1,12 +1,15 @@
 FROM jenkins/jenkins:lts-jdk21
 USER root
 
-# 1. OS 필수 패키지 설치 (+ C++ 빌드 환경, grpcio 등 네트워크 라이브러리용 헤더 추가)
+# 1. OS 필수 패키지 설치 (C++ 빌드 환경 + Playwright 시스템 의존성 + 문서 처리 도구)
+# 이 이미지에는 Node.js / npm 이 설치되지 않는다 — zero_touch_qa 패키지는 promptfoo 를
+# 쓰지 않으므로(루트 리포의 eval_runner 만 사용) e2e-pipeline 용 Jenkins 컨트롤러에는
+# Node 가 불필요하다. 필요해지면 NodeSource setup_22.x 를 여기 추가한다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential python3-dev libssl-dev zlib1g-dev \
-    python3 python3-pip python3-venv curl jq \
+    python3 python3-pip python3-venv curl jq ca-certificates gnupg \
     libgtk-3-0 libdbus-glib-1-2 libx11-xcb1 \
-    poppler-utils libreoffice-impress nodejs npm \
+    poppler-utils libreoffice-impress \
     && (apt-get install -y --no-install-recommends libasound2t64 2>/dev/null \
         || apt-get install -y --no-install-recommends libasound2) \
     && rm -rf /var/lib/apt/lists/*
@@ -25,7 +28,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # 4. 파이썬 패키지 3차: AI, 크롤링 및 프레임워크 설치
 # [검증/수정 완료] jsonschema==4.21.1 버전 고정을 해제하여 crawl4ai(요구버전 4.23.0)와의 충돌 제거
 RUN pip3 install --no-cache-dir --break-system-packages \
-    crawl4ai playwright ollama langfuse \
+    crawl4ai playwright ollama \
     jsonschema jsonpath-ng==1.6.1 pytest==8.0.0 pytest-xdist==3.5.0
 
 # 5. 파이썬 패키지 4차: 문서 처리 및 웹 기본 유틸리티 설치
@@ -33,9 +36,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     requests tenacity beautifulsoup4 lxml html2text \
     pypdf pdf2image pillow python-docx python-pptx pandas openpyxl pymupdf
 
-# 6. Playwright 브라우저 엔진 및 Promptfoo 전역 설치
+# 6. Playwright 브라우저 엔진 설치
 RUN python3 -m playwright install --with-deps chromium
-RUN npm install -g promptfoo@0.50.0
 
 # 7. 환경 변수 및 디렉토리 권한 설정
 ENV TZ=Asia/Seoul

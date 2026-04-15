@@ -2,11 +2,16 @@ FROM jenkins/jenkins:lts-jdk21
 USER root
 
 # 1. OS 필수 패키지 설치 (+ C++ 빌드 환경, grpcio 등 네트워크 라이브러리용 헤더 추가)
+# Node.js: Debian bookworm 의 기본 nodejs 패키지는 v20.19.x 로
+#   promptfoo 0.121.5 의 engine 요구치(^20.20.0 || >=22.22.0)에 미달한다.
+#   NodeSource 공식 저장소의 Node 22 LTS 를 설치해 요구치를 만족시킨다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential python3-dev libssl-dev zlib1g-dev \
-    python3 python3-pip python3-venv curl jq \
+    python3 python3-pip python3-venv curl jq ca-certificates gnupg \
     libgtk-3-0 libasound2 libdbus-glib-1-2 libx11-xcb1 \
-    poppler-utils libreoffice-impress nodejs npm \
+    poppler-utils libreoffice-impress \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. 파이썬 패키지 1차: deepeval 필수 의존성 선행 수동 설치 (grpcio 버전 충돌 우회)
@@ -22,8 +27,11 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 
 # 4. 파이썬 패키지 3차: AI, 크롤링 및 프레임워크 설치
 # [검증/수정 완료] jsonschema==4.21.1 버전 고정을 해제하여 crawl4ai(요구버전 4.23.0)와의 충돌 제거
+# [langfuse<3 핀] eval_runner/tests/test_runner.py 가 v2 API(.trace/.span/.score)를 호출한다.
+#   langfuse 3.x 는 OTEL 재설계로 호환 레이어를 통해 동작하지만 4.x 에서 레이어가 제거됐다.
+#   안전하게 2.x 최신(2.60.x)까지만 받도록 상한을 걸어 둔다.
 RUN pip3 install --no-cache-dir --break-system-packages \
-    crawl4ai playwright ollama langfuse \
+    crawl4ai playwright ollama "langfuse<3" \
     jsonschema jsonpath-ng==1.6.1 pytest==8.0.0 pytest-xdist==3.5.0
 
 # 5. 파이썬 패키지 4차: 문서 처리 및 웹 기본 유틸리티 설치
@@ -33,7 +41,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 
 # 6. Playwright 브라우저 엔진 및 Promptfoo 전역 설치
 RUN python3 -m playwright install --with-deps chromium
-RUN npm install -g promptfoo@0.50.0
+RUN npm install -g promptfoo@0.121.5
 
 # 7. 환경 변수 및 디렉토리 권한 설정
 ENV TZ=Asia/Seoul
