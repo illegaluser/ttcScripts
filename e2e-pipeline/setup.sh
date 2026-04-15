@@ -281,7 +281,10 @@ log "필수 파일 존재 확인..."
 [ -f "$SCRIPT_DIR/docker-compose.yaml" ] || { err "docker-compose.yaml 없음."; exit 1; }
 ok "필수 파일 모두 존재"
 
-# 실행 경로 검증 — /mnt/wsl/docker-desktop-bind-mounts/ 는 치명적, /mnt/c/ 는 경고
+# 실행 경로 검증
+#   /mnt/wsl/docker-desktop-bind-mounts/ → Docker Desktop 내부 관리 공간이라 치명적 (exit 1)
+#   /mnt/c/                              → 9P 느리지만 의도된 trade-off (Windows IDE 동기화 편의성) — 정보성 로그만
+#   기타 (네이티브 ext4 / APFS / 등)      → OK
 log "실행 경로 검증: $SCRIPT_DIR"
 case "$SCRIPT_DIR" in
   */mnt/wsl/docker-desktop-bind-mounts/*)
@@ -293,23 +296,19 @@ case "$SCRIPT_DIR" in
     err "Docker 가 언제든 정리·재구성할 수 있어 파일이 유실될 수 있고, 볼륨 경합이 발생한다."
     err ""
     err "해결:"
-    err "  1) cd ~ && mkdir -p projects && cd projects"
+    err "  1) cd <Windows 측 작업 폴더> 또는 cd ~/projects"
     err "  2) git clone https://github.com/illegaluser/ttcScripts.git"
     err "  3) cd ttcScripts/e2e-pipeline"
     err "  4) cp .env.example .env && nano .env"
     err "  5) ./setup.sh"
     err ""
-    err "자세한 내용: GUIDE.md §0.1 어디에 둘 것인가"
+    err "자세한 내용: GUIDE.md §0.1 설치 위치 가이드"
     exit 1
     ;;
   */mnt/c/*)
-    warn "프로젝트가 Windows 드라이브 마운트(/mnt/c/)에 위치해 있다:"
-    warn "  $SCRIPT_DIR"
-    warn ""
-    warn "WSL2 에서 /mnt/c/ 는 9P 프로토콜 경유라 네이티브 ext4 대비 docker build / git 이 2~5배 느리다."
-    warn "지금 진행해도 기능상 문제는 없지만, 반복 설치/디버깅이 예상되면 ~/projects/ttcScripts 로 이전 권장."
-    warn "자세한 내용: GUIDE.md §0.1 어디에 둘 것인가"
-    warn ""
+    log "  → /mnt/c/ (Windows 드라이브 마운트) 감지 — Windows IDE 와의 파일 공유에 최적."
+    log "  → WSL2 9P 프로토콜 경유라 첫 docker build 가 느릴 수 있지만 레이어 캐시 이후엔 정상."
+    log "  → 상세는 GUIDE.md §0.1 / §11 트러블슈팅 참조."
     ;;
   *)
     ok "경로 OK (네이티브 파일시스템)"
