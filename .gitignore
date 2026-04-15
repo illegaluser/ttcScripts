@@ -1,5 +1,8 @@
 zero_touch_qa/__pycache__/
 
+# Claude Code 로컬 IDE 상태
+.claude/settings.local.json
+
 # e2e-pipeline 사용자 비밀번호/계정 — 절대 git 에 올리지 말 것
 e2e-pipeline/.env
 e2e-pipeline/.dify-cookies.txt
