@@ -486,6 +486,12 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 
 **자세한 단계별 안내 + 함정 체크리스트**: [§6.2.2](#622-ollama-모델-공급자에-모델-등록-단계별)
 
+> **💡 max_tokens 확인 (추론 모델 사용 시 필수):**
+> Qwen, DeepSeek 같은 추론(thinking) 모델은 `<think>` 블록에 토큰을 대량 소비하므로, Chatflow의 LLM 노드 `max_tokens` 가 충분해야 한다.
+> `dify-chatflow.yaml` 에 `max_tokens: 4096` 이 이미 설정되어 있다. DSL 재import 없이 UI 에서 수정했다면 값이 다를 수 있으므로 확인:
+> - Chatflow 편집 → **Planner** / **Healer** LLM 노드 → 모델 파라미터 → Max Tokens ≥ **4096**
+> - 값이 작으면(512, 1024 등) JSON 응답이 잘려 `시나리오 파싱 실패` 에러가 발생한다.
+
 #### ✅ 작업 3 — Jenkins 에이전트 연결 (agent.jar 실행, 필수)
 
 **왜?** setup.sh Phase 6 에서 Java, Playwright, agent.jar 를 자동 설치했지만, `agent.jar` 자체는 **포그라운드 프로세스**로 실행해야 하므로 수동으로 시작해야 한다.
