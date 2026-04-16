@@ -192,7 +192,7 @@ services:
     user: root
     ports:
       - "18080:8080"
-      - "50001:50000"
+      - "50000:50000"
     volumes:
       - e2e-jenkins-home:/var/jenkins_home
       - .:/var/jenkins_home/scripts
