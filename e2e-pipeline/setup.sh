@@ -1225,33 +1225,55 @@ if [ -z "$NODE_SECRET" ]; then
   warn "노드 시크릿 추출 실패 — 에이전트 자동 기동 건너뜀"
   warn "  → 수동 실행: GUIDE.md §8.6 참조"
   NODE_SECRET="<SECRET>"
-elif [ ! -f "$AGENT_JAR" ]; then
-  warn "agent.jar 없음 ($AGENT_JAR) — 에이전트 자동 기동 건너뜀"
 else
-  # 7-2. 기존 에이전트 프로세스 확인 (이미 실행 중이면 건너뜀)
+  # 7-2. 기존 에이전트 프로세스 종료
   if pgrep -f "agent.jar.*mac-ui-tester" >/dev/null 2>&1; then
-    ok "에이전트가 이미 실행 중 — 재기동 건너뜀"
-    AGENT_STARTED=true
+    log "7-2. 기존 에이전트 프로세스 종료 중..."
+    pkill -f "agent.jar.*mac-ui-tester" 2>/dev/null || true
+    sleep 2
+    # SIGTERM 으로 안 죽으면 SIGKILL
+    if pgrep -f "agent.jar.*mac-ui-tester" >/dev/null 2>&1; then
+      pkill -9 -f "agent.jar.*mac-ui-tester" 2>/dev/null || true
+      sleep 1
+    fi
+    ok "기존 에이전트 종료 완료"
   else
-    # 7-3. 백그라운드로 에이전트 기동
-    log "7-3. 에이전트 백그라운드 기동 (로그: $AGENT_LOG)..."
+    log "7-2. 기존 에이전트 없음 — 신규 기동"
+  fi
+
+  # 7-3. agent.jar 최신 다운로드 (Jenkins 버전과 불일치 방지)
+  log "7-3. agent.jar 최신 다운로드..."
+  if curl -sf -o "${AGENT_JAR}.tmp" "${JENKINS_URL}/jnlpJars/agent.jar" 2>/dev/null; then
+    mv -f "${AGENT_JAR}.tmp" "$AGENT_JAR"
+    ok "agent.jar 갱신 완료 ($(wc -c < "$AGENT_JAR") bytes)"
+  else
+    rm -f "${AGENT_JAR}.tmp"
+    if [ -f "$AGENT_JAR" ]; then
+      warn "agent.jar 다운로드 실패 — 기존 파일 사용"
+    else
+      warn "agent.jar 없음 — 에이전트 기동 건너뜀"
+      NODE_SECRET="<SECRET>"
+    fi
+  fi
+
+  # 7-4. 백그라운드로 에이전트 기동
+  if [ -f "$AGENT_JAR" ] && [ "$NODE_SECRET" != "<SECRET>" ]; then
+    log "7-4. 에이전트 백그라운드 기동 (로그: $AGENT_LOG)..."
     : > "$AGENT_LOG"
     nohup java -jar "$AGENT_JAR" \
         -url "${JENKINS_URL}/" \
         -secret "$NODE_SECRET" \
         -name "mac-ui-tester" \
-        -webSocket \
         -workDir "$AGENT_WORK_DIR" \
         >> "$AGENT_LOG" 2>&1 &
     AGENT_PID=$!
     log "  PID: $AGENT_PID"
 
-    # 7-4. 연결 대기 (최대 30초)
-    log "7-4. 에이전트 연결 대기 (최대 30초)..."
+    # 7-5. 연결 대기 (최대 30초)
+    log "7-5. 에이전트 연결 대기 (최대 30초)..."
     _ae=0
     while [ $_ae -lt 30 ]; do
       sleep 3; _ae=$((_ae + 3))
-      # Jenkins API 로 노드 온라인 여부 확인
       NODE_ONLINE=$(curl -sf -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
           "${JENKINS_URL}/computer/mac-ui-tester/api/json" 2>/dev/null | \
           python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if not d.get('offline',True) else 'no')" 2>/dev/null || echo "no")
@@ -1259,7 +1281,6 @@ else
         AGENT_STARTED=true
         break
       fi
-      # 프로세스가 죽었으면 즉시 중단
       if ! kill -0 "$AGENT_PID" 2>/dev/null; then
         warn "에이전트 프로세스가 종료됨 (PID $AGENT_PID). 로그 확인:"
         tail -5 "$AGENT_LOG" 2>/dev/null | while IFS= read -r l; do warn "  $l"; done
@@ -1362,7 +1383,6 @@ echo "     cd \"\$HOME/jenkins-agent\" && java -jar agent.jar \\"
 echo "       -url \"http://localhost:18080/\" \\"
 echo "       -secret \"${NODE_SECRET}\" \\"
 echo "       -name \"mac-ui-tester\" \\"
-echo "       -webSocket \\"
 echo "       -workDir \"\$HOME/jenkins-agent\""
 echo ""
 echo "     ⚠ WSL2 에서는 반드시 cd \"\$HOME/jenkins-agent\" 한 뒤 실행 (9P CWD 문제 방지)"
