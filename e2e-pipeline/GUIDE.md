@@ -221,11 +221,14 @@ Docker Compose **프로파일**로 전환한다.
 | 항목 | 상세 |
 | --- | --- |
 | OS | Windows 11 / macOS / Linux |
-| Docker Desktop | 설치 및 실행 중 (최소 16 GB RAM 할당 권장) |
-| Java 11 이상 | Jenkins 에이전트(agent.jar) 실행에 필요 — Mac: `brew install openjdk@17` |
-| Python 3.9 이상 + pip | mac-ui-tester 에이전트에서 zero_touch_qa 실행에 필요 |
+| Docker Desktop | 설치 및 실행 중 (최소 16 GB RAM 할당 권장) — macOS 에서는 setup.sh 가 `open -a Docker` 로 자동 기동까지 시도 |
+| Java 11 이상 | Jenkins 에이전트(agent.jar) 실행에 필요 — macOS 에서 `brew install openjdk@17` + keg-only PATH 연결 + JVM 심링크는 setup.sh 가 자동 처리 |
+| Python 3.9 이상 + pip | mac-ui-tester 에이전트에서 zero_touch_qa 실행에 필요 — macOS 부재 시 setup.sh 가 `brew install python3` 자동 시도 |
+| Homebrew (macOS 전용) | 부재 시 setup.sh 가 공식 스크립트로 자동 설치 (sudo 비밀번호 프롬프트가 뜰 수 있음) |
 | 디스크 여유 공간 | 최소 30 GB (Ollama 모델 포함) |
 | GPU (선택) | NVIDIA RTX 계열 — docker-compose.yaml의 GPU 섹션 주석 해제로 활용 가능 |
+
+> **Fresh macOS 대응 범위**: Homebrew · python3 · openjdk@17(PATH + JVM 심링크) · Ollama · `OLLAMA_HOST=0.0.0.0` 바인딩(launchctl setenv + brew services restart)은 모두 자동 설치/설정된다. Docker Desktop 만 사전 설치가 필요하다 (GUI 라이선스 동의 때문). 자세한 자동화 범위는 [§자동 설치](#자동-설치-setupsh) 의 Phase 표 참조.
 
 ### Windows 11 환경 Docker Desktop 설치
 
@@ -384,17 +387,23 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | OS | 감지 조건 (`uname -s`) | 설치 방식 | 필수 전제 |
 | --- | --- | --- | --- |
 | Windows | `MINGW*` / `MSYS*` / `CYGWIN*` | `winget install --id Ollama.Ollama --silent` | Windows App Installer 설치되어 있을 것. UAC 프롬프트가 뜰 수 있음 |
-| macOS | `Darwin*` | `brew install ollama` + `brew services start ollama` | Homebrew 설치되어 있을 것 |
+| macOS | `Darwin*` | `brew install ollama` + `brew services start ollama` + `ensure_ollama_host_binding` | Homebrew **부재 시 setup.sh 가 공식 스크립트로 자동 설치** |
 | Linux | `Linux*` | `curl -fsSL https://ollama.com/install.sh \| sh` | `sudo` 권한 (스크립트가 내부에서 요구) |
 
-**설치 후 반드시 확인해야 하는 것:**
+#### OS 별 OLLAMA_HOST 바인딩 (컨테이너 → 호스트 Ollama 도달성 확보)
 
-1. **`OLLAMA_HOST` 바인딩** — 기본값 `127.0.0.1` 로는 컨테이너에서 못 닿는다. `0.0.0.0` 으로 재바인딩 필요.
-   - Windows: 시스템 환경변수 `OLLAMA_HOST=0.0.0.0` 등록 → 트레이의 Ollama 종료 → 재시작
-   - macOS: `OLLAMA_HOST=0.0.0.0 ollama serve` 로 수동 기동 (또는 launchd plist 수정)
-   - Linux: `sudo systemctl edit ollama` → `Environment=OLLAMA_HOST=0.0.0.0` 추가 → `systemctl restart ollama`
-2. **Windows PATH 반영** — winget 설치 직후 현재 셸에는 `ollama.exe` PATH 가 즉시 반영되지 않을 수 있다.
-   setup.sh 는 `$LOCALAPPDATA/Programs/Ollama` 를 자동으로 PATH 에 추가하지만, 실패하면 새 Git Bash 터미널을 연 뒤 재실행하면 된다.
+기본값 `127.0.0.1` 로는 컨테이너에서 못 닿으므로 반드시 `0.0.0.0` 으로 재바인딩되어야 한다.
+
+| OS | 처리 방식 |
+| --- | --- |
+| **macOS** | ✅ **자동** — `ensure_ollama_host_binding` 이 `lsof` 로 현재 바인딩 검사 → `launchctl setenv OLLAMA_HOST 0.0.0.0` → `brew services restart ollama` → 최대 20초 재검증. Phase 3 도달성 실패 시에도 1회 자동 재시도. |
+| Windows | ⚠️ 수동 — 시스템 환경변수 `OLLAMA_HOST=0.0.0.0` 등록 → 트레이의 Ollama 종료 → 재시작 |
+| Linux | ⚠️ 수동 — `sudo systemctl edit ollama` → `Environment=OLLAMA_HOST=0.0.0.0` 추가 → `systemctl restart ollama` |
+
+#### 추가 참고
+
+- **Windows PATH 반영** — winget 설치 직후 현재 셸에는 `ollama.exe` PATH 가 즉시 반영되지 않을 수 있다. setup.sh 는 `$LOCALAPPDATA/Programs/Ollama` 를 자동으로 PATH 에 추가하지만, 실패하면 새 Git Bash 터미널을 연 뒤 재실행하면 된다.
+- **macOS Homebrew 부재** — setup.sh 가 `NONINTERACTIVE=1` 로 공식 설치 스크립트를 실행하고 `brew shellenv` 로 현재 셸에 PATH 를 주입한다. Apple Silicon(`/opt/homebrew/bin`) / Intel(`/usr/local/bin`) 모두 커버.
 
 **자동 설치를 건너뛰고 싶다면** `OLLAMA_PROFILE=container ./setup.sh` 로 실행. 이 경우 호스트 Ollama 는 전혀 필요하지 않고 `e2e-ollama` 컨테이너가 대신 띄워진다.
 
@@ -419,10 +428,10 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 
 | Phase | 내용 | 상태 |
 | --- | --- | --- |
-| 0 | 사전 요구사항 확인 (docker, python3, 필수 파일) + 호스트 Ollama 자동 설치 (host 프로파일, 부재 시 winget/brew/curl) | ✅ 자동 |
+| 0 | 사전 요구사항 확인 (docker, python3, 필수 파일). macOS: Homebrew 부재 시 공식 스크립트 자동 설치, python3 부재 시 `brew install python3`, Docker 데몬 미응답 시 `open -a Docker` + 최대 90초 대기. 호스트 Ollama 부재 시 winget/brew/curl 로 자동 설치. macOS 는 설치 직후 `ensure_ollama_host_binding` 으로 `0.0.0.0` 바인딩 보장 | ✅ 자동 |
 | 1 | `jenkins-init/` + `docker-compose.override.yaml` 생성, `docker compose up -d --build` (프로파일 인식) | ✅ 자동 |
 | 2 | nginx / api / plugin_daemon / jenkins 헬스 대기 | ✅ 자동 |
-| 3 | Ollama 모델 확인/Pull (호스트 or 컨테이너), Dify api → Ollama 도달성 검증 | ✅ 자동 |
+| 3 | Ollama 모델 확인/Pull (호스트 or 컨테이너), Dify api → Ollama 도달성 검증. macOS 는 실패 시 `ensure_ollama_host_binding` 으로 바인딩 교정 후 1회 재시도 | ✅ 자동 |
 | 4-1 | Dify 관리자 계정 생성 (`POST /console/api/setup`) | ✅ 자동 |
 | 4-2 | Dify 로그인 → access_token 획득 | ✅ 자동 |
 | 4-3 | **Ollama 플러그인 설치 + 모델 공급자 등록** | ⚠️ **수동** (Dify 1.x 마켓플레이스 기반, 자동화 불가) |
@@ -432,7 +441,7 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | 5-3 | CSP 완화 (JAVA_OPTS, override.yaml 에서 영구 적용) | ✅ 자동 |
 | 5-4 | `DSCORE-ZeroTouch-QA-Docker` Pipeline Job 생성 (이미 존재하면 스크립트 업데이트) | ✅ 자동 |
 | 5-5 | `mac-ui-tester` 노드 등록 (`SCRIPTS_HOME` 포함, 이미 존재 시 값 업데이트) | ✅ 자동 |
-| 6-1 | Java 17 설치 확인/자동 설치 (apt/brew/winget) | ✅ 자동 |
+| 6-1 | Java 17 설치 확인/자동 설치 (apt/brew/winget). macOS 는 설치 후 `ensure_java_on_path` 가 keg-only PATH prepend + `/Library/Java/JavaVirtualMachines` 심링크까지 자동 생성 (sudo 비밀번호 프롬프트가 뜰 수 있음) | ✅ 자동 |
 | 6-2 | `python3-venv` 패키지 설치 (Ubuntu/Debian) | ✅ 자동 |
 | 6-3 | `agent.jar` 다운로드 (`$HOME/jenkins-agent/`) | ✅ 자동 |
 | 6-4 | Pipeline venv 사전 생성 + 패키지/Chromium 설치 (폐쇄망 대응) | ✅ 자동 |
@@ -787,8 +796,9 @@ docker compose --profile container-ollama up -d ollama
 >
 > **함정 2 — 호스트 Ollama 의 바인딩 주소**
 > 호스트 Ollama 모드는 호스트에서 실행 중인 `ollama` 가 반드시 `OLLAMA_HOST=0.0.0.0` 으로 바인딩되어 있어야 한다. 기본값은 `127.0.0.1` 이라 컨테이너에서 접근 불가.
+>
+> - **macOS**: ✅ setup.sh 가 자동 처리 (`launchctl setenv OLLAMA_HOST 0.0.0.0` + `brew services restart ollama`). 수동 확인: `lsof -nP -iTCP:11434 -sTCP:LISTEN` 결과가 `*:11434` 또는 `0.0.0.0:11434` 여야 정상. 자동 교정 실패 시 동일 명령을 직접 실행해도 된다.
 > - **Windows**: 시스템 환경변수 `OLLAMA_HOST=0.0.0.0` 추가 → 트레이의 Ollama 종료 → 시작 메뉴에서 재실행
-> - **macOS**: `OLLAMA_HOST=0.0.0.0 ollama serve` 로 수동 기동 (brew services 로 기동한 경우 plist 수정 필요)
 > - **Linux**: `sudo systemctl edit ollama` → `[Service]` 아래 `Environment=OLLAMA_HOST=0.0.0.0` 추가 → `sudo systemctl restart ollama`
 >
 > **함정 3 — 호스트/컨테이너 모드 Base URL 혼동**
@@ -1260,6 +1270,10 @@ java -version
 
 <details>
 <summary><b>🍎 macOS (Homebrew)</b></summary>
+
+> ✅ **setup.sh 사용자는 이 단계가 자동 처리된다.** Phase 6-1 이 `brew install openjdk@17` 실행 후 `ensure_java_on_path` 헬퍼로 keg-only PATH prepend 와 `/Library/Java/JavaVirtualMachines/openjdk-17.jdk` 심링크(sudo 프롬프트 포함)를 자동 생성한다. Homebrew 가 없으면 같은 Phase 에서 공식 스크립트로 자동 설치된다.
+
+**수동 설치 시에만:**
 
 ```bash
 brew install openjdk@17
