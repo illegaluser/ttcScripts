@@ -1,0 +1,206 @@
+// =============================================================================
+// DSCORE-ZeroTouch-QA-Docker Jenkinsfile (v2.2)
+//
+// 변경 내역
+// - [v1.0] 독립 E2E 스택(e2e-net)에서 동작
+// - [v1.1] 아티팩트 공유: bind-mount → named volume (e2e-jenkins-ws)
+// - [v2.0] 아키텍처 롤백: e2e-runner 컨테이너 제거
+//          mac-ui-tester 에이전트에서 python -m zero_touch_qa 직접 실행
+// - [v2.1] 경로 하드코딩 제거 — 어떤 PC에서도 수정 없이 동작
+//          AGENT_HOME: ${WORKSPACE}/.qa_home 으로 자동 결정
+//          SCRIPTS_HOME: Jenkins 노드 환경변수로 주입 (Jenkinsfile 수정 불필요)
+// - [v2.2] Windows 호환 — sh 블록을 powershell 블록으로 교체
+//          venv 경로: bin/activate → Scripts/Activate.ps1
+//          python3 → python, Unix 경로 → Windows 경로
+//
+// [변경] DIFY_TIMEOUT 환경변수 추가 (environment 블록 및 Stage 3 powershell)
+// 사유: 로컬 LLM(qwen3:8b 등)은 시나리오 생성에 수 분 이상 소요된다.
+//       원본 DifyClient 는 timeout=120(하드코딩)으로 ReadTimeout 이 반복 발생했다.
+//       Jenkins 빌드 파라미터 없이 environment 블록의 DIFY_TIMEOUT 만 수정하면
+//       타임아웃을 일괄 제어할 수 있도록 했다.
+//       Stage 3 에서 $env:DIFY_TIMEOUT 으로 Python 프로세스에 주입된다.
+// =============================================================================
+
+pipeline {
+    agent { label 'mac-ui-tester' }
+
+    parameters {
+        choice(
+            name: 'RUN_MODE',
+            choices: ['chat', 'doc', 'convert', 'execute'],
+            description: 'chat: 자연어 입력, doc: 기획서 업로드, convert: Playwright 녹화 변환, execute: 기존 시나리오 재실행'
+        )
+        string(
+            name: 'TARGET_URL',
+            defaultValue: 'https://www.google.com',
+            description: '테스트 대상 URL'
+        )
+        text(
+            name: 'SRS_TEXT',
+            defaultValue: '검색창에 DSCORE 입력 후 엔터',
+            description: '[Chat] 자연어 요구사항'
+        )
+        base64File(
+            name: 'DOC_FILE',
+            description: '[Doc/Convert] 기획서(PDF) 또는 Playwright 녹화 스크립트(.py) / [Execute] scenario.json'
+        )
+        booleanParam(
+            name: 'HEADLESS',
+            defaultValue: false,
+            description: '체크 해제(기본값): 실제 브라우저 표시 / 체크: headless 모드'
+        )
+    }
+
+    environment {
+        // AGENT_HOME: Jenkins workspace 아래 자동 생성 — 수정 불필요
+        //   venv 와 artifacts 를 잡별(Job)로 분리하여 관리한다.
+        AGENT_HOME    = "${WORKSPACE}/.qa_home"
+
+        // SCRIPTS_HOME: Jenkins 노드 환경변수에서 자동 주입 — 수정 불필요
+        //   설정 위치: Jenkins 관리 → 노드 관리 → mac-ui-tester
+        //              → Node Properties → 환경변수 → SCRIPTS_HOME = /path/to/e2e-pipeline
+        //   (이 값은 zero_touch_qa/ 패키지가 들어있는 e2e-pipeline/ 폴더의 절대 경로)
+
+        // Jenkins Credentials 에 저장된 Dify QA Chatflow API 키
+        DIFY_API_KEY  = credentials('dify-qa-api-token')
+        // e2e 독립 스택 Dify 엔드포인트
+        DIFY_BASE_URL = "http://localhost:18081/v1"
+        // LLM 응답 대기 타임아웃 (초) — 로컬 LLM은 느릴 수 있으므로 넉넉하게 설정
+        DIFY_TIMEOUT  = "1800"
+    }
+
+    stages {
+
+        // ──────────────────────────────────────────────────────────────────
+        // Stage 1: 환경 검증 및 Python venv 캐싱
+        // SCRIPTS_HOME 미설정 시 명확한 오류 메시지로 즉시 중단
+        // venv 는 WORKSPACE 아래에 캐싱 — 빌드 간 재사용
+        // ──────────────────────────────────────────────────────────────────
+        stage('1. 환경 동기화 및 캐싱') {
+            steps {
+                powershell """
+                    # SCRIPTS_HOME 설정 여부 검증
+                    if (-not \$env:SCRIPTS_HOME) {
+                        Write-Host "======================================================"
+                        Write-Host "[ERROR] SCRIPTS_HOME 환경변수가 설정되지 않았습니다."
+                        Write-Host "  Jenkins 관리 -> 노드 관리 -> mac-ui-tester"
+                        Write-Host "  -> Node Properties -> 환경변수"
+                        Write-Host "  -> SCRIPTS_HOME = C:\\path\\to\\e2e-pipeline"
+                        Write-Host "======================================================"
+                        exit 1
+                    }
+
+                    New-Item -ItemType Directory -Force -Path '${AGENT_HOME}\\artifacts' | Out-Null
+                    Remove-Item -Path '${AGENT_HOME}\\artifacts\\*' -Recurse -Force -ErrorAction SilentlyContinue
+
+                    if (-not (Test-Path '${AGENT_HOME}\\venv')) {
+                        Write-Host "[Setup] Creating new virtual environment..."
+                        python -m venv '${AGENT_HOME}\\venv'
+                        & '${AGENT_HOME}\\venv\\Scripts\\pip.exe' install requests playwright pillow
+                        & '${AGENT_HOME}\\venv\\Scripts\\playwright.exe' install chromium
+                    } else {
+                        Write-Host "[Setup] Using existing virtual environment."
+                    }
+                """
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────
+        // Stage 2: 파일 준비 (doc / convert / execute 모드)
+        // ──────────────────────────────────────────────────────────────────
+        stage('2. 파일 준비') {
+            when {
+                allOf {
+                    expression { params.RUN_MODE in ['doc', 'convert', 'execute'] }
+                    expression { params.DOC_FILE != null && params.DOC_FILE != '' }
+                }
+            }
+            steps {
+                withFileParameter('DOC_FILE') {
+                    script {
+                        def ext = (params.RUN_MODE == 'convert') ? '.py'
+                                : (params.RUN_MODE == 'execute') ? '.json'
+                                : '.pdf'
+                        powershell "Copy-Item -Path \"\$env:DOC_FILE\" -Destination '${AGENT_HOME}\\upload${ext}' -Force"
+                    }
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────
+        // Stage 3: Zero-Touch QA 엔진 실행
+        // PYTHONPATH = SCRIPTS_HOME (노드 환경변수) → zero_touch_qa 패키지 탐색
+        // ──────────────────────────────────────────────────────────────────
+        stage('3. Zero-Touch QA 엔진 가동') {
+            steps {
+                powershell """
+                    \$env:PYTHONPATH    = \$env:SCRIPTS_HOME
+                    \$env:ARTIFACTS_DIR = '${AGENT_HOME}\\artifacts'
+                    \$env:TARGET_URL    = '${params.TARGET_URL}'
+                    \$env:SRS_TEXT      = '${params.SRS_TEXT}'
+                    \$env:DIFY_TIMEOUT  = '${DIFY_TIMEOUT}'
+
+                    \$python      = '${AGENT_HOME}\\venv\\Scripts\\python.exe'
+                    \$browserFlag = '${params.HEADLESS ? '--headless' : '--headed'}'
+
+                    switch ('${params.RUN_MODE}') {
+                        'chat' {
+                            Write-Host "[Engine] Chat 모드"
+                            & \$python -m zero_touch_qa --mode chat \$browserFlag
+                        }
+                        'doc' {
+                            Write-Host "[Engine] Doc 모드"
+                            & \$python -m zero_touch_qa --mode doc --file '${AGENT_HOME}\\upload.pdf' \$browserFlag
+                        }
+                        'convert' {
+                            Write-Host "[Engine] Convert 모드"
+                            & \$python -m zero_touch_qa --mode convert --file '${AGENT_HOME}\\upload.py' \$browserFlag
+                        }
+                        'execute' {
+                            Write-Host "[Engine] Execute 모드"
+                            & \$python -m zero_touch_qa --mode execute --scenario '${AGENT_HOME}\\upload.json' \$browserFlag
+                        }
+                    }
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            powershell """
+                New-Item -ItemType Directory -Force -Path 'qa_reports\\build-${BUILD_NUMBER}' | Out-Null
+                Copy-Item -Path '${AGENT_HOME}\\artifacts\\*' -Destination 'qa_reports\\build-${BUILD_NUMBER}\\' -Recurse -Force -ErrorAction SilentlyContinue
+            """
+
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: "qa_reports/build-${BUILD_NUMBER}",
+                reportFiles: 'index.html',
+                reportName: 'Zero-Touch QA Report'
+            ])
+
+            archiveArtifacts(
+                artifacts: "qa_reports/build-${BUILD_NUMBER}/**/*",
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
+
+            script {
+                def browserMode = params.HEADLESS ? 'headless' : 'headed'
+                currentBuild.description = "ZT-QA | ${params.RUN_MODE} | ${browserMode} | ${params.TARGET_URL}"
+            }
+
+            echo "테스트 종료. Jenkins 빌드 결과에서 Artifacts 를 확인하십시오."
+        }
+
+        failure {
+            archiveArtifacts(
+                artifacts: "qa_reports/build-${BUILD_NUMBER}/**/*",
+                allowEmptyArchive: true
+            )
+        }
+    }
+}
