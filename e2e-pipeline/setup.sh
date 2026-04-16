@@ -1105,6 +1105,17 @@ if [ "$AGENT_OS" = "linux" ] && command -v apt-get >/dev/null 2>&1; then
       warn "python3-venv 설치 실패. 수동 설치: sudo apt install -y python3-venv"
     fi
   fi
+  # 한글(CJK) 폰트 설치 — Playwright Chromium 한글 렌더링에 필수
+  log "6-2b. 한글 폰트(fonts-noto-cjk) 확인..."
+  if fc-list 2>/dev/null | grep -qi 'noto.*cjk\|NanumGothic'; then
+    ok "CJK 폰트 이미 설치됨"
+  else
+    log "fonts-noto-cjk 설치 중 (Playwright 한글 렌더링용)..."
+    run sudo apt-get install -y fonts-noto-cjk fonts-noto-color-emoji
+    # 폰트 캐시 갱신
+    try fc-cache -f
+    ok "한글 폰트 설치 완료"
+  fi
 else
   log "6-2. python3-venv 확인 건너뜀 (Ubuntu/Debian 이 아닌 환경)"
 fi

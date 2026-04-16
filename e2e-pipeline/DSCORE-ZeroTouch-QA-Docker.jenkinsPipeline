@@ -58,6 +58,11 @@ pipeline {
         DIFY_API_KEY  = credentials('dify-qa-api-token')
         // e2e 독립 스택 Dify 엔드포인트
         DIFY_BASE_URL = "http://localhost:18081/v1"
+
+        // 한글 인코딩 — Playwright 입력/출력 + Python stdout 깨짐 방지
+        LANG              = "C.UTF-8"
+        LC_ALL            = "C.UTF-8"
+        PYTHONIOENCODING  = "utf-8"
     }
 
     stages {

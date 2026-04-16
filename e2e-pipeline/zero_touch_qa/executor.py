@@ -73,10 +73,11 @@ class QAExecutor:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not headed, slow_mo=self.config.slow_mo)
             page = browser.new_page(
+                locale="ko-KR",
                 viewport={
                     "width": self.config.viewport[0],
                     "height": self.config.viewport[1],
-                }
+                },
             )
             resolver = LocatorResolver(page)
             healer = LocalHealer(page, self.config.heal_threshold)
