@@ -26,6 +26,7 @@ log = logging.getLogger("zero_touch_qa")
 
 
 def main():
+    """CLI 엔트리포인트. 인자를 파싱하고 시나리오 준비 → 실행 → 산출물 생성 흐름을 수행한다."""
     parser = argparse.ArgumentParser(
         description=f"DSCORE Zero-Touch QA v{__version__}"
     )
@@ -99,7 +100,21 @@ def main():
 def _prepare_scenario(
     args, config: Config, target_url: str, srs_text: str
 ) -> list[dict]:
-    """모드에 따라 시나리오를 준비한다."""
+    """실행 모드에 따라 시나리오를 준비한다.
+
+    Args:
+        args: argparse.Namespace (mode, file, scenario 등).
+        config: Config 인스턴스.
+        target_url: 테스트 대상 URL.
+        srs_text: 자연어 요구사항 텍스트.
+
+    Returns:
+        DSL 스텝 dict 리스트.
+
+    Raises:
+        FileNotFoundError: execute/convert 모드에서 필요한 파일이 없을 때.
+        DifyConnectionError: chat/doc 모드에서 Dify API 통신 실패 시.
+    """
     if args.mode == "execute":
         if not args.scenario:
             raise FileNotFoundError("execute 모드에는 --scenario 인자가 필요합니다.")
@@ -134,7 +149,12 @@ def _prepare_scenario(
 
 
 def _generate_error_report(artifacts_dir: str, error_msg: str):
-    """Dify 연결 실패 시 최소한의 에러 리포트를 생성한다."""
+    """Dify 연결 실패 시 최소한의 에러 리포트(index.html)를 생성한다.
+
+    Args:
+        artifacts_dir: 리포트 저장 디렉터리. 없으면 자동 생성.
+        error_msg: HTML 에 표시할 에러 메시지 문자열.
+    """
     os.makedirs(artifacts_dir, exist_ok=True)
     html = f"""<!DOCTYPE html>
 <html lang="ko">

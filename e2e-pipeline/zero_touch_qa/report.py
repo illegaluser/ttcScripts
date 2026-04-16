@@ -10,7 +10,15 @@ log = logging.getLogger(__name__)
 
 
 def save_run_log(results: list[StepResult], output_dir: str) -> str:
-    """run_log.jsonl을 작성하고 경로를 반환한다."""
+    """실행 결과를 JSONL(한 줄에 한 스텝) 형식으로 저장하고 파일 경로를 반환한다.
+
+    Args:
+        results: StepResult 리스트.
+        output_dir: 저장 디렉터리.
+
+    Returns:
+        생성된 ``run_log.jsonl`` 의 절대 경로.
+    """
     path = os.path.join(output_dir, "run_log.jsonl")
     with open(path, "w", encoding="utf-8") as f:
         for r in results:
@@ -32,7 +40,16 @@ def save_run_log(results: list[StepResult], output_dir: str) -> str:
 def save_scenario(
     scenario: list[dict], output_dir: str, suffix: str = ""
 ) -> str:
-    """scenario.json 또는 scenario.healed.json을 저장한다."""
+    """DSL 시나리오를 JSON 파일로 저장한다.
+
+    Args:
+        scenario: DSL 스텝 dict 리스트.
+        output_dir: 저장 디렉터리.
+        suffix: 파일명 접미사. 예: ``".healed"`` → ``scenario.healed.json``.
+
+    Returns:
+        생성된 JSON 파일의 절대 경로.
+    """
     filename = f"scenario{suffix}.json"
     path = os.path.join(output_dir, filename)
     with open(path, "w", encoding="utf-8") as f:
@@ -44,7 +61,16 @@ def save_scenario(
 def build_html_report(
     results: list[StepResult], output_dir: str, version: str = "4.0"
 ) -> str:
-    """Jenkins 게시용 시각적 HTML 리포트를 생성한다."""
+    """Jenkins HTML Publisher 플러그인용 시각적 리포트(index.html)를 생성한다.
+
+    Args:
+        results: StepResult 리스트.
+        output_dir: 저장 디렉터리.
+        version: 리포트에 표시할 버전 문자열.
+
+    Returns:
+        생성된 ``index.html`` 의 절대 경로.
+    """
     total = len(results)
     passed = sum(1 for r in results if r.status == "PASS")
     healed = sum(1 for r in results if r.status == "HEALED")
@@ -72,6 +98,7 @@ def build_html_report(
 
 
 def _build_table_rows(results: list[StepResult]) -> str:
+    """StepResult 리스트를 HTML 테이블 ``<tr>`` 행 문자열로 변환한다."""
     rows = []
     for r in results:
         badge_class = {"PASS": "ok", "HEALED": "warn", "FAIL": "fail"}.get(

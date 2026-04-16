@@ -7,13 +7,20 @@ log = logging.getLogger(__name__)
 
 
 def convert_playwright_to_dsl(file_path: str, output_dir: str) -> list[dict]:
-    """
-    Playwright codegen이 생성한 Python 스크립트를 파싱하여
-    9대 DSL scenario.json으로 변환한다.
+    """Playwright codegen 이 생성한 Python 스크립트를 9대 DSL 시나리오로 변환한다.
 
-    사용법:
-      playwright codegen https://target-app.com --output recorded.py
-      python3 -m zero_touch_qa --mode convert --file recorded.py
+    각 라인을 ``_parse_playwright_line`` 으로 파싱하고, 결과를 step 번호 순서로
+    배열한 뒤 ``output_dir/scenario.json`` 에 저장한다.
+
+    Args:
+        file_path: Playwright codegen 이 생성한 ``.py`` 파일 경로.
+        output_dir: scenario.json 을 저장할 디렉터리. 없으면 자동 생성.
+
+    Returns:
+        DSL 스텝 dict 의 리스트. 빈 파일이면 빈 리스트.
+
+    Raises:
+        FileNotFoundError: ``file_path`` 가 존재하지 않을 때.
     """
     if not file_path or not os.path.exists(file_path):
         raise FileNotFoundError(f"파일을 찾을 수 없습니다: {file_path}")
@@ -56,7 +63,18 @@ def convert_playwright_to_dsl(file_path: str, output_dir: str) -> list[dict]:
 
 
 def _parse_playwright_line(line: str) -> dict | None:
-    """단일 Playwright 코드 라인을 DSL 스텝으로 변환한다."""
+    """단일 Playwright 코드 라인을 DSL 스텝 dict 로 변환한다.
+
+    Args:
+        line: strip 된 단일 Playwright 코드 라인.
+
+    Returns:
+        ``{"action", "target", "value", "description"}`` 형태의 dict.
+        인식할 수 없는 라인이면 ``None``.
+
+    Note:
+        지원 액션: navigate, wait, fill, press, select, check, hover, click, verify.
+    """
 
     # navigate
     m = re.search(r'page\.goto\(["\'](.+?)["\']\)', line)
@@ -151,7 +169,15 @@ def _parse_playwright_line(line: str) -> dict | None:
 
 
 def _extract_target(line: str) -> str:
-    """Playwright 로케이터 코드에서 DSL target 문자열을 추출한다."""
+    """Playwright 로케이터 코드에서 DSL target 문자열을 추출한다.
+
+    Args:
+        line: ``get_by_role``, ``get_by_label`` 등 로케이터 호출이 포함된 코드 라인.
+
+    Returns:
+        ``"role=button, name=로그인"``, ``"label=이메일"`` 등의 DSL target 문자열.
+        매칭되지 않으면 빈 문자열 ``""``.
+    """
 
     # get_by_role("button", name="로그인")
     m = re.search(r'get_by_role\(["\'](.+?)["\'],\s*name=["\'](.+?)["\']\)', line)

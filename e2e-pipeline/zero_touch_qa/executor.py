@@ -15,6 +15,20 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class StepResult:
+    """단일 DSL 스텝의 실행 결과를 담는 데이터클래스.
+
+    Attributes:
+        step_id: 시나리오 내 스텝 번호 또는 식별자.
+        action: 수행된 DSL 액션 이름 (click, fill, navigate 등).
+        target: 실제로 사용된 로케이터 문자열.
+        value: 액션에 전달된 값 (입력 텍스트, URL, 키 이름 등).
+        description: 스텝에 대한 사람이 읽을 수 있는 설명.
+        status: 실행 결과. ``"PASS"`` | ``"HEALED"`` | ``"FAIL"`` | ``"SKIP"``.
+        heal_stage: 치유 성공 시 어느 단계에서 복구되었는지. ``"none"`` | ``"fallback"`` | ``"local"`` | ``"dify"``.
+        timestamp: 스텝 실행 시각 (Unix epoch).
+        screenshot_path: 스크린샷 파일 경로. 없으면 ``None``.
+    """
+
     step_id: int | str
     action: str
     target: str
@@ -43,9 +57,14 @@ class QAExecutor:
     def execute(
         self, scenario: list[dict], headed: bool = True
     ) -> list[StepResult]:
-        """
-        Playwright 브라우저를 실행하고 DSL 시나리오를 순차 실행한다.
-        모든 스텝의 결과를 list[StepResult]로 반환한다.
+        """Playwright 브라우저를 실행하고 DSL 시나리오를 순차 실행한다.
+
+        Args:
+            scenario: DSL 스텝 dict 의 리스트.
+            headed: True 면 브라우저 창을 표시, False 면 headless.
+
+        Returns:
+            각 스텝의 실행 결과 ``StepResult`` 리스트. FAIL 발생 시 이후 스텝은 포함되지 않는다.
         """
         results: list[StepResult] = []
         artifacts = self.config.artifacts_dir
@@ -86,7 +105,10 @@ class QAExecutor:
         healer: LocalHealer,
         artifacts: str,
     ) -> StepResult:
-        """단일 스텝을 실행하고 결과를 반환한다."""
+        """단일 스텝을 실행하고 결과를 반환한다.
+
+        3단계 자가 치유 순서: 1) fallback_targets → 2) LocalHealer DOM 유사도 → 3) Dify LLM.
+        """
         action = step["action"].lower()
         step_id = step.get("step", "-")
         desc = step.get("description", "")
@@ -243,6 +265,17 @@ class QAExecutor:
     # ── 9대 DSL 액션 수행 ──
     @staticmethod
     def _perform_action(page: Page, locator: Locator, step: dict):
+        """9대 DSL 액션(click, fill, press, select, check, hover, verify, navigate, wait)을 수행한다.
+
+        Args:
+            page: Playwright Page (verify 에서 사용).
+            locator: 대상 요소의 Playwright Locator.
+            step: DSL 스텝 dict. ``action`` 과 ``value`` 키를 참조한다.
+
+        Raises:
+            ValueError: 미지원 액션일 때.
+            AssertionError: verify 액션에서 조건 불일치 시.
+        """
         action = step["action"].lower()
         value = step.get("value", "")
 
@@ -280,12 +313,14 @@ class QAExecutor:
     # ── 스크린샷 ──
     @staticmethod
     def _screenshot(page: Page, artifacts: str, step_id, suffix: str) -> str:
+        """스텝 실행 후 스크린샷을 저장하고 파일 경로를 반환한다."""
         path = os.path.join(artifacts, f"step_{step_id}_{suffix}.png")
         page.screenshot(path=path)
         return path
 
     @staticmethod
     def _safe_screenshot(page: Page, path: str):
+        """스크린샷을 저장하되, 실패해도 예외를 무시한다."""
         try:
             page.screenshot(path=path)
         except Exception:

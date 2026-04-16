@@ -24,7 +24,17 @@ class LocatorResolver:
         self.page = page
 
     def resolve(self, target) -> Locator | None:
-        """target을 Locator로 변환한다. 실패 시 None."""
+        """DSL target 을 Playwright Locator 로 변환한다.
+
+        7단계 시맨틱 탐색 순서: role→text→label→placeholder→testid→CSS/XPath→존재 검증.
+
+        Args:
+            target: DSL 스텝의 target 값. 문자열(``"role=button, name=로그인"``),
+                    dict(``{"role": "button", "name": "확인"}``), 또는 None.
+
+        Returns:
+            매칭된 ``Locator`` 객체(항상 ``.first``). 요소 미발견 시 ``None``.
+        """
         if not target:
             return None
 
@@ -48,6 +58,7 @@ class LocatorResolver:
         return self._resolve_css_xpath(target_str)
 
     def _resolve_dict(self, target: dict) -> Locator | None:
+        """dict 형태의 target 을 키(role/label/text/placeholder/testid) 우선순위로 해석한다."""
         if target.get("role"):
             return self.page.get_by_role(
                 target["role"], name=target.get("name", "")
@@ -65,6 +76,7 @@ class LocatorResolver:
         return self._resolve_css_xpath(str(fallback).strip())
 
     def _resolve_role(self, target_str: str) -> Locator | None:
+        """``role=`` 접두사가 있는 target 을 get_by_role 로 해석한다."""
         if not target_str.startswith("role="):
             return None
         m = re.match(r"role=(.+?),\s*name=(.+)", target_str)
@@ -79,6 +91,7 @@ class LocatorResolver:
         return None
 
     def _resolve_semantic_prefix(self, target_str: str) -> Locator | None:
+        """text=/label=/placeholder=/testid= 접두사를 매칭하여 해당 메서드를 호출한다."""
         prefix_map = {
             "text=": self.page.get_by_text,
             "label=": self.page.get_by_label,
@@ -92,6 +105,7 @@ class LocatorResolver:
         return None
 
     def _resolve_css_xpath(self, target_str: str) -> Locator | None:
+        """CSS 선택자 또는 XPath 로 요소를 탐색하고, count > 0 이면 반환한다."""
         try:
             loc = self.page.locator(target_str)
             if loc.count() > 0:

@@ -14,10 +14,15 @@ def generate_regression_test(
     results: list[StepResult],
     output_dir: str,
 ) -> str | None:
-    """
-    모든 스텝이 성공(PASS/HEALED)한 경우,
-    LLM 없이 독립 실행 가능한 Playwright 스크립트를 생성한다.
-    실패 스텝이 있으면 생성하지 않고 None을 반환한다.
+    """모든 스텝이 성공(PASS/HEALED)한 경우, LLM 없이 독립 실행 가능한 Playwright 스크립트를 생성한다.
+
+    Args:
+        scenario: DSL 스텝 dict 리스트.
+        results: 각 스텝의 실행 결과 StepResult 리스트.
+        output_dir: ``regression_test.py`` 를 저장할 디렉터리.
+
+    Returns:
+        생성된 스크립트 파일 경로. FAIL 스텝이 있으면 ``None``.
     """
     if any(r.status == "FAIL" for r in results):
         log.info("[Regression] 실패 스텝 존재 — 생성 건너뜀")
@@ -111,7 +116,19 @@ def generate_regression_test(
 
 
 def _target_to_playwright_code(target) -> str:
-    """DSL target을 독립 실행 가능한 Playwright 코드 스니펫으로 변환한다."""
+    """DSL target 을 독립 실행 가능한 Playwright 코드 스니펫으로 변환한다.
+
+    Args:
+        target: DSL target 문자열, dict, 또는 빈 값.
+
+    Returns:
+        ``page.get_by_role(...)`` 등의 Playwright 코드 문자열.
+        빈 target 이면 ``'page.locator("body")'``.
+
+    Example:
+        >>> _target_to_playwright_code("role=button, name=확인")
+        'page.get_by_role("button", name="확인").first'
+    """
     if not target:
         return 'page.locator("body")'
 

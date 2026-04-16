@@ -27,7 +27,17 @@ class DifyClient:
 
     # ── Doc 모드: 문서 파일 업로드 ──
     def upload_file(self, file_path: str) -> str:
-        """Dify Files API에 문서를 업로드하고 upload_file_id를 반환한다."""
+        """Dify Files API 에 문서를 업로드하고 upload_file_id 를 반환한다.
+
+        Args:
+            file_path: 업로드할 PDF 등 문서 파일 경로.
+
+        Returns:
+            Dify 가 부여한 파일 ID 문자열.
+
+        Raises:
+            DifyConnectionError: HTTP 에러 또는 네트워크 실패 시.
+        """
         log.info("[Doc] 문서 업로드 중... (%s)", file_path)
         try:
             with open(file_path, "rb") as f:
@@ -54,7 +64,20 @@ class DifyClient:
         target_url: str,
         file_id: str | None = None,
     ) -> list[dict]:
-        """Dify Chatflow에 시나리오 생성을 요청하고 DSL 스텝 배열을 반환한다."""
+        """Dify Chatflow 에 시나리오 생성을 요청하고 DSL 스텝 배열을 반환한다.
+
+        Args:
+            run_mode: 실행 모드 (``"chat"`` 또는 ``"doc"``).
+            srs_text: 자연어 요구사항 텍스트.
+            target_url: 테스트 대상 URL.
+            file_id: Doc 모드에서 ``upload_file()`` 이 반환한 파일 ID. 없으면 None.
+
+        Returns:
+            DSL 스텝 dict 의 리스트.
+
+        Raises:
+            DifyConnectionError: API 통신 실패 또는 JSON 파싱 실패 시.
+        """
         payload = {
             "inputs": {
                 "run_mode": run_mode,
@@ -98,7 +121,16 @@ class DifyClient:
         dom_snapshot: str,
         failed_step: dict,
     ) -> dict | None:
-        """실패한 스텝의 치유를 요청하고, 새 target 정보를 반환한다."""
+        """실패한 스텝의 치유를 LLM 에 요청하고 새 target 정보를 반환한다.
+
+        Args:
+            error_msg: 실패 원인 에러 메시지.
+            dom_snapshot: 현재 페이지의 HTML DOM (잘린 길이).
+            failed_step: 실패한 DSL 스텝 dict.
+
+        Returns:
+            새 target 이 포함된 dict. 파싱 실패 시 ``None``.
+        """
         payload = {
             "inputs": {
                 "run_mode": "heal",
@@ -115,6 +147,11 @@ class DifyClient:
 
     # ── 내부: Chatflow API 호출 ──
     def _call(self, payload: dict) -> str:
+        """Dify /chat-messages 엔드포인트에 blocking 요청을 보내고 answer 를 반환한다.
+
+        Raises:
+            DifyConnectionError: HTTP 에러, 타임아웃, 네트워크 실패 시.
+        """
         try:
             res = requests.post(
                 f"{self.base_url}/chat-messages",
