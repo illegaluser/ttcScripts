@@ -432,11 +432,11 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | 5-2 | Jenkins Credentials 등록 (`dify-qa-api-token`) | ✅ 자동 (API Key 획득된 경우) |
 | 5-3 | CSP 완화 (JAVA_OPTS, override.yaml 에서 영구 적용) | ✅ 자동 |
 | 5-4 | `DSCORE-ZeroTouch-QA-Docker` Pipeline Job 생성 (이미 존재하면 스크립트 업데이트) | ✅ 자동 |
-| 5-5 | `mac-ui-tester` 노드 등록 (`SCRIPTS_HOME` 포함) | ✅ 자동 |
+| 5-5 | `mac-ui-tester` 노드 등록 (`SCRIPTS_HOME` 포함, 이미 존재 시 값 업데이트) | ✅ 자동 |
 | 6-1 | Java 17 설치 확인/자동 설치 (apt/brew/winget) | ✅ 자동 |
 | 6-2 | `python3-venv` 패키지 설치 (Ubuntu/Debian) | ✅ 자동 |
-| 6-3 | Playwright + Chromium 브라우저 설치 | ✅ 자동 |
-| 6-4 | `agent.jar` 다운로드 (`$HOME/jenkins-agent/`) | ✅ 자동 |
+| 6-3 | `agent.jar` 다운로드 (`$HOME/jenkins-agent/`) | ✅ 자동 |
+| 6-4 | Pipeline venv 사전 생성 + 패키지/Chromium 설치 (폐쇄망 대응) | ✅ 자동 |
 | — | `agent.jar` 실행 (에이전트 연결) | ⚠️ 수동 (포그라운드 프로세스) |
 
 ### ⚠️ setup.sh 가 끝난 뒤 반드시 해야 할 수동 작업

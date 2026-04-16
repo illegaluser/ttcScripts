@@ -1,5 +1,5 @@
 // =============================================================================
-// DSCORE-ZeroTouch-QA-Docker Jenkinsfile (v2.1)
+// DSCORE-ZeroTouch-QA-Docker Jenkinsfile (v2.2)
 //
 // 변경 내역
 // - [v1.0] 독립 E2E 스택(e2e-net)에서 동작
@@ -9,6 +9,9 @@
 // - [v2.1] 경로 하드코딩 제거 — 어떤 PC에서도 수정 없이 동작
 //          AGENT_HOME: ${WORKSPACE}/.qa_home 으로 자동 결정
 //          SCRIPTS_HOME: Jenkins 노드 환경변수로 주입 (Jenkinsfile 수정 불필요)
+// - [v2.2] 폐쇄망 대응: Stage 1 에서 pip install / playwright install 제거
+//          모든 설치는 setup.sh Phase 6 에서 사전 수행
+//          파이프라인은 기존 venv 활성화만 수행 — 미존재 시 명확한 에러 출력
 // =============================================================================
 
 pipeline {
@@ -81,21 +84,23 @@ pipeline {
                     mkdir -p '${AGENT_HOME}/artifacts'
                     rm -rf '${AGENT_HOME}/artifacts'/*
 
-                    # venv 디렉터리가 존재하더라도 activate 가 없으면 손상된 것으로 간주하고 재생성
-                    if [ -d '${AGENT_HOME}/venv' ] && [ ! -f '${AGENT_HOME}/venv/bin/activate' ]; then
-                        echo "[Setup] Corrupted venv detected (missing bin/activate). Recreating..."
-                        rm -rf '${AGENT_HOME}/venv'
+                    # venv 검증 — setup.sh Phase 6 에서 사전 생성된 venv 를 사용한다.
+                    # 폐쇄망 환경 대응: 파이프라인 실행 중에는 아무것도 설치하지 않는다.
+                    if [ ! -f '${AGENT_HOME}/venv/bin/activate' ]; then
+                        echo "======================================================"
+                        echo "[ERROR] venv 가 존재하지 않거나 손상되었습니다."
+                        echo "  경로: ${AGENT_HOME}/venv"
+                        echo ""
+                        echo "  해결: setup.sh 를 재실행하면 Phase 6 에서 자동 생성됩니다."
+                        echo "  또는 수동 생성:"
+                        echo "    python3 -m venv '${AGENT_HOME}/venv'"
+                        echo "    source '${AGENT_HOME}/venv/bin/activate'"
+                        echo "    pip install requests playwright pillow"
+                        echo "    playwright install chromium"
+                        echo "======================================================"
+                        exit 1
                     fi
-
-                    if [ ! -d '${AGENT_HOME}/venv' ]; then
-                        echo "[Setup] Creating new virtual environment..."
-                        python3 -m venv '${AGENT_HOME}/venv'
-                        . '${AGENT_HOME}/venv/bin/activate'
-                        pip install requests playwright pillow
-                        playwright install chromium
-                    else
-                        echo "[Setup] Using existing virtual environment."
-                    fi
+                    echo "[Setup] venv 확인 완료."
                 """
             }
         }

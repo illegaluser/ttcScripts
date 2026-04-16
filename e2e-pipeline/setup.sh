@@ -960,10 +960,34 @@ import hudson.model.*
 import hudson.slaves.*
 
 def instance = Jenkins.getInstance()
-if (instance.getNode('mac-ui-tester') != null) {
-    println "[node] mac-ui-tester 이미 존재 — 건너뜀"
+def existingNode = instance.getNode('mac-ui-tester')
+
+if (existingNode != null) {
+    println "[node] mac-ui-tester 이미 존재 — SCRIPTS_HOME 업데이트 확인"
+    // 기존 노드의 SCRIPTS_HOME 을 최신 값으로 갱신
+    def envProp = existingNode.nodeProperties.get(EnvironmentVariablesNodeProperty)
+    def updated = false
+    if (envProp != null) {
+        def currentVal = envProp.envVars.get("SCRIPTS_HOME")
+        if (currentVal != "${SCRIPTS_HOME}") {
+            println "[node] SCRIPTS_HOME 변경: \${currentVal} → ${SCRIPTS_HOME}"
+            existingNode.nodeProperties.remove(envProp)
+            def newEntry = new EnvironmentVariablesNodeProperty.Entry("SCRIPTS_HOME", "${SCRIPTS_HOME}")
+            existingNode.nodeProperties.add(new EnvironmentVariablesNodeProperty([newEntry]))
+            updated = true
+        } else {
+            println "[node] SCRIPTS_HOME 이미 최신: ${SCRIPTS_HOME}"
+        }
+    } else {
+        println "[node] SCRIPTS_HOME 환경변수 없음 — 추가"
+        def newEntry = new EnvironmentVariablesNodeProperty.Entry("SCRIPTS_HOME", "${SCRIPTS_HOME}")
+        existingNode.nodeProperties.add(new EnvironmentVariablesNodeProperty([newEntry]))
+        updated = true
+    }
+    if (updated) { instance.save(); println "[node] 노드 설정 저장 완료" }
     return
 }
+
 def launcher = new JNLPLauncher()
 def node = new DumbSlave(
     "mac-ui-tester",
@@ -1083,48 +1107,9 @@ else
   log "6-2. python3-venv 확인 건너뜀 (Ubuntu/Debian 이 아닌 환경)"
 fi
 
-# ── 6-3. Playwright ─────────────────────────────────────────────────────────
-log "6-3. Playwright 설치 확인..."
-if python3 -c "import playwright" >/dev/null 2>&1; then
-  ok "Playwright 패키지 이미 설치됨"
-else
-  log "pip3 install playwright 실행 중..."
-  if run pip3 install playwright; then
-    ok "Playwright 패키지 설치 완료"
-  else
-    warn "Playwright 설치 실패. 수동 설치: pip3 install playwright"
-  fi
-fi
-
-log "Playwright Chromium 브라우저 확인..."
-# playwright install --dry-run 이 없으므로, 설치된 브라우저 목록에서 chromium 확인
-if python3 -c "
-from playwright._impl._driver import compute_driver_executable
-import subprocess, sys
-proc = subprocess.run([str(compute_driver_executable()), 'install', '--dry-run'], capture_output=True, text=True)
-# dry-run 미지원 시 fallback: chromium 바이너리 존재 여부로 판단
-sys.exit(0)
-" >/dev/null 2>&1 && playwright install chromium --dry-run >/dev/null 2>&1; then
-  ok "Chromium 브라우저 이미 설치됨"
-else
-  log "playwright install chromium 실행 중 (첫 설치 시 수분 소요)..."
-  if run playwright install chromium; then
-    ok "Chromium 브라우저 설치 완료"
-  else
-    # Linux 에서 시스템 라이브러리 부족 시
-    if [ "$AGENT_OS" = "linux" ]; then
-      log "시스템 의존성 설치 시도 (playwright install-deps chromium)..."
-      try sudo playwright install-deps chromium
-      try playwright install chromium
-    else
-      warn "Chromium 설치 실패. 수동 설치: playwright install chromium"
-    fi
-  fi
-fi
-
-# ── 6-4. agent.jar 다운로드 ─────────────────────────────────────────────────
+# ── 6-3. agent.jar 다운로드 ─────────────────────────────────────────────────
 AGENT_WORK_DIR="${HOME}/jenkins-agent"
-log "6-4. agent.jar 다운로드 확인 (${AGENT_WORK_DIR})..."
+log "6-3. agent.jar 다운로드 확인 (${AGENT_WORK_DIR})..."
 mkdir -p "$AGENT_WORK_DIR"
 
 if [ -f "${AGENT_WORK_DIR}/agent.jar" ]; then
@@ -1136,6 +1121,66 @@ else
   else
     warn "agent.jar 다운로드 실패. Jenkins(${JENKINS_URL}) 가 실행 중인지 확인."
     warn "  수동 다운로드: curl -O ${JENKINS_URL}/jnlpJars/agent.jar"
+  fi
+fi
+
+# ── 6-4. Pipeline venv 사전 생성 + 패키지/브라우저 설치 ──────────────────────
+#    폐쇄망 대응: Jenkinsfile 실행 중에는 아무것도 설치하지 않는다.
+#    여기서 workspace 경로의 venv 를 미리 만들어 놓으면 파이프라인은 activate 만 한다.
+PIPELINE_QA_HOME="${AGENT_WORK_DIR}/workspace/DSCORE-ZeroTouch-QA-Docker/.qa_home"
+PIPELINE_VENV="${PIPELINE_QA_HOME}/venv"
+
+log "6-4. Pipeline venv 사전 생성 (${PIPELINE_VENV})..."
+mkdir -p "$PIPELINE_QA_HOME"
+
+# 손상된 venv 감지
+if [ -d "$PIPELINE_VENV" ] && [ ! -f "$PIPELINE_VENV/bin/activate" ]; then
+  warn "손상된 venv 감지 (bin/activate 없음). 삭제 후 재생성..."
+  rm -rf "$PIPELINE_VENV"
+fi
+
+if [ -d "$PIPELINE_VENV" ] && [ -f "$PIPELINE_VENV/bin/activate" ]; then
+  ok "Pipeline venv 이미 존재"
+else
+  log "python3 -m venv 로 생성 중..."
+  if run python3 -m venv "$PIPELINE_VENV"; then
+    ok "Pipeline venv 생성 완료"
+  else
+    err "venv 생성 실패. python3-venv 패키지 확인 필요."
+  fi
+fi
+
+if [ -f "$PIPELINE_VENV/bin/activate" ]; then
+  log "venv 활성화 후 패키지 설치: requests, playwright, pillow..."
+  # 서브셸에서 activate → 설치 → 자동 해제
+  (
+    . "$PIPELINE_VENV/bin/activate"
+    pip install --quiet requests playwright pillow
+  )
+  if [ $? -eq 0 ]; then
+    ok "Python 패키지 설치 완료 (requests, playwright, pillow)"
+  else
+    warn "pip install 실패. 수동 설치: source $PIPELINE_VENV/bin/activate && pip install requests playwright pillow"
+  fi
+
+  log "Playwright Chromium 브라우저 설치 확인..."
+  # playwright 는 사용자 홈 캐시(~/.cache/ms-playwright/)에 브라우저를 저장
+  (
+    . "$PIPELINE_VENV/bin/activate"
+    playwright install chromium
+  )
+  if [ $? -eq 0 ]; then
+    ok "Chromium 브라우저 설치 완료"
+  else
+    warn "Chromium 설치 실패."
+    if [ "$AGENT_OS" = "linux" ]; then
+      log "시스템 의존성 설치 시도 (playwright install-deps chromium)..."
+      try sudo playwright install-deps chromium
+      ( . "$PIPELINE_VENV/bin/activate" && playwright install chromium ) || \
+        warn "재시도 실패. 수동 설치: playwright install chromium"
+    else
+      warn "수동 설치: playwright install chromium"
+    fi
   fi
 fi
 
