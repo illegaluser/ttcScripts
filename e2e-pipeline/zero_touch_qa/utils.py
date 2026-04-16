@@ -12,6 +12,8 @@ def extract_json_safely(text: str):
     """
     # 추론 모델(Qwen, DeepSeek 등)의 <think>...</think> 블록 제거
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    # 닫힘 태그 없는 <think> — 토큰 한계로 잘린 경우 나머지 전부 제거
+    text = re.sub(r"<think>.*", "", text, flags=re.S)
     # 마크다운 코드펜스 제거
     text = re.sub(r"```(?:json)?\s*", "", text)
     # C-style 주석 제거

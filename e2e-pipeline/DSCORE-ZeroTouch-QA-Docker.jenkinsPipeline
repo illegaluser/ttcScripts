@@ -137,6 +137,9 @@ pipeline {
                     . '${AGENT_HOME}/venv/bin/activate'
 
                     export PYTHONPATH="\${SCRIPTS_HOME}"
+                    export PYTHONDONTWRITEBYTECODE=1
+                    # WSL2 ↔ Windows 간 .pyc 타임스탬프 불일치 방지: 기존 캐시 삭제
+                    find "\${SCRIPTS_HOME}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
                     export ARTIFACTS_DIR='${AGENT_HOME}/artifacts'
                     export TARGET_URL='${params.TARGET_URL}'
                     export SRS_TEXT='${params.SRS_TEXT}'

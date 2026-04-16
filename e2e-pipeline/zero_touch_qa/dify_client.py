@@ -75,10 +75,19 @@ class DifyClient:
             ]
 
         answer = self._call(payload)
+        log.info("Dify 응답 길이: %d자, <think> 포함: %s", len(answer), "<think>" in answer)
         scenario = extract_json_safely(answer)
         if not scenario or not isinstance(scenario, list):
+            # <think> 블록 제거 후 실제 내용이 있는지 표시
+            cleaned = answer
+            if "<think>" in cleaned:
+                import re
+                cleaned = re.sub(r"<think>.*?</think>", "[THINK_BLOCK_REMOVED]", cleaned, flags=re.S)
+                cleaned = re.sub(r"<think>.*", "[UNCLOSED_THINK_REMOVED]", cleaned, flags=re.S)
             raise DifyConnectionError(
-                f"시나리오 파싱 실패. Dify 원본 응답:\n{answer[:500]}"
+                f"시나리오 파싱 실패.\n"
+                f"  응답 길이: {len(answer)}자\n"
+                f"  <think> 블록 제거 후 내용:\n{cleaned[:500]}"
             )
         return scenario
 
