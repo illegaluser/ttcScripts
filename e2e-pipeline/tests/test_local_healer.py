@@ -92,6 +92,64 @@ def test_try_heal_click_selector(mock_page):
 
 
 # ---------------------------------------------------------------------------
+# _try_role_fallback
+# ---------------------------------------------------------------------------
+
+def test_try_role_fallback_searchbox_to_combobox(mock_page):
+    """role=searchbox 실패 시 combobox 로 폴백 매칭한다 (Google 검색창 케이스)."""
+    combobox_loc = MagicMock()
+    combobox_loc.count.return_value = 1
+    combobox_loc.first = combobox_loc
+
+    mock_page.get_by_role.return_value = combobox_loc
+
+    healer = LocalHealer(mock_page, threshold=0.8)
+    step = {"action": "fill", "target": "role=searchbox"}
+    result = healer.try_heal(step)
+
+    assert result is combobox_loc
+    mock_page.get_by_role.assert_called_with("combobox")
+
+
+def test_try_role_fallback_with_name(mock_page):
+    """role + name 타겟도 name 을 유지한 채 유사 role 을 시도한다."""
+    combobox_loc = MagicMock()
+    combobox_loc.count.return_value = 1
+    combobox_loc.first = combobox_loc
+
+    mock_page.get_by_role.return_value = combobox_loc
+
+    healer = LocalHealer(mock_page, threshold=0.8)
+    step = {"action": "fill", "target": "role=searchbox, name=검색"}
+    result = healer.try_heal(step)
+
+    assert result is combobox_loc
+    mock_page.get_by_role.assert_called_with("combobox", name="검색")
+
+
+def test_try_role_fallback_non_role_target(mock_page):
+    """role= 접두사가 아닌 타겟에서는 role 폴백을 시도하지 않는다."""
+    healer = LocalHealer(mock_page, threshold=0.8)
+    result = healer._try_role_fallback("text=로그인")
+
+    assert result is None
+    mock_page.get_by_role.assert_not_called()
+
+
+def test_try_role_fallback_all_miss(mock_page):
+    """모든 유사 role 이 count=0 이면 None 을 반환한다."""
+    no_match = MagicMock()
+    no_match.count.return_value = 0
+
+    mock_page.get_by_role.return_value = no_match
+
+    healer = LocalHealer(mock_page, threshold=0.8)
+    result = healer._try_role_fallback("role=searchbox")
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # _clean_target
 # ---------------------------------------------------------------------------
 

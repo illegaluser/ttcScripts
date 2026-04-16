@@ -58,40 +58,59 @@ class LocatorResolver:
         return self._resolve_css_xpath(target_str)
 
     def _resolve_dict(self, target: dict) -> Locator | None:
-        """dict 형태의 target 을 키(role/label/text/placeholder/testid) 우선순위로 해석한다."""
+        """dict 형태의 target 을 키(role/label/text/placeholder/testid) 우선순위로 해석한다.
+
+        각 키에 대해 ``count() > 0`` 존재 검증을 수행하여
+        요소가 없을 때 30초 타임아웃을 방지한다.
+        """
         if target.get("role"):
-            return self.page.get_by_role(
+            loc = self.page.get_by_role(
                 target["role"], name=target.get("name", "")
-            ).first
+            )
+            return loc.first if loc.count() > 0 else None
         if target.get("label"):
-            return self.page.get_by_label(target["label"]).first
+            loc = self.page.get_by_label(target["label"])
+            return loc.first if loc.count() > 0 else None
         if target.get("text"):
-            return self.page.get_by_text(target["text"]).first
+            loc = self.page.get_by_text(target["text"])
+            return loc.first if loc.count() > 0 else None
         if target.get("placeholder"):
-            return self.page.get_by_placeholder(target["placeholder"]).first
+            loc = self.page.get_by_placeholder(target["placeholder"])
+            return loc.first if loc.count() > 0 else None
         if target.get("testid"):
-            return self.page.get_by_test_id(target["testid"]).first
+            loc = self.page.get_by_test_id(target["testid"])
+            return loc.first if loc.count() > 0 else None
         # 폴백: selector 키 또는 문자열 변환
         fallback = target.get("selector", str(target))
         return self._resolve_css_xpath(str(fallback).strip())
 
     def _resolve_role(self, target_str: str) -> Locator | None:
-        """``role=`` 접두사가 있는 target 을 get_by_role 로 해석한다."""
+        """``role=`` 접두사가 있는 target 을 get_by_role 로 해석한다.
+
+        ``count() > 0`` 존재 검증을 수행하여 요소가 없을 때
+        30초 타임아웃 없이 즉시 None 을 반환한다.
+        """
         if not target_str.startswith("role="):
             return None
         m = re.match(r"role=(.+?),\s*name=(.+)", target_str)
         if m:
-            return self.page.get_by_role(
+            loc = self.page.get_by_role(
                 m.group(1).strip(), name=m.group(2).strip()
-            ).first
+            )
+            return loc.first if loc.count() > 0 else None
         # role만 있고 name이 없는 경우
         role_only = target_str.replace("role=", "", 1).strip()
         if role_only:
-            return self.page.get_by_role(role_only).first
+            loc = self.page.get_by_role(role_only)
+            return loc.first if loc.count() > 0 else None
         return None
 
     def _resolve_semantic_prefix(self, target_str: str) -> Locator | None:
-        """text=/label=/placeholder=/testid= 접두사를 매칭하여 해당 메서드를 호출한다."""
+        """text=/label=/placeholder=/testid= 접두사를 매칭하여 해당 메서드를 호출한다.
+
+        ``count() > 0`` 존재 검증을 수행하여 요소가 없을 때
+        30초 타임아웃 없이 즉시 None 을 반환한다.
+        """
         prefix_map = {
             "text=": self.page.get_by_text,
             "label=": self.page.get_by_label,
@@ -101,7 +120,8 @@ class LocatorResolver:
         for prefix, method in prefix_map.items():
             if target_str.startswith(prefix):
                 value = target_str.replace(prefix, "", 1).strip()
-                return method(value).first
+                loc = method(value)
+                return loc.first if loc.count() > 0 else None
         return None
 
     def _resolve_css_xpath(self, target_str: str) -> Locator | None:

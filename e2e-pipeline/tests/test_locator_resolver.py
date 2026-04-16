@@ -90,6 +90,34 @@ def test_resolve_testid_prefix(mock_page):
 
 
 # ---------------------------------------------------------------------------
+# resolve — role 존재 검증
+# ---------------------------------------------------------------------------
+
+def test_resolve_role_no_match(mock_page):
+    """role 로케이터의 count 가 0 이면 None 을 반환한다 (30초 타임아웃 방지)."""
+    no_match = MagicMock()
+    no_match.count.return_value = 0
+    no_match.first = no_match
+    mock_page.get_by_role.return_value = no_match
+    mock_page.locator.return_value = no_match
+
+    resolver = LocatorResolver(mock_page)
+    assert resolver.resolve("role=searchbox") is None
+
+
+def test_resolve_semantic_no_match(mock_page):
+    """시맨틱 로케이터의 count 가 0 이면 None 을 반환한다."""
+    no_match = MagicMock()
+    no_match.count.return_value = 0
+    no_match.first = no_match
+    mock_page.get_by_text.return_value = no_match
+    mock_page.locator.return_value = no_match
+
+    resolver = LocatorResolver(mock_page)
+    assert resolver.resolve("text=존재하지않는텍스트") is None
+
+
+# ---------------------------------------------------------------------------
 # resolve — CSS/XPath
 # ---------------------------------------------------------------------------
 
