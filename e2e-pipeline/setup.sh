@@ -161,6 +161,107 @@ detect_os() {
   esac
 }
 
+# macOS 전용: Homebrew 자동 설치. 성공 시 0, 실패 시 1.
+# 공식 설치 스크립트를 비대화식(NONINTERACTIVE=1)으로 실행한다 — sudo 비밀번호 프롬프트가
+# 뜰 수 있다. 설치 후 Apple Silicon(/opt/homebrew) 또는 Intel(/usr/local) 경로를 PATH 에 prepend.
+install_homebrew() {
+  log "Homebrew 자동 설치 시작 (공식 스크립트, sudo 비밀번호 프롬프트가 뜰 수 있음)..."
+  if NONINTERACTIVE=1 run bash -c 'curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | /bin/bash'; then
+    ok "Homebrew 설치 스크립트 완료"
+  else
+    err "Homebrew 설치 실패. 수동 설치 후 재실행: https://brew.sh"
+    return 1
+  fi
+
+  # Apple Silicon / Intel 둘 다 커버. shellenv 가 현재 셸에 PATH/MANPATH 를 주입한다.
+  local brew_bin=""
+  if [ -x /opt/homebrew/bin/brew ]; then
+    brew_bin=/opt/homebrew/bin/brew
+  elif [ -x /usr/local/bin/brew ]; then
+    brew_bin=/usr/local/bin/brew
+  fi
+  if [ -n "$brew_bin" ]; then
+    eval "$("$brew_bin" shellenv)"
+    ok "현재 셸에 brew shellenv 적용 ($brew_bin)"
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    ok "Homebrew 사용 가능: $(brew --version | head -n1)"
+    return 0
+  else
+    err "설치는 성공했지만 brew 명령을 찾을 수 없음. 새 터미널에서 재실행 필요."
+    return 1
+  fi
+}
+
+# macOS 전용: brew 로 설치한 openjdk@17 을 현재 셸 PATH 에 연결한다.
+# Homebrew 의 openjdk 는 keg-only 라 자동으로 PATH 에 들어가지 않는다.
+# 성공 시 0, 실패 시 1.
+ensure_java_on_path() {
+  if ! command -v brew >/dev/null 2>&1; then
+    warn "ensure_java_on_path: brew 명령 없음 — 건너뜀"
+    return 1
+  fi
+  local jdk_prefix
+  jdk_prefix="$(brew --prefix openjdk@17 2>/dev/null || echo '')"
+  if [ -z "$jdk_prefix" ] || [ ! -x "$jdk_prefix/bin/java" ]; then
+    warn "openjdk@17 prefix 를 찾을 수 없음 (brew install 이 실패했거나 경로 변경)"
+    return 1
+  fi
+  export PATH="$jdk_prefix/bin:$PATH"
+  ok "현재 셸 PATH 에 $jdk_prefix/bin prepend"
+
+  # 맥 전역에서 `java` 가 인식되도록 JavaVirtualMachines 심링크 생성 (없을 때만).
+  local jvm_link="/Library/Java/JavaVirtualMachines/openjdk-17.jdk"
+  if [ ! -e "$jvm_link" ] && [ -e "$jdk_prefix/libexec/openjdk.jdk" ]; then
+    log "JavaVirtualMachines 심링크 생성 (sudo 비밀번호 프롬프트가 뜰 수 있음)..."
+    if run sudo ln -sfn "$jdk_prefix/libexec/openjdk.jdk" "$jvm_link"; then
+      ok "심링크 생성 완료: $jvm_link"
+    else
+      warn "심링크 생성 실패 — 현재 셸 PATH 로는 java 사용 가능하지만 새 터미널에서는 안 잡힐 수 있음"
+    fi
+  fi
+  return 0
+}
+
+# macOS 전용: 호스트 Ollama 가 0.0.0.0 에 바인딩되도록 보장한다.
+# 이미 0.0.0.0 이면 no-op, 아니면 launchctl setenv + brew services restart.
+# 성공 시 0, 실패 시 1.
+ensure_ollama_host_binding() {
+  # 1) 이미 11434 가 0.0.0.0 (또는 *) 에 LISTEN 중이면 성공으로 본다.
+  if lsof -nP -iTCP:11434 -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | grep -Eq '(\*|0\.0\.0\.0):11434'; then
+    ok "Ollama 가 이미 0.0.0.0:11434 에 바인딩됨"
+    return 0
+  fi
+
+  log "launchctl setenv OLLAMA_HOST=0.0.0.0 (사용자 세션 전역) 적용..."
+  if run launchctl setenv OLLAMA_HOST 0.0.0.0; then
+    ok "launchctl 환경변수 설정 완료"
+  else
+    warn "launchctl setenv 실패"
+    return 1
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    log "brew services restart ollama (새 환경변수로 재기동)..."
+    try brew services restart ollama
+  else
+    warn "brew 명령 없음 — Ollama 서비스 재기동 건너뜀"
+  fi
+
+  # 2) 재검증 (최대 20초)
+  local _w=0
+  while [ $_w -lt 20 ]; do
+    if lsof -nP -iTCP:11434 -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | grep -Eq '(\*|0\.0\.0\.0):11434'; then
+      ok "Ollama 바인딩 0.0.0.0:11434 확인 (${_w}초 경과)"
+      return 0
+    fi
+    sleep 2; _w=$((_w + 2))
+  done
+  warn "재기동 후에도 0.0.0.0 바인딩을 확인하지 못함 — Phase 3 재검증에서 최종 확인"
+  return 1
+}
+
 # 호스트에 Ollama 를 설치한다 (OS 별 분기).
 # 성공 시 0, 실패 시 1.
 install_host_ollama() {
@@ -197,8 +298,11 @@ install_host_ollama() {
 
     macos)
       if ! command -v brew >/dev/null 2>&1; then
-        err "brew 명령 없음. Homebrew 설치 후 재실행: https://brew.sh"
-        return 1
+        warn "brew 명령 없음 — Homebrew 자동 설치 시도"
+        if ! install_homebrew; then
+          err "Homebrew 설치 실패 — Ollama 설치 불가. 수동 설치 후 재실행: https://brew.sh"
+          return 1
+        fi
       fi
       log "brew install ollama ..."
       if run brew install ollama; then
@@ -209,8 +313,9 @@ install_host_ollama() {
       fi
       log "ollama 백그라운드 서비스 시작 (brew services start ollama)..."
       try brew services start ollama
-      warn "macOS: 컨테이너에서 호스트 Ollama 로 접근하려면 OLLAMA_HOST=0.0.0.0 필요."
-      warn "  → 수동 기동 대안: OLLAMA_HOST=0.0.0.0 ollama serve"
+      # 컨테이너에서 접근 가능하도록 0.0.0.0 바인딩 자동 적용
+      ensure_ollama_host_binding || \
+        warn "  → 바인딩 자동 적용 실패. Phase 3 도달성 검증에서 재시도한다."
       ;;
 
     linux)
@@ -249,6 +354,9 @@ log " Ollama 모델     : $OLLAMA_MODEL"
 log " Dify 계정       : $DIFY_EMAIL  (비밀번호: $([ "$_USING_DEFAULT_DIFY_PW" = "1" ] && echo '⚠ 기본값 Admin1234!' || echo '✓ 사용자 지정'))"
 log " Jenkins 계정    : $JENKINS_ADMIN_USER  (비밀번호: $([ "$_USING_DEFAULT_JENKINS_PW" = "1" ] && echo '⚠ 기본값 Admin1234!' || echo '✓ 사용자 지정'))"
 log " DEBUG 모드      : $([ "$DEBUG" = "1" ] && echo ON || echo OFF)"
+if [ "$(detect_os)" = "macos" ]; then
+  log " macOS 자동화    : Homebrew · python3 · openjdk@17 · OLLAMA_HOST 바인딩 자동 설치/설정 (Docker Desktop 만 수동)"
+fi
 
 if [ "$_USING_DEFAULT_DIFY_PW" = "1" ] || [ "$_USING_DEFAULT_JENKINS_PW" = "1" ]; then
   if [ "$_ENV_LOADED" = "0" ]; then
@@ -265,17 +373,67 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 phase_start "Phase 0: 사전 요구사항 확인"
 
+_OS_DETECTED=$(detect_os)
+
 log "docker 명령 확인..."
-command -v docker  >/dev/null 2>&1 || { err "docker 명령 없음. Docker Desktop 설치 필요."; exit 1; }
+if ! command -v docker >/dev/null 2>&1; then
+  err "docker 명령 없음. Docker Desktop 설치 필요."
+  if [ "$_OS_DETECTED" = "macos" ]; then
+    err "  → 권장: brew install --cask docker  (이후 /Applications/Docker.app 최초 실행 → 라이선스 동의 필요)"
+    err "  → 수동 다운로드: https://www.docker.com/products/docker-desktop"
+  fi
+  exit 1
+fi
 ok "docker 명령 존재"
 
 log "python3 명령 확인..."
-command -v python3 >/dev/null 2>&1 || { err "python3 필요. (brew/apt install python3)"; exit 1; }
-ok "python3 명령 존재"
+if ! command -v python3 >/dev/null 2>&1; then
+  if [ "$_OS_DETECTED" = "macos" ]; then
+    warn "python3 미설치 — Homebrew 경유 자동 설치 시도"
+    if ! command -v brew >/dev/null 2>&1; then
+      warn "brew 명령 없음 — Homebrew 먼저 설치"
+      install_homebrew || { err "Homebrew 설치 실패 — python3 자동 설치 불가. 수동 설치 후 재실행."; exit 1; }
+    fi
+    if ! run brew install python3; then
+      err "brew install python3 실패. 수동 설치 후 재실행."
+      exit 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+      err "python3 설치 후에도 명령을 찾을 수 없음. 새 터미널에서 재실행 필요."
+      exit 1
+    fi
+    ok "python3 자동 설치 완료: $(python3 --version 2>&1)"
+  else
+    err "python3 필요. (brew/apt install python3)"
+    exit 1
+  fi
+else
+  ok "python3 명령 존재"
+fi
 
 log "Docker 데몬 상태 확인..."
-docker info >/dev/null 2>&1 || { err "Docker 데몬이 실행되지 않음. Docker Desktop 실행 필요."; exit 1; }
-ok "Docker 데몬 응답"
+if ! docker info >/dev/null 2>&1; then
+  if [ "$_OS_DETECTED" = "macos" ]; then
+    warn "Docker 데몬 미응답 — Docker Desktop 자동 기동 시도 (open -a Docker)"
+    try open -a "Docker"
+    log "Docker 데몬 응답 대기 (최대 90초)..."
+    _dd=0
+    until docker info >/dev/null 2>&1; do
+      sleep 3; _dd=$((_dd + 3))
+      if [ $_dd -ge 90 ]; then
+        err "Docker 데몬 90초 내 미응답. Docker Desktop 을 수동으로 실행 후 재시도."
+        err "  → 최초 실행 시 라이선스 동의 화면이 뜰 수 있다."
+        exit 1
+      fi
+    done
+    ok "Docker 데몬 응답 (${_dd}초 경과)"
+  else
+    err "Docker 데몬이 실행되지 않음. Docker Desktop 실행 필요."
+    exit 1
+  fi
+else
+  ok "Docker 데몬 응답"
+fi
 
 log "필수 파일 존재 확인..."
 [ -f "$SCRIPT_DIR/dify-chatflow.yaml" ] || { err "dify-chatflow.yaml 없음. e2e-pipeline/ 폴더 안에서 실행."; exit 1; }
@@ -337,6 +495,11 @@ case "$OLLAMA_PROFILE" in
         err "Ollama 자동 설치 실패. 위의 안내대로 수동 설치 후 재실행."
         exit 1
       fi
+    fi
+    # macOS: 기존 설치이든 신규 설치이든 바인딩 보장 (컨테이너 도달성 사전 준비)
+    if [ "$_OS_DETECTED" = "macos" ]; then
+      ensure_ollama_host_binding || \
+        warn "  → 바인딩 보장 실패. Phase 3 에서 재시도한다."
     fi
     ;;
   container)
@@ -515,10 +678,23 @@ else
   if docker exec e2e-dify-api sh -c 'curl -s -f http://host.docker.internal:11434/api/tags >/dev/null'; then
     ok "Dify api → http://host.docker.internal:11434 연결 OK"
   else
-    warn "Dify api 가 호스트 Ollama 에 도달 불가."
-    warn "  → 호스트 Ollama 가 OLLAMA_HOST=0.0.0.0 으로 바인딩되어 있는지 확인 (기본값 127.0.0.1 은 컨테이너에서 못 닿음)"
-    warn "  → Windows: 시스템 환경변수 OLLAMA_HOST=0.0.0.0 등록 후 ollama.exe 재시작"
-    warn "  → Linux/macOS: OLLAMA_HOST=0.0.0.0 ollama serve 로 재기동"
+    # macOS: 바인딩 자동 교정 후 1회 재시도
+    if [ "$(detect_os)" = "macos" ]; then
+      warn "도달 불가 — OLLAMA_HOST 바인딩 자동 교정 후 재시도"
+      if ensure_ollama_host_binding && \
+         docker exec e2e-dify-api sh -c 'curl -s -f http://host.docker.internal:11434/api/tags >/dev/null'; then
+        ok "재시도 성공: Dify api → http://host.docker.internal:11434"
+      else
+        warn "재시도에도 도달 불가."
+        warn "  → 직접 확인: lsof -nP -iTCP:11434 -sTCP:LISTEN  (0.0.0.0 여야 함)"
+        warn "  → 수동 기동: launchctl setenv OLLAMA_HOST 0.0.0.0 && brew services restart ollama"
+      fi
+    else
+      warn "Dify api 가 호스트 Ollama 에 도달 불가."
+      warn "  → 호스트 Ollama 가 OLLAMA_HOST=0.0.0.0 으로 바인딩되어 있는지 확인 (기본값 127.0.0.1 은 컨테이너에서 못 닿음)"
+      warn "  → Windows: 시스템 환경변수 OLLAMA_HOST=0.0.0.0 등록 후 ollama.exe 재시작"
+      warn "  → Linux: sudo systemctl edit ollama → Environment=OLLAMA_HOST=0.0.0.0 추가"
+    fi
   fi
 fi
 
@@ -1062,10 +1238,17 @@ if [ "$JAVA_OK" = "false" ]; then
       fi
       ;;
     macos)
+      if ! command -v brew >/dev/null 2>&1; then
+        warn "brew 없음 — Homebrew 자동 설치 시도"
+        install_homebrew || warn "Homebrew 설치 실패. 수동 설치 후 재실행: https://brew.sh"
+      fi
       if command -v brew >/dev/null 2>&1; then
-        run brew install openjdk@17
-      else
-        warn "brew 없음. 수동 설치 필요: brew install openjdk@17"
+        if run brew install openjdk@17; then
+          # Homebrew 의 openjdk 는 keg-only — 현재 셸 PATH 와 JVM 심링크를 자동 연결
+          ensure_java_on_path || warn "Java PATH 자동 설정 실패 — 수동 구성 필요"
+        else
+          warn "brew install openjdk@17 실패. 수동 설치 필요."
+        fi
       fi
       ;;
     windows)
