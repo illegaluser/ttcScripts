@@ -15,3 +15,14 @@ e2e-pipeline/docker-compose.override.yaml
 # Jenkins 에이전트 바이너리 (런타임에 다운로드)
 e2e-pipeline/agent.jar
 e2e-pipeline/*.jar
+e2e-pipeline/zero_touch_qa/__pycache__/__init__.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/__main__.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/config.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/converter.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/dify_client.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/executor.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/local_healer.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/locator_resolver.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/regression_generator.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/report.cpython-312.pyc
+e2e-pipeline/zero_touch_qa/__pycache__/utils.cpython-312.pyc
