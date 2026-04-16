@@ -955,7 +955,7 @@ def launcher = new JNLPLauncher()
 def node = new DumbSlave(
     "mac-ui-tester",
     "Playwright E2E Test Agent",
-    "/home/jenkins-agent",
+    "${HOME}/jenkins-agent",
     "2",
     Node.Mode.NORMAL,
     "mac-ui-tester",

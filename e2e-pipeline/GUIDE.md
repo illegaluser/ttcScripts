@@ -512,7 +512,7 @@ java -jar agent.jar \
 > **⚠️ `-workDir` 는 반드시 쓰기 권한이 있는 경로**여야 한다.
 > - **권장**: `$HOME/jenkins-agent` — bash 가 자동으로 현재 사용자의 홈 디렉터리로 확장 (예: `/home/alice/jenkins-agent`)
 > - **금지**: `/home/jenkins-agent` — 이건 root 소유의 최상위 디렉터리라 일반 사용자가 만들 수 없어 `java.nio.file.AccessDeniedException` 이 난다 (실제 발생한 이슈).
-> - Jenkins UI 에 `Remote root directory` 로 `/home/jenkins-agent` 가 보여도 그건 **표시용 메타데이터**일 뿐이고, 실제 디스크 경로는 `-workDir` 플래그가 결정한다.
+> - Jenkins UI 에 `Remote root directory` 로 표시된 경로는 **Jenkins 가 에이전트 위에 workspace 를 만드는 실제 기준 경로**다. 반드시 에이전트 사용자가 쓸 수 있는 경로여야 한다 (예: `$HOME/jenkins-agent`).
 
 > **컨트롤러가 다른 머신인 경우**: `http://localhost:18080/` 을 컨트롤러의 접근 가능한 주소로 교체 (예: `http://192.168.1.100:18080/`).
 
@@ -1326,7 +1326,7 @@ java -version
 
 | 항목 | 값 | 설명 |
 |---|---|---|
-| **Remote root directory** | `/home/jenkins-agent` (또는 아무 문자열) | **Jenkins UI 표시용 메타데이터**일 뿐 — 실제 동작은 §8.6.5 의 `-workDir` 플래그가 결정한다. 값이 뭐든 기능에 영향 없음. |
+| **Remote root directory** | `$HOME/jenkins-agent` (예: `/home/alice/jenkins-agent`) | **Jenkins 가 이 경로 아래에 workspace 디렉터리를 실제로 생성한다.** 에이전트 사용자가 쓸 수 있는 경로여야 한다. `/home/jenkins-agent` 같은 루트 소유 경로는 `AccessDeniedException`. setup.sh 자동 등록 시 `$HOME/jenkins-agent` 로 설정됨. |
 | **Labels** | `mac-ui-tester` | Jenkinsfile 이 `agent { label 'mac-ui-tester' }` 로 참조 — 일치 필수 |
 | **Launch method** | `Launch agent by connecting it to the controller` | TCP/WebSocket 연결 방식 |
 
@@ -1967,7 +1967,7 @@ Exception in thread "main" java.nio.file.AccessDeniedException: /home/jenkins-ag
 
 **원인:** `-workDir` 에 `/home/jenkins-agent` 또는 비슷한 **root 소유 최상위 경로**를 지정. 일반 사용자 계정으로는 `/home/` 아래에 새 디렉터리를 만들 수 없다.
 
-Jenkins UI 의 노드 상세 페이지에 "Remote root directory" 로 `/home/jenkins-agent` 가 표시되어 있을 수 있는데, 이는 **표시용 메타데이터일 뿐** 실제 agent.jar 의 `-workDir` 값과 무관하다. 사용자가 이걸 보고 똑같이 따라 치면 이 에러가 난다.
+Jenkins UI 의 노드 상세 페이지에 "Remote root directory" 로 `/home/jenkins-agent` 가 표시되어 있다면, **Jenkins 는 이 경로 아래에 workspace 를 실제로 생성하려 시도한다**. 일반 사용자는 `/home/` 아래에 디렉터리를 만들 수 없으므로 `AccessDeniedException` 이 난다. 별도로, `-workDir` 은 agent.jar 의 remoting 내부 상태 저장용 경로이고 workspace 와는 다른 것이다.
 
 **해결:** `-workDir` 을 **사용자 홈 하위** 경로로 교체. §8.6.5 의 OS별 명령 참조.
 
