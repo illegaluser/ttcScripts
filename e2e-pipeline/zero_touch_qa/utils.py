@@ -10,6 +10,8 @@ def extract_json_safely(text: str):
     순수 JSON 배열 또는 객체만 추출하여 파싱한다.
     LLM 이 trailing comma 등 비표준 JSON 을 생성하는 경우도 복구 시도한다.
     """
+    # 추론 모델(Qwen, DeepSeek 등)의 <think>...</think> 블록 제거
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
     # 마크다운 코드펜스 제거
     text = re.sub(r"```(?:json)?\s*", "", text)
     # C-style 주석 제거
