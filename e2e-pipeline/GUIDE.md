@@ -433,14 +433,19 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | 5-3 | CSP 완화 (JAVA_OPTS, override.yaml 에서 영구 적용) | ✅ 자동 |
 | 5-4 | `DSCORE-ZeroTouch-QA-Docker` Pipeline Job 생성 (이미 존재하면 스크립트 업데이트) | ✅ 자동 |
 | 5-5 | `mac-ui-tester` 노드 등록 (`SCRIPTS_HOME` 포함) | ✅ 자동 |
-| — | agent.jar 실행 (에이전트 머신) | ⚠️ 수동 |
+| 6-1 | Java 17 설치 확인/자동 설치 (apt/brew/winget) | ✅ 자동 |
+| 6-2 | `python3-venv` 패키지 설치 (Ubuntu/Debian) | ✅ 자동 |
+| 6-3 | Playwright + Chromium 브라우저 설치 | ✅ 자동 |
+| 6-4 | `agent.jar` 다운로드 (`$HOME/jenkins-agent/`) | ✅ 자동 |
+| — | `agent.jar` 실행 (에이전트 연결) | ⚠️ 수동 (포그라운드 프로세스) |
 
 ### ⚠️ setup.sh 가 끝난 뒤 반드시 해야 할 수동 작업
 
 > setup.sh 가 `[✓] DSCORE Zero-Touch QA 스택 설치 완료` 를 찍었다고 모든 게 끝난 게 아니다.
-> **아래 3가지 작업이 수동으로 필요**하다 — 자동화가 기술적으로 불가능한 영역이기 때문이다 (Dify 마켓플레이스 UI 강제, 에이전트 머신은 setup.sh 가 도달 불가).
+> Phase 6 에서 Java, Playwright, agent.jar 등 에이전트 사전 요구사항은 **자동 설치**되지만,
+> **아래 작업은 여전히 수동으로 필요**하다 — 자동화가 기술적으로 불가능한 영역이기 때문이다 (Dify 마켓플레이스 UI 강제, agent.jar 는 포그라운드 프로세스).
 >
-> **이 3가지를 하지 않으면 빌드가 절대 동작하지 않는다.** 빠뜨리면 `model not found` / `agent offline` 으로 막힌다.
+> **이 작업들을 하지 않으면 빌드가 절대 동작하지 않는다.** 빠뜨리면 `model not found` / `agent offline` 으로 막힌다.
 
 #### ✅ 작업 1 — Dify 에 Ollama 플러그인 설치 (5분, 필수)
 
@@ -481,23 +486,18 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 
 **자세한 단계별 안내 + 함정 체크리스트**: [§6.2.2](#622-ollama-모델-공급자에-모델-등록-단계별)
 
-#### ✅ 작업 3 — Jenkins 에이전트 머신에 agent.jar 실행 (~10분, 필수)
+#### ✅ 작업 3 — Jenkins 에이전트 연결 (agent.jar 실행, 필수)
 
-**왜?** setup.sh 는 Jenkins 컨트롤러에 `mac-ui-tester` 노드 메타데이터만 등록한다. 실제로 빌드를 수행할 에이전트 프로세스(`agent.jar`)는 **에이전트 머신 위에서 직접 실행**해야 한다 (Mac, Windows, Linux, WSL2 — Playwright 가 동작할 수 있는 아무 머신).
+**왜?** setup.sh Phase 6 에서 Java, Playwright, agent.jar 를 자동 설치했지만, `agent.jar` 자체는 **포그라운드 프로세스**로 실행해야 하므로 수동으로 시작해야 한다.
 
-**준비물 (에이전트 머신에 설치 확인):**
-
-| 도구 | 확인 명령 | 없을 때 설치 |
-| --- | --- | --- |
-| **JDK 11+** (17 권장) | `java -version` | Ubuntu/WSL2: `sudo apt install -y openjdk-17-jre-headless`<br>macOS: `brew install openjdk@17`<br>Windows: `winget install --id EclipseAdoptium.Temurin.17.JDK` |
-| **Python 3.9+** | `python3 --version` | 대부분 OS 에 이미 포함. 없으면 apt/brew/winget 로 설치 |
-| **Playwright + chromium** | `python3 -m playwright --version` | `pip3 install playwright && playwright install chromium` |
-
-> 자세한 JDK/Playwright 설치 안내는 **[§8.6 사전 조건](#사전-조건-jdk-11-이상-설치)** 참조.
+> Phase 6 에서 다음 항목이 자동 설치된다:
+> - JDK 17, python3-venv, Playwright + Chromium, agent.jar 다운로드
+>
+> 설치에 실패한 항목이 있으면 setup.sh 로그에 `[⚠]` 경고가 표시된다. 해당 항목만 수동으로 설치하면 된다.
 
 **실행 명령:**
 
-setup.sh 종료 배너의 아래 블록을 그대로 복사해 **에이전트 머신 위에서** 실행한다 (시크릿은 매 setup.sh 실행마다 새로 생성되므로 setup.sh 출력에서 복사).
+setup.sh 종료 배너의 아래 블록을 그대로 복사해 실행한다 (시크릿은 매 setup.sh 실행마다 새로 생성되므로 setup.sh 출력에서 복사).
 
 ```bash
 curl -O http://localhost:18080/jnlpJars/agent.jar

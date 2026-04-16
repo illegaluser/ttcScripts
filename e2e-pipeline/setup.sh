@@ -1001,7 +1001,148 @@ fi
 phase_end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 6: 완료 요약
+# Phase 6: 에이전트 머신 사전 요구사항 자동 설치
+#   Java 17, python3-venv, Playwright, agent.jar 를 설치 여부 확인 후 자동 설치
+#   (이 스크립트를 돌리는 머신 = 에이전트 머신 전제)
+# ─────────────────────────────────────────────────────────────────────────────
+phase_start "Phase 6: 에이전트 머신 사전 요구사항 설치"
+
+AGENT_OS=$(detect_os)
+
+# ── 6-1. Java (JDK 17) ──────────────────────────────────────────────────────
+log "6-1. Java 설치 확인..."
+JAVA_OK=false
+if command -v java >/dev/null 2>&1; then
+  JAVA_VER=$(java -version 2>&1 | head -n1 | sed -E 's/.*"([0-9]+).*/\1/')
+  if [ "$JAVA_VER" -ge 11 ] 2>/dev/null; then
+    ok "Java $JAVA_VER 감지 — 요구사항 충족 (≥11)"
+    JAVA_OK=true
+  else
+    warn "Java $JAVA_VER 감지 — 버전이 낮음 (11 이상 필요). 업그레이드 시도..."
+  fi
+fi
+
+if [ "$JAVA_OK" = "false" ]; then
+  log "Java 17 설치 시도 (OS: $AGENT_OS)..."
+  case "$AGENT_OS" in
+    linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        run sudo apt-get update -qq
+        run sudo apt-get install -y openjdk-17-jre-headless
+      elif command -v yum >/dev/null 2>&1; then
+        run sudo yum install -y java-17-openjdk-headless
+      else
+        warn "패키지 매니저를 감지할 수 없음. 수동 설치 필요: https://adoptium.net"
+      fi
+      ;;
+    macos)
+      if command -v brew >/dev/null 2>&1; then
+        run brew install openjdk@17
+      else
+        warn "brew 없음. 수동 설치 필요: brew install openjdk@17"
+      fi
+      ;;
+    windows)
+      if command -v winget >/dev/null 2>&1 || command -v winget.exe >/dev/null 2>&1; then
+        run winget install --id EclipseAdoptium.Temurin.17.JDK --silent \
+            --accept-package-agreements --accept-source-agreements
+      else
+        warn "winget 없음. 수동 설치 필요: https://adoptium.net"
+      fi
+      ;;
+    *)
+      warn "OS 감지 실패. Java 17 수동 설치 필요."
+      ;;
+  esac
+
+  # 설치 후 재확인
+  if command -v java >/dev/null 2>&1; then
+    JAVA_VER=$(java -version 2>&1 | head -n1 | sed -E 's/.*"([0-9]+).*/\1/')
+    ok "Java $JAVA_VER 설치 완료"
+  else
+    warn "Java 설치 후에도 java 명령을 찾을 수 없음. PATH 갱신 또는 새 터미널 필요."
+  fi
+fi
+
+# ── 6-2. python3-venv (Ubuntu/Debian 전용) ──────────────────────────────────
+if [ "$AGENT_OS" = "linux" ] && command -v apt-get >/dev/null 2>&1; then
+  log "6-2. python3-venv 패키지 확인 (Ubuntu/Debian)..."
+  if python3 -m venv --help >/dev/null 2>&1; then
+    ok "python3-venv 모듈 사용 가능"
+  else
+    log "python3-venv 설치 중..."
+    run sudo apt-get update -qq
+    run sudo apt-get install -y python3-venv
+    if python3 -m venv --help >/dev/null 2>&1; then
+      ok "python3-venv 설치 완료"
+    else
+      warn "python3-venv 설치 실패. 수동 설치: sudo apt install -y python3-venv"
+    fi
+  fi
+else
+  log "6-2. python3-venv 확인 건너뜀 (Ubuntu/Debian 이 아닌 환경)"
+fi
+
+# ── 6-3. Playwright ─────────────────────────────────────────────────────────
+log "6-3. Playwright 설치 확인..."
+if python3 -c "import playwright" >/dev/null 2>&1; then
+  ok "Playwright 패키지 이미 설치됨"
+else
+  log "pip3 install playwright 실행 중..."
+  if run pip3 install playwright; then
+    ok "Playwright 패키지 설치 완료"
+  else
+    warn "Playwright 설치 실패. 수동 설치: pip3 install playwright"
+  fi
+fi
+
+log "Playwright Chromium 브라우저 확인..."
+# playwright install --dry-run 이 없으므로, 설치된 브라우저 목록에서 chromium 확인
+if python3 -c "
+from playwright._impl._driver import compute_driver_executable
+import subprocess, sys
+proc = subprocess.run([str(compute_driver_executable()), 'install', '--dry-run'], capture_output=True, text=True)
+# dry-run 미지원 시 fallback: chromium 바이너리 존재 여부로 판단
+sys.exit(0)
+" >/dev/null 2>&1 && playwright install chromium --dry-run >/dev/null 2>&1; then
+  ok "Chromium 브라우저 이미 설치됨"
+else
+  log "playwright install chromium 실행 중 (첫 설치 시 수분 소요)..."
+  if run playwright install chromium; then
+    ok "Chromium 브라우저 설치 완료"
+  else
+    # Linux 에서 시스템 라이브러리 부족 시
+    if [ "$AGENT_OS" = "linux" ]; then
+      log "시스템 의존성 설치 시도 (playwright install-deps chromium)..."
+      try sudo playwright install-deps chromium
+      try playwright install chromium
+    else
+      warn "Chromium 설치 실패. 수동 설치: playwright install chromium"
+    fi
+  fi
+fi
+
+# ── 6-4. agent.jar 다운로드 ─────────────────────────────────────────────────
+AGENT_WORK_DIR="${HOME}/jenkins-agent"
+log "6-4. agent.jar 다운로드 확인 (${AGENT_WORK_DIR})..."
+mkdir -p "$AGENT_WORK_DIR"
+
+if [ -f "${AGENT_WORK_DIR}/agent.jar" ]; then
+  ok "agent.jar 이미 존재: ${AGENT_WORK_DIR}/agent.jar"
+else
+  log "Jenkins 에서 agent.jar 다운로드 중..."
+  if curl -sf -o "${AGENT_WORK_DIR}/agent.jar" "${JENKINS_URL}/jnlpJars/agent.jar"; then
+    ok "agent.jar 다운로드 완료: ${AGENT_WORK_DIR}/agent.jar"
+  else
+    warn "agent.jar 다운로드 실패. Jenkins(${JENKINS_URL}) 가 실행 중인지 확인."
+    warn "  수동 다운로드: curl -O ${JENKINS_URL}/jnlpJars/agent.jar"
+  fi
+fi
+
+phase_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 7: 완료 요약
 # ─────────────────────────────────────────────────────────────────────────────
 _total=$((SECONDS - _global_t0))
 
@@ -1078,35 +1219,25 @@ echo "       Jenkins Credentials 'dify-qa-api-token' 로 수동 등록"
 echo ""
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  [에이전트 머신 연결 — Playwright 실행 환경]"
+echo "  [에이전트 연결 — Phase 6 에서 사전 요구사항 자동 설치 완료]"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  4. 에이전트 머신에 Java (JDK 11 이상) 설치 확인:"
-echo "       java -version    # 11 이상이면 OK"
-echo "     없으면:"
-echo "       - Ubuntu/WSL : sudo apt install -y openjdk-17-jre-headless"
-echo "       - macOS      : brew install openjdk@17"
-echo "       - Windows    : winget install --id EclipseAdoptium.Temurin.17.JDK"
+echo "  Phase 6 에서 자동 설치된 항목:"
+echo "    ✓ Java 17, python3-venv, Playwright + Chromium, agent.jar"
 echo ""
-echo "  5. Python + Playwright 설치 (에이전트 머신):"
-echo "     pip3 install playwright && playwright install chromium"
+echo "  4. agent.jar 로 에이전트 연결 (이 명령만 실행하면 됨):"
 echo ""
-echo "  6. agent.jar 다운로드 및 연결:"
-echo ""
-echo "     curl -O http://localhost:18080/jnlpJars/agent.jar"
-echo "     java -jar agent.jar \\"
+echo "     cd \"\$HOME/jenkins-agent\" && java -jar agent.jar \\"
 echo "       -url \"http://localhost:18080/\" \\"
 echo "       -secret \"${NODE_SECRET}\" \\"
 echo "       -name \"mac-ui-tester\" \\"
 echo "       -webSocket \\"
 echo "       -workDir \"\$HOME/jenkins-agent\""
 echo ""
-echo "     ⚠ -workDir 은 현재 사용자가 쓰기 권한을 가진 경로여야 한다."
-echo "        \$HOME/jenkins-agent 는 bash 가 현재 홈으로 자동 확장하므로 안전."
-echo "        /home/jenkins-agent 같이 루트 소유 경로는 AccessDeniedException 이 난다."
+echo "     ⚠ WSL2 에서는 반드시 cd \"\$HOME/jenkins-agent\" 한 뒤 실행 (9P CWD 문제 방지)"
 echo ""
-echo "  7. Jenkins UI → 노드 관리 → mac-ui-tester 상태가 'Connected' 로 바뀌면 완료."
+echo "  5. Jenkins UI → 노드 관리 → mac-ui-tester 상태가 'Connected' 로 바뀌면 완료."
 echo ""
-echo "  8. Jenkins → DSCORE-ZeroTouch-QA-Docker → Build with Parameters 실행"
+echo "  6. Jenkins → DSCORE-ZeroTouch-QA-Docker → Build with Parameters 실행"
 echo ""
 echo "================================================================="
