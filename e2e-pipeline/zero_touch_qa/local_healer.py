@@ -124,7 +124,7 @@ class LocalHealer:
         if not target_str.startswith("role="):
             return None
 
-        m = re.match(r"role=(.+?)(?:,\s*name=(.+))?$", target_str)
+        m = re.match(r"role=([^,]+)(?:,\s*name=(.+))?$", target_str)
         if not m:
             return None
 

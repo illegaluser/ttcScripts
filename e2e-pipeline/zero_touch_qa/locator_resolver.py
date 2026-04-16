@@ -23,6 +23,14 @@ class LocatorResolver:
     def __init__(self, page: Page):
         self.page = page
 
+    @staticmethod
+    def _safe_count(loc: Locator) -> int:
+        """요소 수를 반환하되, 잘못된 선택자 시 0 을 반환한다."""
+        try:
+            return loc.count()
+        except Exception:
+            return 0
+
     def resolve(self, target) -> Locator | None:
         """DSL target 을 Playwright Locator 로 변환한다.
 
@@ -67,19 +75,19 @@ class LocatorResolver:
             loc = self.page.get_by_role(
                 target["role"], name=target.get("name", "")
             )
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         if target.get("label"):
             loc = self.page.get_by_label(target["label"])
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         if target.get("text"):
             loc = self.page.get_by_text(target["text"])
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         if target.get("placeholder"):
             loc = self.page.get_by_placeholder(target["placeholder"])
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         if target.get("testid"):
             loc = self.page.get_by_test_id(target["testid"])
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         # 폴백: selector 키 또는 문자열 변환
         fallback = target.get("selector", str(target))
         return self._resolve_css_xpath(str(fallback).strip())
@@ -97,12 +105,15 @@ class LocatorResolver:
             loc = self.page.get_by_role(
                 m.group(1).strip(), name=m.group(2).strip()
             )
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         # role만 있고 name이 없는 경우
         role_only = target_str.replace("role=", "", 1).strip()
+        # "role=link, text=X" 같은 복합 셀렉터 → role 부분만 추출
+        if "," in role_only:
+            role_only = role_only.split(",", 1)[0].strip()
         if role_only:
             loc = self.page.get_by_role(role_only)
-            return loc.first if loc.count() > 0 else None
+            return loc.first if self._safe_count(loc) > 0 else None
         return None
 
     def _resolve_semantic_prefix(self, target_str: str) -> Locator | None:
@@ -121,14 +132,14 @@ class LocatorResolver:
             if target_str.startswith(prefix):
                 value = target_str.replace(prefix, "", 1).strip()
                 loc = method(value)
-                return loc.first if loc.count() > 0 else None
+                return loc.first if self._safe_count(loc) > 0 else None
         return None
 
     def _resolve_css_xpath(self, target_str: str) -> Locator | None:
         """CSS 선택자 또는 XPath 로 요소를 탐색하고, count > 0 이면 반환한다."""
         try:
             loc = self.page.locator(target_str)
-            if loc.count() > 0:
+            if self._safe_count(loc) > 0:
                 return loc.first
         except Exception:
             log.debug("CSS/XPath 탐색 실패: %s", target_str)
