@@ -929,7 +929,20 @@ PYEOF
     if echo "$JOB_RESP" | grep -qE 'HTTP:(200|302)'; then
       ok "Pipeline Job 생성 완료"
     elif echo "$JOB_RESP" | grep -qE 'HTTP:400' && echo "$JOB_RESP" | grep -qi 'already exists'; then
-      ok "Pipeline Job 이미 존재 — 건너뜀"
+      log "Pipeline Job 이미 존재 — config.xml 업데이트 시도"
+      UPDATE_RESP=$(printf '%s' "$JOB_XML" | curl -sS -w $'\nHTTP:%{http_code}' -X POST \
+          "${JENKINS_URL}/job/DSCORE-ZeroTouch-QA-Docker/config.xml" \
+          -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+          -H "Content-Type: application/xml" \
+          --data-binary @- 2>&1 || echo "HTTP:000")
+      debug "job update response: $UPDATE_RESP"
+      if echo "$UPDATE_RESP" | grep -qE 'HTTP:(200|302)'; then
+        ok "Pipeline Job 스크립트 업데이트 완료"
+      else
+        warn "Pipeline Job 업데이트 실패"
+        warn "  응답: $UPDATE_RESP"
+        warn "  → Jenkins UI 에서 수동으로 파이프라인 스크립트 교체 필요"
+      fi
     else
       warn "Pipeline Job 생성 실패"
       warn "  응답: $JOB_RESP"

@@ -81,10 +81,16 @@ pipeline {
                     mkdir -p '${AGENT_HOME}/artifacts'
                     rm -rf '${AGENT_HOME}/artifacts'/*
 
+                    # venv 디렉터리가 존재하더라도 activate 가 없으면 손상된 것으로 간주하고 재생성
+                    if [ -d '${AGENT_HOME}/venv' ] && [ ! -f '${AGENT_HOME}/venv/bin/activate' ]; then
+                        echo "[Setup] Corrupted venv detected (missing bin/activate). Recreating..."
+                        rm -rf '${AGENT_HOME}/venv'
+                    fi
+
                     if [ ! -d '${AGENT_HOME}/venv' ]; then
                         echo "[Setup] Creating new virtual environment..."
                         python3 -m venv '${AGENT_HOME}/venv'
-                        source '${AGENT_HOME}/venv/bin/activate'
+                        . '${AGENT_HOME}/venv/bin/activate'
                         pip install requests playwright pillow
                         playwright install chromium
                     else
@@ -123,7 +129,7 @@ pipeline {
         stage('3. Zero-Touch QA 엔진 가동') {
             steps {
                 sh """
-                    source '${AGENT_HOME}/venv/bin/activate'
+                    . '${AGENT_HOME}/venv/bin/activate'
 
                     export PYTHONPATH="\${SCRIPTS_HOME}"
                     export ARTIFACTS_DIR='${AGENT_HOME}/artifacts'

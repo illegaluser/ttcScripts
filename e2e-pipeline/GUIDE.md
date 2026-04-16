@@ -431,7 +431,7 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | 5-1 | Jenkins 플러그인 설치 (`workflow-aggregator`, `file-parameters`, `htmlpublisher`) + 재시작 | ✅ 자동 |
 | 5-2 | Jenkins Credentials 등록 (`dify-qa-api-token`) | ✅ 자동 (API Key 획득된 경우) |
 | 5-3 | CSP 완화 (JAVA_OPTS, override.yaml 에서 영구 적용) | ✅ 자동 |
-| 5-4 | `DSCORE-ZeroTouch-QA-Docker` Pipeline Job 생성 | ✅ 자동 |
+| 5-4 | `DSCORE-ZeroTouch-QA-Docker` Pipeline Job 생성 (이미 존재하면 스크립트 업데이트) | ✅ 자동 |
 | 5-5 | `mac-ui-tester` 노드 등록 (`SCRIPTS_HOME` 포함) | ✅ 자동 |
 | — | agent.jar 실행 (에이전트 머신) | ⚠️ 수동 |
 
@@ -1172,6 +1172,10 @@ docker compose up -d jenkins
 
 ### 8.5 Pipeline Job 생성
 
+`setup.sh` 가 Pipeline Job 을 자동 생성한다. **이미 존재하는 경우에도 최신 Jenkinsfile 로 스크립트를 덮어쓴다** (config.xml 업데이트). 따라서 Jenkinsfile 을 수정한 뒤 `./setup.sh` 를 재실행하면 Jenkins Job 에 즉시 반영된다.
+
+수동으로 생성하려면:
+
 1. Jenkins 메인 → `새로운 Item`
 2. 이름: `DSCORE-ZeroTouch-QA-Docker`
 3. 유형: **Pipeline** 선택 → `OK`
@@ -1440,6 +1444,20 @@ java -jar agent.jar \
 
 `$HOME` 이 자동으로 `/home/사용자명` 으로 확장된다. 최종 작업 디렉터리: `/home/alice/jenkins-agent/`.
 
+> **⚠️ WSL2 에서 실행 위치 주의:** `/mnt/c/...` 경로에 `cd` 한 상태로 `java -jar agent.jar` 를 실행하면
+> `Could not determine current working directory` VM 초기화 오류가 발생할 수 있다.
+> Java 의 `platformProperties()` 가 9P 파일시스템 브릿지(WSL↔Windows) 위의 CWD 를 해석하지 못하기 때문이다.
+> **반드시 `-workDir` 에 지정한 경로로 `cd` 한 뒤 실행한다:**
+>
+> ```bash
+> cd "$HOME/jenkins-agent" && java -jar agent.jar \
+>   -url "http://localhost:18080/" \
+>   -secret "<시크릿>" \
+>   -name "mac-ui-tester" \
+>   -webSocket \
+>   -workDir "$HOME/jenkins-agent"
+> ```
+
 ##### 🍎 macOS
 
 ```bash
@@ -1703,6 +1721,23 @@ python3 -m playwright --version        # Version 1.x 가 나오면 OK
 pip3 install playwright
 playwright install chromium
 ```
+
+**Ubuntu / Debian / WSL2 — `python3-venv` 패키지 필수:**
+
+Jenkinsfile 의 Stage 1 이 `python3 -m venv` 로 가상환경을 생성한다. Ubuntu/Debian 은 `venv` 모듈이 기본 설치되지 않으므로 아래를 먼저 실행해야 한다:
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv
+```
+
+> 특정 Python 버전을 사용하는 경우 버전에 맞는 패키지를 설치한다:
+> ```bash
+> python3 --version                    # 예: Python 3.12.x
+> sudo apt install -y python3.12-venv  # 버전 번호 일치시킬 것
+> ```
+>
+> 이 패키지가 없으면 빌드 시 `ensurepip is not available` 오류가 발생한다.
 
 **Linux 에이전트 추가 단계:**
 
@@ -1978,6 +2013,118 @@ Jenkins UI 의 노드 상세 페이지에 "Remote root directory" 로 `/home/jen
 # Windows PowerShell — 이렇게
 -workDir "$env:USERPROFILE\jenkins-agent"    # → C:\Users\alice\jenkins-agent
 ```
+
+> **⚠️ Remote root directory 변경 후 에이전트 재연결 필수:**
+> Jenkins UI 에서 노드의 **Remote root directory** 를 변경한 뒤 에이전트를 재연결하지 않으면, 파이프라인은 **이전 경로**로 workspace 를 생성하려 시도한다.
+> 빌드 로그의 `Running on mac-ui-tester in <경로>` 줄에서 workspace 경로가 의도한 경로와 다르면 이 상황이다.
+>
+> **수순:**
+> 1. Jenkins UI → `노드 관리` → `mac-ui-tester` → 설정 → **Remote root directory** 를 `-workDir` 과 동일한 경로로 변경 → 저장
+> 2. 기존 `agent.jar` 프로세스를 `Ctrl+C` 로 종료
+> 3. 에이전트를 **같은 경로의 `-workDir` 로** 다시 실행 (§8.6.5)
+> 4. 파이프라인 재실행 → 빌드 로그에서 새 workspace 경로 확인
+
+---
+
+### WSL2: `Could not determine current working directory` (agent.jar 실행 시)
+
+**증상:** WSL2 에서 `/mnt/c/...` 경로에 `cd` 한 상태로 `java -jar agent.jar` 를 실행하면 즉시 VM 초기화 실패:
+
+```
+Error occurred during initialization of VM
+java.lang.Error: Properties init: Could not determine current working directory.
+    at jdk.internal.util.SystemProps$Raw.platformProperties(Native Method)
+    ...
+```
+
+**원인:** WSL2 의 `/mnt/c/...` 경로는 9P 파일시스템 브릿지를 통해 Windows 파일시스템에 접근한다. Java 의 네이티브 `platformProperties()` 호출이 이 브릿지 위의 CWD 를 해석하지 못하는 경우가 있다.
+
+**해결:** `-workDir` 에 지정한 경로(또는 네이티브 Linux 경로)로 `cd` 한 뒤 실행한다:
+
+```bash
+cd "$HOME/jenkins-agent" && java -jar agent.jar \
+  -url "http://localhost:18080/" \
+  -secret "<시크릿>" \
+  -name "mac-ui-tester" \
+  -webSocket \
+  -workDir "$HOME/jenkins-agent"
+```
+
+---
+
+### `ensurepip is not available` (python3 -m venv 실패)
+
+**증상:** Jenkins 빌드 Stage 1 에서 venv 생성 실패:
+
+```
+The virtual environment was not created successfully because ensurepip is not
+available.  On Debian/Ubuntu systems, you need to install the python3-venv
+package using the following command.
+
+    apt install python3.12-venv
+```
+
+**원인:** Ubuntu / Debian / WSL2 Ubuntu 는 `python3-venv` 패키지가 기본 설치되지 않는다. `python3` 바이너리는 있어도 `venv` 모듈이 없다.
+
+**해결:**
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv
+```
+
+특정 Python 버전을 사용하는 경우:
+
+```bash
+python3 --version                    # 예: Python 3.12.x
+sudo apt install -y python3.12-venv  # 버전 번호 일치
+```
+
+설치 후 파이프라인을 다시 실행하면 venv 가 정상 생성된다.
+
+---
+
+### `cannot open .../venv/bin/activate: No such file` (손상된 venv)
+
+**증상:** Jenkins 빌드 Stage 1 에서 "Using existing virtual environment." 출력 후, Stage 3 에서:
+
+```
+.: cannot open /.../.qa_home/venv/bin/activate: No such file
+```
+
+**원인:** `.qa_home/venv` 디렉터리는 존재하지만, 내부 `bin/activate` 파일이 없다. 이전 빌드에서 `python3 -m venv` 가 중간에 실패했거나, 파일시스템 문제로 venv 가 불완전하게 생성된 경우 발생한다. Stage 1 의 `[ ! -d ... ]` 체크는 디렉터리 존재 여부만 보기 때문에 손상된 venv 를 "정상"으로 오판한다.
+
+**해결:** 현재 Jenkinsfile(v2.1+)은 `bin/activate` 존재 여부를 추가로 검증하여 손상 시 자동 재생성한다. 구버전 Jenkinsfile 사용 시 에이전트 머신에서 수동으로 삭제:
+
+```bash
+rm -rf "$HOME/jenkins-agent/workspace/DSCORE-ZeroTouch-QA-Docker/.qa_home/venv"
+```
+
+삭제 후 파이프라인을 다시 실행하면 venv 가 처음부터 새로 생성된다.
+
+---
+
+### `source: not found` (Jenkins sh 스텝에서)
+
+**증상:** Jenkins 빌드 Stage 3 (또는 venv activate 하는 단계) 에서:
+
+```
+/tmp/.../script.sh.copy: 2: source: not found
+```
+
+**원인:** Jenkins 의 `sh` 스텝은 `/bin/sh` 를 사용한다. WSL2 Ubuntu 에서 `/bin/sh` 는 **dash** 이며, dash 에는 `source` 명령이 **없다**. `source` 는 bash 전용(bashism)이고, POSIX sh 에서는 `.` (dot) 명령이 동일한 역할을 한다.
+
+**해결:** Jenkinsfile 의 `source` 를 `.` 으로 교체한다:
+
+```groovy
+// 변경 전 (bash 전용)
+source '${AGENT_HOME}/venv/bin/activate'
+
+// 변경 후 (POSIX 호환)
+. '${AGENT_HOME}/venv/bin/activate'
+```
+
+> 현재 Jenkinsfile 은 이미 수정되어 있다. 커스텀 Jenkinsfile 을 사용하는 경우 동일하게 교체할 것.
 
 ---
 
