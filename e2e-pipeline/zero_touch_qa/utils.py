@@ -16,8 +16,6 @@ def extract_json_safely(text: str):
     text = re.sub(r"<think>.*", "", text, flags=re.S)
     # 마크다운 코드펜스 제거
     text = re.sub(r"```(?:json)?\s*", "", text)
-    # C-style 주석 제거
-    text = re.sub(r"//.*?\n|/\*.*?\*/", "", text, flags=re.S)
 
     match = re.search(r"\[\s*\{.*\}\s*\]|\{\s*\".*\}\s*", text, re.DOTALL)
     if not match:
