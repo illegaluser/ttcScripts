@@ -1,4 +1,6 @@
-zero_touch_qa/__pycache__/
+# Python 바이트코드
+__pycache__/
+*.pyc
 
 # Claude Code 로컬 IDE 상태
 .claude/settings.local.json
