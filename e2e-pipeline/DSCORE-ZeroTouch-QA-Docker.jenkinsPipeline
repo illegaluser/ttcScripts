@@ -128,6 +128,45 @@ pipeline {
         }
 
         // ──────────────────────────────────────────────────────────────────
+        // Stage 2.5: Dify API 준비 대기
+        // /console/api/setup 이 HTTP 200 을 반환할 때까지 폴링한다.
+        // Dify 컨테이너 기동 직후 DB 마이그레이션 완료에 1~3분이 소요될 수 있다.
+        // ──────────────────────────────────────────────────────────────────
+        stage('2.5. Dify API 준비 대기') {
+            steps {
+                sh """
+                    echo "[HealthCheck] Dify API 준비 상태 확인 시작..."
+                    HEALTH_URL="http://localhost:18081/console/api/setup"
+                    MAX_WAIT=180
+                    INTERVAL=10
+                    ELAPSED=0
+
+                    while true; do
+                        STATUS=\$(curl -s -o /dev/null -w '%{http_code}' "\$HEALTH_URL" 2>/dev/null || echo "000")
+                        if [ "\$STATUS" = "200" ]; then
+                            echo "[HealthCheck] Dify API 준비 완료 (HTTP \$STATUS, \${ELAPSED}초 경과)"
+                            break
+                        fi
+                        if [ \$ELAPSED -ge \$MAX_WAIT ]; then
+                            echo "======================================================"
+                            echo "[ERROR] Dify API 가 \${MAX_WAIT}초 내에 응답하지 않았습니다."
+                            echo "  마지막 HTTP 상태: \$STATUS"
+                            echo "  확인 URL: \$HEALTH_URL"
+                            echo ""
+                            echo "  해결: docker compose ps 로 컨테이너 상태를 확인하십시오."
+                            echo "  참고: GUIDE.md §11 의 502 섹션"
+                            echo "======================================================"
+                            exit 1
+                        fi
+                        echo "[HealthCheck] 대기 중... (HTTP \$STATUS, \${ELAPSED}/\${MAX_WAIT}초)"
+                        sleep \$INTERVAL
+                        ELAPSED=\$((ELAPSED + INTERVAL))
+                    done
+                """
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────
         // Stage 3: Zero-Touch QA 엔진 실행
         // PYTHONPATH = SCRIPTS_HOME (노드 환경변수) → zero_touch_qa 패키지 탐색
         // ──────────────────────────────────────────────────────────────────

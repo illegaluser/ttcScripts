@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 
 import requests
 
@@ -21,9 +22,67 @@ class DifyClient:
     - /v1/chat-messages : 시나리오 생성 및 치유 요청 (blocking)
     """
 
+    # 일시적 오류 시 재시도할 HTTP 상태 코드
+    _RETRYABLE_STATUS_CODES = {502, 503, 504}
+
     def __init__(self, config: Config):
         self.base_url = config.dify_base_url
         self.headers = {"Authorization": f"Bearer {config.dify_api_key}"}
+
+    def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        max_retries: int = 3,
+        backoff_base: float = 5.0,
+        timeout: int = 120,
+        **kwargs,
+    ) -> requests.Response:
+        """HTTP 요청을 전송하되, 일시적 오류 시 지수 백오프로 재시도한다.
+
+        재시도 대상:
+            - ``requests.ConnectionError`` (연결 거부, DNS 실패 등)
+            - ``requests.Timeout`` (읽기/연결 타임아웃)
+            - HTTP 502, 503, 504 (업스트림 일시 장애)
+
+        4xx 클라이언트 에러는 즉시 반환하여 호출부에서 처리한다.
+
+        Args:
+            method: HTTP 메서드 (``"POST"`` 등).
+            url: 요청 URL.
+            max_retries: 최대 재시도 횟수. 초회 포함하지 않음.
+            backoff_base: 첫 재시도 대기 시간(초). 이후 2배씩 증가.
+            timeout: 요청 타임아웃(초).
+            **kwargs: ``requests.request()`` 에 전달할 추가 인자.
+
+        Returns:
+            성공한 ``requests.Response`` 객체.
+
+        Raises:
+            requests.RequestException: 모든 재시도 소진 후에도 실패 시.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                res = requests.request(method, url, timeout=timeout, **kwargs)
+                if res.status_code not in self._RETRYABLE_STATUS_CODES:
+                    return res
+                last_exc = requests.HTTPError(
+                    f"HTTP {res.status_code}", response=res,
+                )
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_exc = e
+
+            if attempt < max_retries:
+                wait = backoff_base * (2 ** attempt)
+                log.warning(
+                    "[Retry] %s %s — %d/%d 재시도 (%.0f초 후). 원인: %s",
+                    method, url, attempt + 1, max_retries, wait, last_exc,
+                )
+                time.sleep(wait)
+
+        raise last_exc  # type: ignore[misc]
 
     # ── Doc 모드: 문서 파일 업로드 ──
     def upload_file(self, file_path: str) -> str:
@@ -39,16 +98,19 @@ class DifyClient:
             DifyConnectionError: HTTP 에러 또는 네트워크 실패 시.
         """
         log.info("[Doc] 문서 업로드 중... (%s)", file_path)
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
         try:
-            with open(file_path, "rb") as f:
-                res = requests.post(
-                    f"{self.base_url}/files/upload",
-                    headers=self.headers,
-                    files={"file": (os.path.basename(file_path), f, "application/pdf")},
-                    data={"user": "mac-agent"},
-                    timeout=60,
-                )
-                res.raise_for_status()
+            res = self._request_with_retry(
+                "POST",
+                f"{self.base_url}/files/upload",
+                headers=self.headers,
+                files={"file": (filename, file_bytes, "application/pdf")},
+                data={"user": "mac-agent"},
+                timeout=60,
+            )
+            res.raise_for_status()
         except requests.RequestException as e:
             raise DifyConnectionError(f"파일 업로드 실패: {e}") from e
 
@@ -149,11 +211,14 @@ class DifyClient:
     def _call(self, payload: dict) -> str:
         """Dify /chat-messages 엔드포인트에 blocking 요청을 보내고 answer 를 반환한다.
 
+        일시적 오류(타임아웃, 502/503/504) 시 지수 백오프로 최대 3회 재시도한다.
+
         Raises:
             DifyConnectionError: HTTP 에러, 타임아웃, 네트워크 실패 시.
         """
         try:
-            res = requests.post(
+            res = self._request_with_retry(
+                "POST",
                 f"{self.base_url}/chat-messages",
                 json=payload,
                 headers={
