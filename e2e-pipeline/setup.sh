@@ -25,6 +25,8 @@
 #   Phase 4: Dify 관리자 계정 생성 + 로그인
 #            ⚠️ Ollama 플러그인/모델 등록은 Dify 1.x 에서 마켓플레이스 기반이라 수동
 #   Phase 5: Jenkins 플러그인/Credentials/CSP/Pipeline Job/Node
+#   Phase 6: 에이전트 머신 사전 요구사항 (Java, venv, Playwright, agent.jar)
+#   Phase 7: Jenkins 에이전트 자동 기동 (nohup 백그라운드)
 #
 # 제한:
 #   - Dify 1.x Ollama 플러그인 설치 자동화는 미지원 (Dify 콘솔에서 수동 수행)
@@ -1187,18 +1189,88 @@ fi
 phase_end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 7: 완료 요약
+# Phase 7: Jenkins 에이전트 자동 기동
+#   모든 서비스가 준비된 상태에서 agent.jar 를 백그라운드로 실행한다.
+#   nohup 으로 setup.sh 종료 후에도 프로세스가 유지된다.
 # ─────────────────────────────────────────────────────────────────────────────
-_total=$((SECONDS - _global_t0))
+phase_start "Phase 7: Jenkins 에이전트 자동 기동"
 
+AGENT_JAR="${AGENT_WORK_DIR}/agent.jar"
+AGENT_LOG="${AGENT_WORK_DIR}/agent.log"
+AGENT_STARTED=false
+
+# 7-1. NODE_SECRET 추출
+log "7-1. mac-ui-tester 노드 시크릿 추출..."
 NODE_SECRET=$(curl -sf -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
   "${JENKINS_URL}/computer/mac-ui-tester/slave-agent.jnlp" 2>/dev/null | \
   python3 -c "
 import sys, re
 content = sys.stdin.read()
 m = re.search(r'<argument>([0-9a-f]{40,64})</argument>', content)
-print(m.group(1) if m else '<SECRET>')
-" 2>/dev/null || echo "<SECRET>")
+print(m.group(1) if m else '')
+" 2>/dev/null || echo "")
+
+if [ -z "$NODE_SECRET" ]; then
+  warn "노드 시크릿 추출 실패 — 에이전트 자동 기동 건너뜀"
+  warn "  → 수동 실행: GUIDE.md §8.6 참조"
+  NODE_SECRET="<SECRET>"
+elif [ ! -f "$AGENT_JAR" ]; then
+  warn "agent.jar 없음 ($AGENT_JAR) — 에이전트 자동 기동 건너뜀"
+else
+  # 7-2. 기존 에이전트 프로세스 확인 (이미 실행 중이면 건너뜀)
+  if pgrep -f "agent.jar.*mac-ui-tester" >/dev/null 2>&1; then
+    ok "에이전트가 이미 실행 중 — 재기동 건너뜀"
+    AGENT_STARTED=true
+  else
+    # 7-3. 백그라운드로 에이전트 기동
+    log "7-3. 에이전트 백그라운드 기동 (로그: $AGENT_LOG)..."
+    : > "$AGENT_LOG"
+    nohup java -jar "$AGENT_JAR" \
+        -url "${JENKINS_URL}/" \
+        -secret "$NODE_SECRET" \
+        -name "mac-ui-tester" \
+        -webSocket \
+        -workDir "$AGENT_WORK_DIR" \
+        >> "$AGENT_LOG" 2>&1 &
+    AGENT_PID=$!
+    log "  PID: $AGENT_PID"
+
+    # 7-4. 연결 대기 (최대 30초)
+    log "7-4. 에이전트 연결 대기 (최대 30초)..."
+    _ae=0
+    while [ $_ae -lt 30 ]; do
+      sleep 3; _ae=$((_ae + 3))
+      # Jenkins API 로 노드 온라인 여부 확인
+      NODE_ONLINE=$(curl -sf -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+          "${JENKINS_URL}/computer/mac-ui-tester/api/json" 2>/dev/null | \
+          python3 -c "import json,sys;d=json.load(sys.stdin);print('yes' if not d.get('offline',True) else 'no')" 2>/dev/null || echo "no")
+      if [ "$NODE_ONLINE" = "yes" ]; then
+        AGENT_STARTED=true
+        break
+      fi
+      # 프로세스가 죽었으면 즉시 중단
+      if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+        warn "에이전트 프로세스가 종료됨 (PID $AGENT_PID). 로그 확인:"
+        tail -5 "$AGENT_LOG" 2>/dev/null | while IFS= read -r l; do warn "  $l"; done
+        break
+      fi
+    done
+
+    if [ "$AGENT_STARTED" = "true" ]; then
+      ok "에이전트 연결 완료 (PID $AGENT_PID, ${_ae}초 경과)"
+    else
+      warn "30초 내 연결 미확인 — 백그라운드에서 계속 시도 중 (PID $AGENT_PID)"
+      warn "  로그: tail -f $AGENT_LOG"
+    fi
+  fi
+fi
+
+phase_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 8: 완료 요약
+# ─────────────────────────────────────────────────────────────────────────────
+_total=$((SECONDS - _global_t0))
 
 echo ""
 echo "================================================================="
@@ -1264,13 +1336,16 @@ echo "       Jenkins Credentials 'dify-qa-api-token' 로 수동 등록"
 echo ""
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  [에이전트 연결 — Phase 6 에서 사전 요구사항 자동 설치 완료]"
+echo "  [에이전트 상태]"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  Phase 6 에서 자동 설치된 항목:"
-echo "    ✓ Java 17, python3-venv, Playwright + Chromium, agent.jar"
+if [ "$AGENT_STARTED" = "true" ]; then
+echo "  ✓ mac-ui-tester 에이전트: 연결됨 (백그라운드 실행 중)"
+echo "    로그: tail -f ${AGENT_LOG}"
 echo ""
-echo "  4. agent.jar 로 에이전트 연결 (이 명령만 실행하면 됨):"
+echo "  4. Jenkins → DSCORE-ZeroTouch-QA-Docker → Build with Parameters 실행"
+else
+echo "  ⚠ 에이전트 자동 기동 실패 — 아래 명령으로 수동 연결:"
 echo ""
 echo "     cd \"\$HOME/jenkins-agent\" && java -jar agent.jar \\"
 echo "       -url \"http://localhost:18080/\" \\"
@@ -1281,8 +1356,9 @@ echo "       -workDir \"\$HOME/jenkins-agent\""
 echo ""
 echo "     ⚠ WSL2 에서는 반드시 cd \"\$HOME/jenkins-agent\" 한 뒤 실행 (9P CWD 문제 방지)"
 echo ""
-echo "  5. Jenkins UI → 노드 관리 → mac-ui-tester 상태가 'Connected' 로 바뀌면 완료."
+echo "  4. Jenkins UI → 노드 관리 → mac-ui-tester 상태가 'Connected' 로 바뀌면 완료."
 echo ""
-echo "  6. Jenkins → DSCORE-ZeroTouch-QA-Docker → Build with Parameters 실행"
+echo "  5. Jenkins → DSCORE-ZeroTouch-QA-Docker → Build with Parameters 실행"
+fi
 echo ""
 echo "================================================================="
