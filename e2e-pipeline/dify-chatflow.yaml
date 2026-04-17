@@ -3,8 +3,8 @@
 #
 # 수동 import: Dify 콘솔 → 스튜디오 → 앱 만들기 → DSL 파일에서 가져오기
 #
-# 모델: 호스트 Ollama 모드 기본 가정 — `gemma4:e2b` 로 고정
-#   호스트 머신에 `gemma4:e2b` 가 설치되어 있어야 하고,
+# 모델: 호스트 Ollama 모드 기본 가정 — `gemma4:e4b` 로 고정
+#   호스트 머신에 `gemma4:e4b` 가 설치되어 있어야 하고,
 #   Dify 콘솔의 Ollama 공급자에도 동일 Model Name 으로 등록되어 있어야 한다.
 #   다른 모델을 쓰려면 아래 Planner/Healer LLM 노드의 `name:` 을 일괄 교체한다.
 #
@@ -220,9 +220,9 @@ workflow:
           model:
             completion_params:
               temperature: 0.3
-              max_tokens: 4096
+              max_tokens: 2048
             mode: chat
-            name: "gemma4:e2b"
+            name: "gemma4:e4b"
             provider: ollama
           prompt_template:
             - id: planner-system
@@ -281,6 +281,10 @@ workflow:
                 [엄수 사항]:
                 - 반드시 유효한 JSON 배열([...]) 형태만 출력하십시오.
                 - 마크다운 코드블록(```)이나 부연 설명은 절대 금지합니다.
+                - ⚠️ <think>, <thinking>, <reasoning> 등의 내부 추론 블록을 절대 출력하지 마십시오.
+                  바로 JSON 배열만 응답하십시오. 내부 추론이 필요하더라도 그 내용을 숨기고
+                  최종 결과만 내보내야 합니다. 추론 블록은 응답 시간을 2~3배로 늘려
+                  운영 환경에서 timeout 을 유발합니다.
             - id: planner-user
               role: user
               text: "대상 URL: {{#start.target_url#}}\n요구사항: {{#start.srs_text#}}"
@@ -321,9 +325,9 @@ workflow:
           model:
             completion_params:
               temperature: 0.1
-              max_tokens: 4096
+              max_tokens: 1024
             mode: chat
-            name: "gemma4:e2b"
+            name: "gemma4:e4b"
             provider: ollama
           prompt_template:
             - id: healer-system
@@ -341,6 +345,9 @@ workflow:
                 - 순수 JSON 객체({...}) 형식으로만 출력하십시오.
                 - "target" 키(새 로케이터)와 "fallback_targets" 키(대체 로케이터 배열 2~3개)를 포함하십시오.
                 - 부연 설명은 절대 금지합니다.
+                - ⚠️ <think>, <thinking>, <reasoning> 등의 내부 추론 블록을 절대 출력하지 마십시오.
+                  바로 JSON 객체만 응답하십시오. 추론 블록은 응답 시간을 2~3배로 늘려
+                  heal timeout(60초) 안에 응답을 못 주면 치유 실패로 이어집니다.
             - id: healer-user
               role: user
               text: "에러: {{#start.error#}}\n\n실패한 스텝:\n{{#start.failed_step#}}\n\nDOM 스냅샷:\n{{#start.dom#}}"

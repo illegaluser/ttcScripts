@@ -29,6 +29,7 @@ class DifyClient:
         self.base_url = config.dify_base_url
         self.headers = {"Authorization": f"Bearer {config.dify_api_key}"}
         self.heal_timeout_sec = getattr(config, "heal_timeout_sec", 60)
+        self.scenario_timeout_sec = getattr(config, "scenario_timeout_sec", 300)
 
     def _request_with_retry(
         self,
@@ -160,7 +161,14 @@ class DifyClient:
                 }
             ]
 
-        answer = self._call(payload)
+        # Planner 호출은 e4b 같은 느린 모델에서 120초 기본 timeout 초과 가능.
+        # scenario_timeout_sec(기본 300s) 적용 + retry 1회 (network blip 대비).
+        # 모델이 느린 건 재시도해도 또 느릴 뿐이라 max_retries=1 로 제한.
+        answer = self._call(
+            payload,
+            timeout=self.scenario_timeout_sec,
+            max_retries=1,
+        )
         log.info("Dify 응답 길이: %d자, <think> 포함: %s", len(answer), "<think>" in answer)
         scenario = extract_json_safely(answer)
         if not scenario or not isinstance(scenario, list):

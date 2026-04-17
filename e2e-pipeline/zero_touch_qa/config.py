@@ -28,6 +28,7 @@ class Config:
     step_interval_max_ms: int
     heal_threshold: float
     heal_timeout_sec: int
+    scenario_timeout_sec: int
     dom_snapshot_limit: int
 
     @classmethod
@@ -62,5 +63,6 @@ class Config:
             step_interval_max_ms=int(os.getenv("STEP_INTERVAL_MAX_MS", "1500")),
             heal_threshold=float(os.getenv("HEAL_THRESHOLD", "0.8")),
             heal_timeout_sec=int(os.getenv("HEAL_TIMEOUT_SEC", "60")),
+            scenario_timeout_sec=int(os.getenv("SCENARIO_TIMEOUT_SEC", "300")),
             dom_snapshot_limit=int(os.getenv("DOM_SNAPSHOT_LIMIT", "10000")),
         )
