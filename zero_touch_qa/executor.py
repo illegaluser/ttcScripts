@@ -297,6 +297,27 @@ class QAExecutor:
                 except Exception:
                     continue
 
+        # ── [치유 6단계] click "첫 번째 결과/링크/항목" 의미적 휴리스틱 (E) ──
+        # LLM 의 site-specific selector 추측이 다 빗나가도, "첫 번째 검색결과 링크"
+        # 같은 의도가 description 에 있으면 main/article 영역의 첫 visible 링크 시도.
+        # Naver/Google/Yahoo 류 검색 결과에서 마지막 안전망 역할.
+        if action == "click" and self._matches_first_result_intent(desc):
+            for sel in self._FIRST_RESULT_CANDIDATES:
+                try:
+                    loc = page.locator(sel)
+                    if loc.count() == 0:
+                        continue
+                    loc.first.click(timeout=3000)
+                    ss = self._screenshot(page, artifacts, step_id, "healed")
+                    log.info("[Step %s] '첫 결과' 휴리스틱 성공: %s", step_id, sel)
+                    return StepResult(
+                        step_id, action, sel, "",
+                        desc, "HEALED",
+                        heal_stage="first_result", screenshot_path=ss,
+                    )
+                except Exception:
+                    continue
+
         # ── 모든 치유 실패 ──
         log.error("[Step %s] FAIL — 모든 치유 실패", step_id)
         return StepResult(
@@ -313,6 +334,34 @@ class QAExecutor:
         "button[aria-label*='검색']:visible, button[aria-label*='Search' i]:visible",
         "button:has-text(/^(검색|Search|검색하기|Go|확인|Submit)$/i):visible",
         "[role=button]:has-text(/^(검색|Search|검색하기)$/i):visible",
+    )
+
+    # E: "첫 번째 검색결과/링크/항목" 의도 매칭 정규식 (한/영).
+    # ordinal(첫/1번째/first/1st) ... result/link/item 패턴, 사이에 30자까지 허용.
+    _FIRST_RESULT_RE = re.compile(
+        r"(첫\s*번?째|\d+\s*번\s*째?|first|1st)"
+        r".{0,30}?"
+        r"(검색\s*결과|결과|링크|항목|아이템|result|link|item)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @staticmethod
+    def _matches_first_result_intent(desc: str) -> bool:
+        """description 에서 '첫 N번째 결과/링크/항목' 의도를 감지한다."""
+        return bool(QAExecutor._FIRST_RESULT_RE.search(desc or ""))
+
+    # E: '첫 결과 클릭' 의도일 때 시도할 일반 셀렉터 후보 (좁은 → 넓은 순).
+    # main/article 등 시맨틱 컨테이너 우선, 검색결과 컨테이너 흔한 ID/class 다음.
+    _FIRST_RESULT_CANDIDATES = (
+        "main a[href]:visible",
+        "[role=main] a[href]:visible",
+        "article a[href]:visible",
+        "[role=article] a[href]:visible",
+        "#main_pack a[href]:visible",   # Naver 통합검색 영역
+        "#search a[href]:visible",       # Google 검색 영역
+        "#results a[href]:visible",      # 일반
+        "[id*='result' i] a[href]:visible",
+        "[class*='result' i] a[href]:visible",
     )
 
     # ── LLM 출력 보정 ──
