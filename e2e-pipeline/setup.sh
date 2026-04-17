@@ -8,7 +8,7 @@
 #   OLLAMA_PROFILE=container ./setup.sh      # 컨테이너 Ollama 모드
 #
 # 환경변수로 기본값 오버라이드 가능:
-#   OLLAMA_MODEL=gemma4:e4b                  # Pull/검증할 Ollama 모델명
+#   OLLAMA_MODEL=qwen3.5:4b                  # Pull/검증할 Ollama 모델명
 #   OLLAMA_PROFILE=host|container            # host(기본) / container
 #   DIFY_EMAIL=admin@example.com             # Dify 관리자 이메일
 #   DIFY_PASSWORD=Admin1234!                 # Dify 관리자 비밀번호
@@ -61,7 +61,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 설정 (환경변수 → .env → 기본값 순으로 결정)
 # ─────────────────────────────────────────────────────────────────────────────
-OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:4b}"
 OLLAMA_PROFILE="${OLLAMA_PROFILE:-host}"                  # host | container
 DIFY_EMAIL="${DIFY_EMAIL:-admin@example.com}"
 DIFY_PASSWORD="${DIFY_PASSWORD:-Admin1234!}"
