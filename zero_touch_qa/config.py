@@ -9,6 +9,8 @@ class Config:
     artifacts_dir: str
     viewport: tuple[int, int]
     slow_mo: int
+    step_interval_min_ms: int
+    step_interval_max_ms: int
     heal_threshold: float
     dom_snapshot_limit: int
 
@@ -22,7 +24,9 @@ class Config:
                 int(os.getenv("VIEWPORT_WIDTH", "1440")),
                 int(os.getenv("VIEWPORT_HEIGHT", "900")),
             ),
-            slow_mo=int(os.getenv("SLOW_MO", "500")),
+            slow_mo=int(os.getenv("SLOW_MO", "800")),
+            step_interval_min_ms=int(os.getenv("STEP_INTERVAL_MIN_MS", "800")),
+            step_interval_max_ms=int(os.getenv("STEP_INTERVAL_MAX_MS", "1500")),
             heal_threshold=float(os.getenv("HEAL_THRESHOLD", "0.8")),
             dom_snapshot_limit=int(os.getenv("DOM_SNAPSHOT_LIMIT", "10000")),
         )

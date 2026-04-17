@@ -1,4 +1,5 @@
 import os
+import random
 import time
 import logging
 from dataclasses import dataclass, field
@@ -63,7 +64,7 @@ class QAExecutor:
             healer = LocalHealer(page, self.config.heal_threshold)
 
             try:
-                for step in scenario:
+                for idx, step in enumerate(scenario):
                     result = self._execute_step(
                         page, step, resolver, healer, artifacts
                     )
@@ -73,6 +74,18 @@ class QAExecutor:
                         fail_path = os.path.join(artifacts, "error_final.png")
                         self._safe_screenshot(page, fail_path)
                         break
+                    # 스텝 간 랜덤 jitter — 봇 패턴(즉시 연속 액션) 회피.
+                    # reCAPTCHA 등이 fill→press 100ms 이내 시퀀스를 트리거.
+                    # 마지막 스텝이면 sleep 생략. min/max 둘 다 0 이면 비활성.
+                    if (
+                        idx < len(scenario) - 1
+                        and self.config.step_interval_max_ms > 0
+                    ):
+                        jitter_s = random.uniform(
+                            self.config.step_interval_min_ms,
+                            self.config.step_interval_max_ms,
+                        ) / 1000.0
+                        time.sleep(jitter_s)
             finally:
                 browser.close()
 

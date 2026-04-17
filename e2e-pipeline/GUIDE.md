@@ -366,6 +366,9 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | `OLLAMA_PROFILE` | `host` | `host` = 호스트 Ollama 사용 / `container` = `--profile container-ollama` 적용 |
 | `OLLAMA_MODEL` | `gemma4:e2b` | Phase 3 에서 확인/Pull 할 모델명. dify-chatflow.yaml 과 일치 필수 |
 | `SCRIPTS_HOME` | 스크립트 디렉터리 | mac-ui-tester 노드 `SCRIPTS_HOME` 환경변수 값 |
+| `SLOW_MO` | `800` | Playwright 액션(click/fill/press) 전 지연(ms). 한 글자 입력 속도에도 영향 |
+| `STEP_INTERVAL_MIN_MS` | `800` | DSL 스텝 사이 random sleep 의 최소값(ms). 봇 패턴(즉시 연속 액션) 회피용 |
+| `STEP_INTERVAL_MAX_MS` | `1500` | DSL 스텝 사이 random sleep 의 최대값(ms). `0` 으로 두면 jitter 비활성화 |
 | `SETUP_LOG` | `./setup.log` | 전체 로그 파일 경로 (stdout 과 동시 기록) |
 | `DEBUG` | `0` | `1` 설정 시 curl 응답 등 상세 출력 |
 
@@ -2412,6 +2415,26 @@ for p in d['plugins']:
 ```
 2. 누락된 플러그인이 있으면 `Jenkins 관리 → Plugins → Available plugins` 에서 설치 후 재시작
 3. 재시작 후 `/createItem` 재호출
+
+---
+
+### 실행 중 reCAPTCHA / "비정상 트래픽 감지" 페이지가 자주 뜬다
+
+**증상:** 빌드는 PASS 인데 화면 캡처에 reCAPTCHA 또는 "Our systems have detected unusual traffic" 페이지가 잡힘. 특히 Google 검색 같은 시나리오.
+
+**원인:** 봇 자동화 패턴 — `fill` 직후 100ms 이내에 `press(Enter)` 가 발생. 사람은 입력 → 화면 확인 → 엔터에 1~2초 텀이 있다.
+
+**기본 대응(자동):** [zero_touch_qa/executor.py](../zero_touch_qa/executor.py) 의 스텝 루프가 매 스텝 후 `STEP_INTERVAL_MIN_MS ~ STEP_INTERVAL_MAX_MS` (기본 800~1500ms) 랜덤 sleep 을 삽입한다. 추가로 Playwright `slow_mo` (기본 800ms) 가 액션 단위 지연을 준다.
+
+**여전히 자주 뜨면:**
+1. `STEP_INTERVAL_MAX_MS=2500`, `SLOW_MO=1200` 정도로 상향
+2. 그래도 부족하면 fingerprint 마스킹 라이브러리(`playwright-stealth` 등) 도입 검토 — 별도 PR
+
+**디버그 시 비활성화:**
+```bash
+STEP_INTERVAL_MIN_MS=0 STEP_INTERVAL_MAX_MS=0 SLOW_MO=0 \
+  python3 -m zero_touch_qa --mode chat --headed
+```
 
 ---
 
