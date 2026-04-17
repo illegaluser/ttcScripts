@@ -569,7 +569,23 @@ class QAExecutor:
         elif action == "fill":
             locator.fill(str(value))
         elif action == "press":
+            # M. post-press URL 검증 — press Enter + '검색' 의도 맥락이면
+            # URL 변경이 일어나야 진짜 submit 된 것. JS-only 검색창 / Yahoo 등에선
+            # press 는 예외 없이 통과해도 실제 제출 안 된 경우가 있음. URL 미변경 시
+            # 예외 던져 fallback_targets / action_alternatives / B 휴리스틱으로 진행.
+            before_url = page.url
             locator.press(str(value))
+            if str(value).lower() in ("enter", "return"):
+                desc = str(step.get("description", ""))
+                if re.search(r"검색|search", desc, re.IGNORECASE):
+                    deadline = time.time() + 3.0
+                    while time.time() < deadline and page.url == before_url:
+                        page.wait_for_timeout(100)
+                    if page.url == before_url:
+                        raise RuntimeError(
+                            f"press Enter 후 URL 미변경 — 검색 제출 실패 가능성 "
+                            f"(URL: {before_url})"
+                        )
         elif action == "select":
             locator.select_option(label=str(value))
         elif action == "check":
