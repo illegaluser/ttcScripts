@@ -395,18 +395,22 @@ class QAExecutor:
         """description 에서 '첫 N번째 결과/링크/항목' 의도를 감지한다."""
         return bool(QAExecutor._FIRST_RESULT_RE.search(desc or ""))
 
-    # E: '첫 결과 클릭' 의도일 때 시도할 일반 셀렉터 후보 (좁은 → 넓은 순).
-    # main/article 등 시맨틱 컨테이너 우선, 검색결과 컨테이너 흔한 ID/class 다음.
+    # E: '첫 결과 클릭' 의도일 때 시도할 일반 셀렉터 후보.
+    # 검색엔진별 정확한 검색결과 컨테이너 → 일반 시맨틱 → 광범위 fallback 순.
+    # (검색엔진 컨테이너가 main 보다 정확 — 추천뉴스/광고 카드를 회피)
     _FIRST_RESULT_CANDIDATES = (
-        "main a[href]:visible",
+        "#main_pack a[href]:visible",       # Naver 통합검색 영역
+        "#search a[href]:visible",           # Google 검색 영역
+        "#web a[href]:visible",              # Yahoo 검색 영역
+        "#results a[href]:visible",          # 일반
+        "[id*='result' i] a[href]:visible",
+        "[class*='result' i] a[href]:visible",
+        "[id*='search' i] a[href]:visible",
+        "[class*='search' i] a[href]:visible",
+        "main a[href]:visible",              # 시맨틱 fallback
         "[role=main] a[href]:visible",
         "article a[href]:visible",
         "[role=article] a[href]:visible",
-        "#main_pack a[href]:visible",   # Naver 통합검색 영역
-        "#search a[href]:visible",       # Google 검색 영역
-        "#results a[href]:visible",      # 일반
-        "[id*='result' i] a[href]:visible",
-        "[class*='result' i] a[href]:visible",
     )
 
     # H: "검색창에 입력" 의도 매칭 정규식 (한/영).
@@ -553,7 +557,15 @@ class QAExecutor:
         value = step.get("value", "")
 
         if action == "click":
-            locator.click(timeout=5000)
+            # 1) viewport 안으로 명시적 스크롤 (best-effort, 실패 무시).
+            #    Playwright 가 click 시 자동 스크롤하긴 하지만 동적 재배치가 잦은
+            #    페이지(Yahoo 광고 등)에서 stability 못 잡고 timeout 나는 케이스 회피.
+            # 2) timeout 5s → 10s — 광고/이미지 lazy load 로 stability 늦은 페이지 대응.
+            try:
+                locator.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+            locator.click(timeout=10000)
         elif action == "fill":
             locator.fill(str(value))
         elif action == "press":
