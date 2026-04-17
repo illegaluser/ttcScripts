@@ -74,13 +74,14 @@ class QAExecutor:
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not headed, slow_mo=self.config.slow_mo)
-            page = browser.new_page(
+            context = browser.new_context(
                 locale="ko-KR",
                 viewport={
                     "width": self.config.viewport[0],
                     "height": self.config.viewport[1],
                 },
             )
+            page = context.new_page()
             resolver = LocatorResolver(page)
             healer = LocalHealer(page, self.config.heal_threshold)
 
@@ -95,6 +96,26 @@ class QAExecutor:
                         fail_path = os.path.join(artifacts, "error_final.png")
                         self._safe_screenshot(page, fail_path)
                         break
+                    # N. 새 탭 감지 — 검색 폼이 target=_blank 이거나 JS window.open
+                    # 으로 새 탭/창에 결과를 열면 원래 page 는 변동 없음. 후속 스텝을
+                    # 새 페이지에 적용하려면 여기서 전환해야 한다.
+                    if len(context.pages) > 1 and context.pages[-1] is not page:
+                        new_page = context.pages[-1]
+                        log.info(
+                            "[Step %s] 새 탭 감지 → 활성 페이지 전환 (%s → %s)",
+                            step.get("step", "-"),
+                            page.url, new_page.url,
+                        )
+                        page = new_page
+                        try:
+                            page.bring_to_front()
+                            page.wait_for_load_state("domcontentloaded", timeout=10000)
+                        except Exception:
+                            pass
+                        # resolver/healer 의 내부 page 참조 rebind.
+                        # healed_aliases 는 새 페이지에 매치 안 되면 자동 무효 — 유지.
+                        resolver.page = page
+                        healer.page = page
                     # 스텝 간 random jitter — 봇 패턴(즉시 연속 액션) 회피.
                     # reCAPTCHA 등이 fill→press 100ms 이내 시퀀스를 트리거.
                     # 마지막 스텝 또는 max==0 이면 sleep 생략.
@@ -569,22 +590,29 @@ class QAExecutor:
         elif action == "fill":
             locator.fill(str(value))
         elif action == "press":
-            # M. post-press URL 검증 — press Enter + '검색' 의도 맥락이면
-            # URL 변경이 일어나야 진짜 submit 된 것. JS-only 검색창 / Yahoo 등에선
-            # press 는 예외 없이 통과해도 실제 제출 안 된 경우가 있음. URL 미변경 시
-            # 예외 던져 fallback_targets / action_alternatives / B 휴리스틱으로 진행.
+            # M+N. post-press 검증 — press Enter + '검색' 의도 맥락이면 둘 중
+            # 하나여야 진짜 submit 된 것: (a) URL 변경, (b) 새 탭/창 개방.
+            # 둘 다 없으면 예외 던져 fallback/alternatives/B 휴리스틱 진행.
             before_url = page.url
+            context = page.context
+            before_pages = len(context.pages)
             locator.press(str(value))
             if str(value).lower() in ("enter", "return"):
                 desc = str(step.get("description", ""))
                 if re.search(r"검색|search", desc, re.IGNORECASE):
                     deadline = time.time() + 3.0
-                    while time.time() < deadline and page.url == before_url:
+                    while time.time() < deadline:
+                        if page.url != before_url:
+                            break
+                        if len(context.pages) > before_pages:
+                            break
                         page.wait_for_timeout(100)
-                    if page.url == before_url:
+                    url_changed = page.url != before_url
+                    new_tab = len(context.pages) > before_pages
+                    if not url_changed and not new_tab:
                         raise RuntimeError(
-                            f"press Enter 후 URL 미변경 — 검색 제출 실패 가능성 "
-                            f"(URL: {before_url})"
+                            f"press Enter 후 URL 미변경 + 새 탭 없음 — "
+                            f"검색 제출 실패 가능성 (URL: {before_url})"
                         )
         elif action == "select":
             locator.select_option(label=str(value))
