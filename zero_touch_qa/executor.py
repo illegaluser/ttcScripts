@@ -318,6 +318,28 @@ class QAExecutor:
                 except Exception:
                     continue
 
+        # ── [치유 ?단계] verify "검색결과 존재" 의미적 휴리스틱 (J) ──
+        # description 에 "검색 결과 (목록/존재/표시) 확인" 패턴 + verify 일 때,
+        # main/article/검색결과 컨테이너 중 하나라도 visible 이면 PASS 로 간주.
+        # LLM 의 잘못된 target/value 추측을 의미 기반으로 우회.
+        if action == "verify" and self._matches_search_results_intent(desc):
+            for sel in self._SEARCH_RESULTS_CANDIDATES:
+                try:
+                    loc = page.locator(sel)
+                    if loc.count() == 0:
+                        continue
+                    if loc.first.is_visible():
+                        ss = self._screenshot(page, artifacts, step_id, "healed")
+                        log.info("[Step %s] '검색결과 존재' 휴리스틱 성공: %s", step_id, sel)
+                        return StepResult(
+                            step_id, action, sel,
+                            str(step.get("value", "")), desc,
+                            "HEALED", heal_stage="search_results_visible",
+                            screenshot_path=ss,
+                        )
+                except Exception:
+                    continue
+
         # ── [치유 7단계] fill "검색창" 의미적 휴리스틱 (H) ──
         # LLM 이 사이트별 검색창 name/id 를 추측하다 빗나가도 (Yahoo 의 textarea[name=q] 등),
         # description 에 "검색" 키워드가 있으면 일반 search input selector 들로 fallback.
@@ -398,6 +420,33 @@ class QAExecutor:
     def _matches_search_input_intent(desc: str) -> bool:
         """description 에서 '검색창 입력' 의도를 감지한다."""
         return bool(QAExecutor._SEARCH_INPUT_RE.search(desc or ""))
+
+    # J: "검색결과 (목록/존재/표시) 확인" 의도 매칭 정규식 (한/영).
+    _SEARCH_RESULTS_RE = re.compile(
+        r"검색\s*결과.*(목록|존재|표시|출력|확인|보이는)|"
+        r"search\s*result.*(list|exist|visible|appear|show|display)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @staticmethod
+    def _matches_search_results_intent(desc: str) -> bool:
+        """description 에서 '검색결과 존재 확인' 의도를 감지한다."""
+        return bool(QAExecutor._SEARCH_RESULTS_RE.search(desc or ""))
+
+    # J: '검색결과 존재 확인' 의도일 때 visible 인지 체크할 후보 컨테이너.
+    # 하나라도 visible 이면 검색결과가 있다고 간주.
+    _SEARCH_RESULTS_CANDIDATES = (
+        "main",
+        "[role=main]",
+        "article",
+        "[role=article]",
+        "#main_pack",                     # Naver 통합검색
+        "#search",                          # Google 검색
+        "#results",                         # 일반
+        "#web",                             # Yahoo
+        "[id*='result' i]",
+        "[class*='result' i]",
+    )
 
     # H: '검색창 fill' 의도일 때 시도할 일반 search input 후보.
     # 시맨틱(type=search/role=searchbox) 우선, placeholder/aria-label 매치 다음,

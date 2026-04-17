@@ -270,7 +270,12 @@ workflow:
                 - navigate: target은 빈 문자열, value에 URL을 넣으십시오.
                 - fill: target은 입력할 요소, value에 입력할 텍스트를 넣으십시오.
                 - press: target은 키를 누를 대상 요소(직전에 fill한 요소와 동일), value에 키 이름(예: "Enter", "Tab")을 넣으십시오. 검색/폼제출 패턴이면 action_alternatives 로 click 버튼을 함께 제공하십시오.
-                - click/hover/check/select/verify: target은 대상 요소, value는 해당 액션의 값입니다.
+                - click/hover/check/select: target은 대상 요소, value는 해당 액션의 값입니다.
+                - verify: target은 검사할 요소.
+                  • value 가 빈 문자열이면 "그 요소가 visible 한지" 만 확인.
+                  • value 에는 페이지에 실제로 보일 텍스트만 넣으십시오 (예: "검색결과", "환영합니다").
+                  • ⚠️ 절대 "표시되었는지 확인합니다" 같은 메타 설명문을 value 에 넣지 마십시오 — assert 가 항상 실패합니다.
+                  • "검색결과 목록 존재 여부 확인" 처럼 페이지 영역 visible 만 보면 되는 경우엔 value 를 비우고 description 에만 의도를 적으십시오. 실행 엔진이 main/article/검색결과 컨테이너를 자동 탐색합니다.
                 - wait: target은 빈 문자열, value에 대기 밀리초를 넣으십시오.
 
                 [엄수 사항]:
