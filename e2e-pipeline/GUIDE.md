@@ -2487,6 +2487,35 @@ for p in d['plugins']:
 
 ---
 
+### PASS 5/5 인데 실제로는 검색이 안 됐다 — 봇 차단 새 탭 + verify false positive
+
+**증상:** 로그에는 모든 스텝이 PASS/HEALED 로 찍히지만, 스크린샷을 보면 검색결과가 아닌 홈페이지 또는 엉뚱한 페이지가 잡힘. 특히 Yahoo 에서 흔함.
+
+**원인 2가지가 겹쳐서 발생:**
+
+1. **`press Enter` 가 chrome-error 새 탭을 열었는데 "submit 성공"으로 오판.** 사이트(Yahoo 등)가 Playwright 의 form submit 을 봇으로 판정해 차단하면 새 탭이 `chrome-error://chromewebdata/` 로 뜬다. 예전 구현은 "새 탭이 생겼다 = 성공"으로 간주해 후속 스텝이 원래 홈페이지 기준으로 진행됨.
+2. **`verify` 휴리스틱이 `main` / `[role=main]` / `article` 같은 광범위 셀렉터 매칭.** 홈페이지에도 항상 visible 이라 "검색결과 존재 확인" 이 실제로 검색이 안 됐어도 PASS.
+
+**해결 (자동, 코드에 반영됨):**
+- [executor.py `_perform_action` press](../zero_touch_qa/executor.py) — 새 탭 URL 이 `chrome-error://` / `about:blank` / `data:text/html` 로 시작하면 "submit 실패"로 간주하고 `RuntimeError` → fallback chain 진행 → 최종적으로 press 전체가 FAIL 되면 시나리오 중단.
+- [executor.py `_SEARCH_RESULTS_CANDIDATES`](../zero_touch_qa/executor.py) — `main` / `article` 제거, 검색엔진 전용 컨테이너(`#main_pack`, `#search`, `#web`, `#results`, `[id*='result' i]` 등) 만 유지.
+
+**근본 회피:** Yahoo 처럼 봇 차단이 강한 사이트는 Playwright 만으로는 검색 완료가 안 된다. target 을 `naver.com` / `duckduckgo.com` 같이 차단이 덜한 곳으로 바꾸거나, `playwright-stealth` 같은 fingerprint 마스킹 도입 (별도 PR).
+
+---
+
+### Dify App 에 구버전 DSL 이 남아있어 `<think>` 블록 재생성 → heal 60s timeout 반복
+
+**증상:** 빌드 로그에 `Dify 응답 길이: 3970자, <think> 포함: True` 가 찍히고, heal 요청이 매번 60s timeout 후 휴리스틱으로 넘어감. setup.sh 는 Phase 4-6 까지 정상 완료.
+
+**원인:** Phase 4-3.5 (기존 App 삭제) 또는 4-4 (import) 가 조용히 실패해서 구버전 DSL 이 살아있음. 새 yaml 의 `<think>/<thinking>/<reasoning>` 금지 프롬프트와 `max_tokens: 2048/1024` 가 전혀 적용되지 않음. "import 성공" API 응답만으론 이 회귀를 못 잡는다.
+
+**해결 (자동, setup.sh 에 반영):** Phase 4-5.5 가 publish 직후 `/console/api/apps/{id}/workflows/draft` 를 GET 해서 LLM 노드 prompt_template 에 sentinel 문자열 "**내부 추론 블록**"이 최소 2번 (Planner + Healer) 포함되는지 검증. 실패하면 즉시 `exit 1` 로 중단하고 수동 삭제를 안내.
+
+**수동 복구:** Dify 콘솔(`http://localhost:18081`) → 앱 목록에서 `ZeroTouch QA Brain` 이름의 App 을 전부 삭제 → `./setup.sh` 재실행.
+
+---
+
 ### 실행 중 reCAPTCHA / "비정상 트래픽 감지" 페이지가 자주 뜬다
 
 **증상:** 빌드는 PASS 인데 화면 캡처에 reCAPTCHA 또는 "Our systems have detected unusual traffic" 페이지가 잡힘. 특히 Google 검색 같은 시나리오.

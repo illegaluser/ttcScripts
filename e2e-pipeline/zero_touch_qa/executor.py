@@ -491,17 +491,20 @@ class QAExecutor:
 
     # J: '검색결과 존재 확인' 의도일 때 visible 인지 체크할 후보 컨테이너.
     # 하나라도 visible 이면 검색결과가 있다고 간주.
+    #
+    # 주의: main / [role=main] / article 은 검색 전 홈페이지에서도 항상 visible
+    # 이라 false positive PASS 를 만든다 (Yahoo 검색 실패 시 홈의 main 이 잡힘).
+    # 반드시 "검색결과" 의도를 가진 검색엔진 전용 컨테이너 또는 id/class 에
+    # 'result' 가 포함된 것만 유효로 취급한다.
     _SEARCH_RESULTS_CANDIDATES = (
-        "main",
-        "[role=main]",
-        "article",
-        "[role=article]",
         "#main_pack",                     # Naver 통합검색
         "#search",                          # Google 검색
         "#results",                         # 일반
-        "#web",                             # Yahoo
+        "#web",                             # Yahoo 검색결과
         "[id*='result' i]",
-        "[class*='result' i]",
+        "[class*='search-result' i]",
+        "[class*='results' i]",
+        "[data-testid*='result' i]",
     )
 
     # H: '검색창 fill' 의도일 때 시도할 일반 search input 후보.
@@ -631,8 +634,13 @@ class QAExecutor:
             locator.fill(str(value))
         elif action == "press":
             # M+N. post-press 검증 — press Enter + '검색' 의도 맥락이면 둘 중
-            # 하나여야 진짜 submit 된 것: (a) URL 변경, (b) 새 탭/창 개방.
+            # 하나여야 진짜 submit 된 것: (a) URL 변경, (b) 새 탭/창이 열리고
+            # 그 URL 이 유효한 콘텐츠 페이지 (chrome-error/about:blank 아님).
             # 둘 다 없으면 예외 던져 fallback/alternatives/B 휴리스틱 진행.
+            #
+            # chrome-error 필터를 추가한 이유: Yahoo 등이 봇으로 판정해 폼 submit
+            # 을 차단하면 새 탭이 chrome-error 로 뜨는데, 그걸 "submit 성공"으로
+            # 오판하면 후속 verify/click 이 원래 홈페이지 기준으로 false positive PASS.
             before_url = page.url
             context = page.context
             before_pages = len(context.pages)
@@ -648,11 +656,20 @@ class QAExecutor:
                             break
                         page.wait_for_timeout(100)
                     url_changed = page.url != before_url
-                    new_tab = len(context.pages) > before_pages
-                    if not url_changed and not new_tab:
+                    new_pages = context.pages[before_pages:]
+                    valid_new_tab = any(
+                        not (pg.url or "").startswith(
+                            ("chrome-error://", "about:blank", "data:text/html")
+                        )
+                        for pg in new_pages
+                    )
+                    if not url_changed and not valid_new_tab:
+                        new_tab_urls = [pg.url for pg in new_pages] or ["(없음)"]
                         raise RuntimeError(
-                            f"press Enter 후 URL 미변경 + 새 탭 없음 — "
-                            f"검색 제출 실패 가능성 (URL: {before_url})"
+                            f"press Enter 후 검색 제출 실패 — "
+                            f"URL 유지({before_url}) + 유효한 새 탭 없음. "
+                            f"새 탭 URL: {new_tab_urls} "
+                            f"(chrome-error/about:blank 은 봇 차단으로 간주)"
                         )
         elif action == "select":
             locator.select_option(label=str(value))

@@ -1194,6 +1194,50 @@ except Exception:
         warn "publish 응답 비정상: $PUB_RESP"
       fi
 
+      # 4-5.5. 프롬프트 sentinel 검증 — yaml 의 <think> 금지 문구가 실제 App 에 반영됐는지 확인.
+      #
+      # 왜 필요한가:
+      #   Phase 4-3.5(기존 App 삭제) 또는 4-4(import) 중 어느 한 단계가 조용히 실패하면
+      #   Dify 에 구버전 DSL 이 남아있고 런타임에 <think> 블록이 계속 생성되어
+      #   heal 60s timeout 이 반복된다. "import 성공" API 응답만 믿으면 놓치는 회귀.
+      #
+      # 검증 방법:
+      #   GET /console/api/apps/{app_id}/workflows/draft → graph.nodes 순회 →
+      #   LLM 노드의 prompt_template 에 yaml 에 심은 sentinel 문자열("내부 추론 블록") 이
+      #   최소 2개 (Planner + Healer) 이상 포함되어야 한다.
+      log "4-5.5. 프롬프트 sentinel 검증 (<think> 금지 문구 반영 여부)"
+      DRAFT_RESP=$(curl -sS -b "$DIFY_COOKIES" \
+          -X GET "${DIFY_URL}/console/api/apps/${DIFY_APP_ID}/workflows/draft" \
+          -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
+      SENTINEL_HIT=$(echo "$DRAFT_RESP" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    nodes = (d.get('graph') or {}).get('nodes') or []
+    hits = 0
+    for n in nodes:
+        data = n.get('data') or {}
+        if data.get('type') != 'llm':
+            continue
+        for p in (data.get('prompt_template') or []):
+            text = p.get('text') if isinstance(p, dict) else ''
+            if text and '내부 추론 블록' in text:
+                hits += 1
+                break
+    print(hits)
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+      if [ "${SENTINEL_HIT:-0}" -ge 2 ]; then
+        ok "프롬프트 sentinel 검증 통과 (LLM 노드 ${SENTINEL_HIT}개에 반영됨)"
+      else
+        err "프롬프트 sentinel 미반영 — Dify App 에 최신 yaml 이 적용되지 않았다."
+        err "  검출: ${SENTINEL_HIT:-0}개 / 기대: 2개 (Planner + Healer)"
+        err "  원인 후보: Phase 4-3.5(App 삭제) 또는 4-4(import) 가 조용히 실패."
+        err "  조치: Dify 콘솔(${DIFY_URL}) → 앱 목록에서 '${APP_NAME}' 수동 삭제 후 setup.sh 재실행."
+        exit 1
+      fi
+
       # 4-6. Dify API Key 발급
       log "4-6. Dify API Key 발급 시도 (POST .../api-keys)"
       KEY_RESP=$(curl -sS -b "$DIFY_COOKIES" \
