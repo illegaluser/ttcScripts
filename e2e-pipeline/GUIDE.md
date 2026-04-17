@@ -369,6 +369,7 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 | `SLOW_MO` | `800` | Playwright 액션(click/fill/press) 전 지연(ms). 한 글자 입력 속도에도 영향 |
 | `STEP_INTERVAL_MIN_MS` | `800` | DSL 스텝 사이 random sleep 의 최소값(ms). 봇 패턴(즉시 연속 액션) 회피용 |
 | `STEP_INTERVAL_MAX_MS` | `1500` | DSL 스텝 사이 random sleep 의 최대값(ms). `0` 으로 두면 jitter 비활성화 |
+| `HEAL_TIMEOUT_SEC` | `60` | Dify LLM 치유 호출 단일 timeout(초). 재시도 없음. 느린 모델로 8분 hang 되는 것 차단 |
 | `SETUP_LOG` | `./setup.log` | 전체 로그 파일 경로 (stdout 과 동시 기록) |
 | `DEBUG` | `0` | `1` 설정 시 curl 응답 등 상세 출력 |
 
@@ -2415,6 +2416,37 @@ for p in d['plugins']:
 ```
 2. 누락된 플러그인이 있으면 `Jenkins 관리 → Plugins → Available plugins` 에서 설치 후 재시작
 3. 재시작 후 `/createItem` 재호출
+
+---
+
+### 한 시나리오 안에서 같은 selector 가 fill 은 healed 되고 press 는 FAIL 하던 문제
+
+**증상:** Step N 의 fill 이 fallback 으로 healed 됐는데, Step N+1 의 press 가 같은 selector 를 만나 다시 처음부터 시도하다가 모든 치유 실패. 결과적으로 fill 한 element 와 press 한 element 가 다른 곳으로 가거나, press 가 timeout.
+
+**원인:** [LocatorResolver](../zero_touch_qa/locator_resolver.py) 가 스텝 간 healed 정보를 공유하지 않았다. 각 스텝이 독립적으로 처음부터 selector 를 시도.
+
+**해결 (자동):** Resolver 가 `healed_aliases` dict 를 가지고, 어떤 스텝이 `originalA → healedB` 로 복구되면 후속 스텝이 같은 `originalA` 를 만났을 때 곧바로 `healedB` 사용. fill 과 press 가 동일 element 에 작용 보장.
+
+---
+
+### press(Enter) 가 안 먹어 검색/제출이 실패한다
+
+**증상:** `fill` 로 검색어 입력 후 `press Enter` 가 FAIL. 사용자 입장에선 엔터 안 되면 검색버튼 클릭하면 되는데, 자동화는 Enter 만 시도하다 끝남.
+
+**해결 — 두 갈래:**
+1. **자동 (B 휴리스틱):** [executor.py](../zero_touch_qa/executor.py) 의 마지막 안전망 — press(Enter) 모든 치유 실패 시 `button[type=submit]:visible`, `button:has-text(/검색|search|go|확인/i):visible` 등 검색버튼 후보를 자동 클릭.
+2. **DSL 명시 (C action_alternatives):** Planner LLM 이 press 스텝에 `action_alternatives` 를 추가:
+   ```json
+   {
+     "action": "press", "target": "name=query", "value": "Enter",
+     "action_alternatives": [
+       {"action": "click", "target": "role=button, name=검색"}
+     ]
+   }
+   ```
+   실행 엔진이 fallback_targets 다 실패해도 alternatives 를 자동 시도.
+
+치유 우선순위: `target → fallback_targets → action_alternatives → LocalHealer → Dify heal → press 휴리스틱`.
 
 ---
 

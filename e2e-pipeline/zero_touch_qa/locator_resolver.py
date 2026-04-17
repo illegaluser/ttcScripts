@@ -22,6 +22,11 @@ class LocatorResolver:
 
     def __init__(self, page: Page):
         self.page = page
+        # 같은 시나리오 내에서 한 번 healed 된 selector 매핑.
+        # 예: step 2 의 fill 이 'name=query' → 'placeholder=검색' 로 복구되면
+        # step 3 의 press 가 같은 'name=query' 를 만났을 때 곧바로
+        # 'placeholder=검색' 부터 시도해 동일 element 에 작용하게 한다.
+        self.healed_aliases: dict[str, str] = {}
 
     @staticmethod
     def _safe_count(loc: Locator) -> int:
@@ -30,6 +35,23 @@ class LocatorResolver:
             return loc.count()
         except Exception:
             return 0
+
+    def record_alias(self, original, healed) -> None:
+        """원본 target 이 healed target 으로 복구된 사실을 기록한다.
+
+        같은 시나리오 안에서 후속 스텝이 같은 ``original`` 을 만나면
+        곧바로 ``healed`` 를 첫 시도로 사용해 일관성을 유지한다.
+        ``original`` 이 비어 있으면 무시한다.
+        """
+        if not original or not healed:
+            return
+        key = str(original).strip()
+        val = str(healed).strip()
+        if not key or not val or key == val:
+            return
+        if self.healed_aliases.get(key) != val:
+            log.info("[Resolver] alias 등록: %s → %s", key, val)
+            self.healed_aliases[key] = val
 
     def resolve(self, target) -> Locator | None:
         """DSL target 을 Playwright Locator 로 변환한다.
@@ -45,6 +67,13 @@ class LocatorResolver:
         """
         if not target:
             return None
+
+        # 직전 healed alias 가 있으면 그쪽을 우선 사용
+        if isinstance(target, str):
+            aliased = self.healed_aliases.get(target.strip())
+            if aliased:
+                log.debug("[Resolver] alias 사용: %s → %s", target, aliased)
+                target = aliased
 
         # Dict 타겟 (Dify가 JSON 객체로 보낸 경우)
         if isinstance(target, dict):

@@ -28,6 +28,7 @@ class DifyClient:
     def __init__(self, config: Config):
         self.base_url = config.dify_base_url
         self.headers = {"Authorization": f"Bearer {config.dify_api_key}"}
+        self.heal_timeout_sec = getattr(config, "heal_timeout_sec", 60)
 
     def _request_with_retry(
         self,
@@ -204,14 +205,29 @@ class DifyClient:
             "response_mode": "blocking",
             "user": "mac-agent",
         }
-        answer = self._call(payload)
+        # heal 호출은 사용자 대기시간이 곧 비용. 모델 추론이 느린 경우
+        # 재시도해봐야 또 느릴 뿐이므로 max_retries=0 + 짧은 timeout 사용.
+        answer = self._call(
+            payload,
+            timeout=self.heal_timeout_sec,
+            max_retries=0,
+        )
         return extract_json_safely(answer)
 
     # ── 내부: Chatflow API 호출 ──
-    def _call(self, payload: dict) -> str:
+    def _call(
+        self,
+        payload: dict,
+        *,
+        timeout: int = 120,
+        max_retries: int = 3,
+    ) -> str:
         """Dify /chat-messages 엔드포인트에 blocking 요청을 보내고 answer 를 반환한다.
 
-        일시적 오류(타임아웃, 502/503/504) 시 지수 백오프로 최대 3회 재시도한다.
+        Args:
+            payload: 요청 본문.
+            timeout: 단일 요청 timeout(초).
+            max_retries: 재시도 횟수. heal 호출은 0 (모델 느림은 일시 장애 아님).
 
         Raises:
             DifyConnectionError: HTTP 에러, 타임아웃, 네트워크 실패 시.
@@ -225,7 +241,8 @@ class DifyClient:
                     **self.headers,
                     "Content-Type": "application/json",
                 },
-                timeout=120,
+                timeout=timeout,
+                max_retries=max_retries,
             )
             res.raise_for_status()
             return res.json().get("answer", "")

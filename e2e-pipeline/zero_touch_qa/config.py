@@ -24,7 +24,10 @@ class Config:
     artifacts_dir: str
     viewport: tuple[int, int]
     slow_mo: int
+    step_interval_min_ms: int
+    step_interval_max_ms: int
     heal_threshold: float
+    heal_timeout_sec: int
     dom_snapshot_limit: int
 
     @classmethod
@@ -36,8 +39,11 @@ class Config:
             - ``DIFY_API_KEY`` → ``""`` (빈 문자열)
             - ``ARTIFACTS_DIR`` → ``artifacts``
             - ``VIEWPORT_WIDTH`` / ``VIEWPORT_HEIGHT`` → ``1440`` / ``900``
-            - ``SLOW_MO`` → ``500``
+            - ``SLOW_MO`` → ``800`` (Playwright 액션 단위 지연, 봇 패턴 회피)
+            - ``STEP_INTERVAL_MIN_MS`` / ``STEP_INTERVAL_MAX_MS`` → ``800`` / ``1500``
+              (DSL 스텝 간 random sleep, 0 이면 비활성)
             - ``HEAL_THRESHOLD`` → ``0.8``
+            - ``HEAL_TIMEOUT_SEC`` → ``60`` (Dify LLM 치유 호출 단일 timeout, 재시도 없음)
             - ``DOM_SNAPSHOT_LIMIT`` → ``10000``
 
         Returns:
@@ -51,7 +57,10 @@ class Config:
                 int(os.getenv("VIEWPORT_WIDTH", "1440")),
                 int(os.getenv("VIEWPORT_HEIGHT", "900")),
             ),
-            slow_mo=int(os.getenv("SLOW_MO", "500")),
+            slow_mo=int(os.getenv("SLOW_MO", "800")),
+            step_interval_min_ms=int(os.getenv("STEP_INTERVAL_MIN_MS", "800")),
+            step_interval_max_ms=int(os.getenv("STEP_INTERVAL_MAX_MS", "1500")),
             heal_threshold=float(os.getenv("HEAL_THRESHOLD", "0.8")),
+            heal_timeout_sec=int(os.getenv("HEAL_TIMEOUT_SEC", "60")),
             dom_snapshot_limit=int(os.getenv("DOM_SNAPSHOT_LIMIT", "10000")),
         )
