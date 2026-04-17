@@ -99,23 +99,36 @@ class QAExecutor:
                     # N. 새 탭 감지 — 검색 폼이 target=_blank 이거나 JS window.open
                     # 으로 새 탭/창에 결과를 열면 원래 page 는 변동 없음. 후속 스텝을
                     # 새 페이지에 적용하려면 여기서 전환해야 한다.
+                    #
+                    # O. chrome-error/about:blank 필터 — 네트워크 실패나 봇 차단으로
+                    # 새 탭이 에러 페이지인 경우 전환하지 않고 무시 (유효 콘텐츠 없음).
                     if len(context.pages) > 1 and context.pages[-1] is not page:
                         new_page = context.pages[-1]
-                        log.info(
-                            "[Step %s] 새 탭 감지 → 활성 페이지 전환 (%s → %s)",
-                            step.get("step", "-"),
-                            page.url, new_page.url,
-                        )
-                        page = new_page
                         try:
-                            page.bring_to_front()
-                            page.wait_for_load_state("domcontentloaded", timeout=10000)
+                            new_page.wait_for_load_state("domcontentloaded", timeout=5000)
                         except Exception:
                             pass
-                        # resolver/healer 의 내부 page 참조 rebind.
-                        # healed_aliases 는 새 페이지에 매치 안 되면 자동 무효 — 유지.
-                        resolver.page = page
-                        healer.page = page
+                        new_url = new_page.url
+                        if new_url.startswith(("chrome-error://", "about:blank", "data:text/html")):
+                            log.warning(
+                                "[Step %s] 새 탭이 에러/빈 페이지 (%s) — 전환 안 함. "
+                                "사이트가 Playwright 봇 차단 또는 네트워크 문제.",
+                                step.get("step", "-"), new_url,
+                            )
+                        else:
+                            log.info(
+                                "[Step %s] 새 탭 감지 → 활성 페이지 전환 (%s → %s)",
+                                step.get("step", "-"),
+                                page.url, new_url,
+                            )
+                            page = new_page
+                            try:
+                                page.bring_to_front()
+                            except Exception:
+                                pass
+                            # resolver/healer 의 내부 page 참조 rebind.
+                            resolver.page = page
+                            healer.page = page
                     # 스텝 간 random jitter — 봇 패턴(즉시 연속 액션) 회피.
                     # reCAPTCHA 등이 fill→press 100ms 이내 시퀀스를 트리거.
                     # 마지막 스텝 또는 max==0 이면 sleep 생략.
@@ -256,6 +269,7 @@ class QAExecutor:
             try:
                 self._perform_action(page, healed_loc, step)
                 ss = self._screenshot(page, artifacts, step_id, "healed")
+                log.info("[Step %s] LocalHealer DOM 유사도 복구 성공", step_id)
                 return StepResult(
                     step_id, action, str(original_target or ""),
                     str(step.get("value", "")), desc,
