@@ -96,12 +96,26 @@ class QAExecutor:
                         fail_path = os.path.join(artifacts, "error_final.png")
                         self._safe_screenshot(page, fail_path)
                         break
+                    # G-3: 스텝이 PASS/HEALED 로 판정됐어도 현재 page.url 이 봇 차단
+                    # 페이지(/sorry/, captcha challenge 등) 면 마지막 레이어로 FAIL 처리.
+                    # verify 가 없는 시나리오에서도 false positive 성공을 차단한다.
+                    current_url = page.url or ""
+                    if self._is_blocked_url(current_url):
+                        log.error(
+                            "[Step %s] 스텝은 %s 로 판정됐지만 현재 URL 이 봇 차단 페이지: %s",
+                            step.get("step", "-"), result.status, current_url,
+                        )
+                        result.status = "FAIL"
+                        fail_path = os.path.join(artifacts, "error_final.png")
+                        self._safe_screenshot(page, fail_path)
+                        break
                     # N. 새 탭 감지 — 검색 폼이 target=_blank 이거나 JS window.open
                     # 으로 새 탭/창에 결과를 열면 원래 page 는 변동 없음. 후속 스텝을
                     # 새 페이지에 적용하려면 여기서 전환해야 한다.
                     #
                     # O. chrome-error/about:blank 필터 — 네트워크 실패나 봇 차단으로
                     # 새 탭이 에러 페이지인 경우 전환하지 않고 무시 (유효 콘텐츠 없음).
+                    # G-3 연장: 새 탭 URL 이 봇 차단 페이지여도 전환 안 함.
                     if len(context.pages) > 1 and context.pages[-1] is not page:
                         new_page = context.pages[-1]
                         try:
@@ -115,6 +129,15 @@ class QAExecutor:
                                 "사이트가 Playwright 봇 차단 또는 네트워크 문제.",
                                 step.get("step", "-"), new_url,
                             )
+                        elif self._is_blocked_url(new_url):
+                            log.error(
+                                "[Step %s] 새 탭이 봇 차단 페이지 (%s) — 전환 안 함 + 스텝 FAIL 처리.",
+                                step.get("step", "-"), new_url,
+                            )
+                            result.status = "FAIL"
+                            fail_path = os.path.join(artifacts, "error_final.png")
+                            self._safe_screenshot(page, fail_path)
+                            break
                         else:
                             log.info(
                                 "[Step %s] 새 탭 감지 → 활성 페이지 전환 (%s → %s)",
@@ -519,6 +542,35 @@ class QAExecutor:
         """description 에서 '검색결과 존재 확인' 의도를 감지한다."""
         return bool(QAExecutor._SEARCH_RESULTS_RE.search(desc or ""))
 
+    # G-1: 봇 차단 / captcha challenge / ratelimit 페이지 URL 패턴.
+    # URL 변경 자체는 일어났어도 "의도된 목적지" 가 아니므로 성공으로 인정하면 안 된다.
+    # 대표 사례:
+    #   - Google 봇 차단     : google.com/sorry/index?continue=... ("unusual traffic")
+    #   - Google reCAPTCHA   : /recaptcha/
+    #   - Cloudflare 챌린지  : /cdn-cgi/challenge-platform/
+    #   - Amazon 봇 체크     : /errors/validateCaptcha, /robot-check
+    #   - 일반 rate limit    : /blocked, /ratelimit, /too-many-requests, /429
+    _BLOCKED_URL_RE = re.compile(
+        r"/sorry/"
+        r"|/recaptcha/"
+        r"|/cdn-cgi/challenge"
+        r"|/challenge-platform"
+        r"|/errors/validateCaptcha"
+        r"|/robot-check"
+        r"|/blocked(?:[/?]|$)"
+        r"|/ratelimit(?:[/?]|$)"
+        r"|/too-many-requests"
+        r"|/unusual-traffic"
+        r"|[?&]captcha=[^&]+"
+        r"|/429(?:[/?]|$)|/403(?:[/?]|$)",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _is_blocked_url(url: str) -> bool:
+        """URL 이 봇 차단/captcha/ratelimit 페이지인지 판정."""
+        return bool(QAExecutor._BLOCKED_URL_RE.search(url or ""))
+
     # E-2: 검색결과 페이지 URL 패턴. 쿼리스트링에 검색어 key, 또는 /search/ /results/ /find/ path.
     # 이 패턴에 매치 안 되면 "검색 결과 페이지에 있다" 고 간주할 수 없다.
     _SEARCH_RESULT_URL_RE = re.compile(
@@ -534,7 +586,9 @@ class QAExecutor:
         """click/press 후 실제로 navigation 효과가 있었는지 판정.
 
         효과 = (a) 현재 페이지 URL 이 변경되었거나, (b) 유효한 새 탭이 열렸다.
-        chrome-error:// / about:blank / data: 새 탭은 봇 차단 산물이므로 효과 없음으로 간주.
+        chrome-error:// / about:blank / data: 새 탭은 봇 차단 산물이므로 효과 없음.
+        G-2: 봇 차단(/sorry/ 등) 이나 captcha challenge URL 도 효과 없음으로 간주.
+        URL 은 변경됐지만 "의도된 목적지" 가 아니므로 false positive 차단.
 
         Args:
             page: 현재 활성 Playwright Page.
@@ -544,15 +598,21 @@ class QAExecutor:
         Returns:
             유효한 네비게이션 효과가 있었으면 True.
         """
-        if (page.url or "") != (before_url or ""):
+        current = page.url or ""
+        if QAExecutor._is_blocked_url(current):
+            return False
+        if current != (before_url or ""):
             return True
         pages = page.context.pages
         if len(pages) <= before_pages_count:
             return False
         for pg in pages[before_pages_count:]:
             url = pg.url or ""
-            if not url.startswith(("chrome-error://", "about:blank", "data:text/html")):
-                return True
+            if url.startswith(("chrome-error://", "about:blank", "data:text/html")):
+                continue
+            if QAExecutor._is_blocked_url(url):
+                continue
+            return True
         return False
 
     @staticmethod

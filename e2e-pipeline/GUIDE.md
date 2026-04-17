@@ -2489,6 +2489,28 @@ for p in d['plugins']:
 
 ---
 
+### PASS 인데 최종 페이지가 reCAPTCHA/차단 페이지 — URL 블랙리스트 (G-1 ~ G-3)
+
+**증상:** `Finished: SUCCESS` + PASS N/N 인데 `final_state.png` 가 Google `/sorry/`, Cloudflare `/cdn-cgi/challenge-platform/`, Amazon `/errors/validateCaptcha` 같은 봇 차단 페이지. URL 은 분명히 변경됐으니 E-1~E-4 의 navigation 효과 검증도 통과되어 버림.
+
+**원인:** URL 변경만 보면 "의도된 목적지" 인지 알 수 없다. 차단 페이지도 URL 은 변경됨.
+
+**해결 (자동, 코드 반영):**
+
+| 지점 | 검증 | 실패 시 |
+|---|---|---|
+| **G-1** `_BLOCKED_URL_RE` 정규식 | `/sorry/`, `/recaptcha/`, `/cdn-cgi/challenge`, `/errors/validateCaptcha`, `/robot-check`, `/blocked`, `/ratelimit`, `/too-many-requests`, `/429`, `/403`, `?captcha=...` | — (상수) |
+| **G-2** `_had_navigation_effect` | 현재 URL 또는 새 탭 URL 이 블랙리스트 매치면 "효과 없음" 반환 | E-1/E-3/M 검증이 자동 FAIL |
+| **G-3** `execute` 루프 전역 감시 | 스텝 PASS/HEALED 후에도 `page.url` 이 블랙리스트 매치면 `result.status = "FAIL"` + break. 새 탭이 블랙리스트 매치면 전환 안 함 + FAIL | 빌드 FAILURE (verify 없는 시나리오도 방어됨) |
+
+**효과:** 검색어 submit 후 Google 이 `/sorry/` 로 차단하거나, 검색 결과 링크 클릭 후 Cloudflare 챌린지로 떨어지는 등 "URL 은 바뀌었지만 봇 체크 페이지" 케이스가 이제 정직하게 FAILURE.
+
+**허위 패스 대비 추가 보호막:**
+- 이 시나리오처럼 `verify` 가 없는 2-3 스텝 짧은 시나리오에서도 G-3 가 마지막 레이어로 막는다.
+- E-2 (검색결과 URL 패턴 검사) 는 검색결과 시나리오만 커버. G-3 는 모든 시나리오 커버.
+
+---
+
 ### PASS 5/5 인데 실제로는 엉뚱한 페이지 — 휴리스틱 false positive (E-1 ~ E-4)
 
 **증상:** 로그에는 모든 스텝이 PASS/HEALED 지만 `final_state.png` 는 목적지가 아닌 페이지(예: 검색결과 대신 홈의 trending 카드). B-1 chrome-error 필터가 `_perform_action.press` 에는 걸렸지만 **그 뒤 press→click 휴리스틱이나 "첫 결과" 휴리스틱 단계에서 다시 chrome-error 새 탭을 "성공"으로 흘려보냄**.
