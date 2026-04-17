@@ -121,11 +121,23 @@ class LocatorResolver:
         fallback = target.get("selector", str(target))
         return self._resolve_css_xpath(str(fallback).strip())
 
+    # name 한정자 없이 쓰면 페이지 전체에서 첫 매치(보통 헤더/로고 등) 가 잡혀
+    # 의도와 다른 element 에 액션이 가는 false-positive PASS 를 만든다.
+    # 이런 광범위 role 은 거부하고 fallback_targets 로 강제 진입시킨다.
+    _AMBIGUOUS_ROLES_WITHOUT_NAME = {
+        "link", "button", "textbox", "checkbox", "radio",
+        "searchbox", "combobox", "menuitem", "tab", "option",
+    }
+
     def _resolve_role(self, target_str: str) -> Locator | None:
         """``role=`` 접두사가 있는 target 을 get_by_role 로 해석한다.
 
         ``count() > 0`` 존재 검증을 수행하여 요소가 없을 때
         30초 타임아웃 없이 즉시 None 을 반환한다.
+
+        ``name=`` 한정자 없는 광범위 role (link, button 등) 은 거부한다 —
+        '첫 번째 검색 결과 링크' 의도가 페이지 헤더/로고에 잘못 매치되는
+        false-positive PASS 를 막기 위함. fallback_targets 가 있으면 그쪽 사용.
         """
         if not target_str.startswith("role="):
             return None
@@ -140,10 +152,17 @@ class LocatorResolver:
         # "role=link, text=X" 같은 복합 셀렉터 → role 부분만 추출
         if "," in role_only:
             role_only = role_only.split(",", 1)[0].strip()
-        if role_only:
-            loc = self.page.get_by_role(role_only)
-            return loc.first if self._safe_count(loc) > 0 else None
-        return None
+        if not role_only:
+            return None
+        if role_only.lower() in self._AMBIGUOUS_ROLES_WITHOUT_NAME:
+            log.warning(
+                "[Resolver] role=%r 에 name= 없음 → 광범위 매치 위험으로 거부. "
+                "fallback_targets 또는 휴리스틱으로 처리",
+                role_only,
+            )
+            return None
+        loc = self.page.get_by_role(role_only)
+        return loc.first if self._safe_count(loc) > 0 else None
 
     def _resolve_semantic_prefix(self, target_str: str) -> Locator | None:
         """text=/label=/placeholder=/testid= 접두사를 매칭하여 해당 메서드를 호출한다.

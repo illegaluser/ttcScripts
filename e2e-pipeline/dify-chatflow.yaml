@@ -249,15 +249,22 @@ workflow:
                 [동적 콘텐츠 항목 클릭 (검색결과/리스트의 N번째)]:
                 - "첫 번째 검색결과 링크 클릭", "1번째 항목 클릭" 같이 동적으로 생성되는 항목을
                   클릭할 때는, 사이트별 CSS 클래스를 추측하지 말고 다음 일반 셀렉터를 우선 사용:
-                    target: "role=link"
+                    target: "main a[href]:visible"
                     fallback_targets:
-                      - "main a[href]:visible"
                       - "article a[href]:visible"
                       - "[id*='result' i] a[href]:visible"
                       - "[class*='result' i] a[href]:visible"
                   실행 엔진이 description 의 "첫 번째/N번째 결과/링크" 패턴을 인식하면
                   마지막 안전망으로 위 후보들을 자동 시도합니다.
                 - 절대 li[id^='something'] 같은 추측성 CSS 셀렉터를 단독으로 쓰지 마십시오.
+
+                [⚠️ 절대 금지 — false-positive PASS 유발]:
+                - target 에 name= 한정자 없는 단독 role 을 쓰지 마십시오:
+                  "role=link", "role=button", "role=textbox", "role=searchbox",
+                  "role=checkbox", "role=combobox", "role=menuitem", "role=tab" 등.
+                  → 페이지 전체에서 첫 매치(보통 로고/헤더)가 잡혀 의도와 다른 곳을 클릭합니다.
+                  → 반드시 "role=link, name=홈페이지명" 처럼 name= 으로 한정하거나,
+                     "main a[href]:visible" 같이 컨테이너 한정 셀렉터를 쓰십시오.
 
                 [액션별 target/value 규칙]:
                 - navigate: target은 빈 문자열, value에 URL을 넣으십시오.
