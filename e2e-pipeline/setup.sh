@@ -8,7 +8,7 @@
 #   OLLAMA_PROFILE=container ./setup.sh      # 컨테이너 Ollama 모드
 #
 # 환경변수로 기본값 오버라이드 가능:
-#   OLLAMA_MODEL=qwen3.5:4b                  # Pull/검증할 Ollama 모델명
+#   OLLAMA_MODEL=gemma4:e4b                  # Pull/검증할 Ollama 모델명
 #   OLLAMA_PROFILE=host|container            # host(기본) / container
 #   DIFY_EMAIL=admin@example.com             # Dify 관리자 이메일
 #   DIFY_PASSWORD=Admin1234!                 # Dify 관리자 비밀번호
@@ -61,7 +61,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 설정 (환경변수 → .env → 기본값 순으로 결정)
 # ─────────────────────────────────────────────────────────────────────────────
-OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:4b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
 OLLAMA_PROFILE="${OLLAMA_PROFILE:-host}"                  # host | container
 DIFY_EMAIL="${DIFY_EMAIL:-admin@example.com}"
 DIFY_PASSWORD="${DIFY_PASSWORD:-Admin1234!}"
@@ -791,6 +791,69 @@ else
 fi
 warn "     - Model Name: ${OLLAMA_MODEL}  (dify-chatflow.yaml 과 정확히 일치해야 함)"
 
+# 4-3.5. 기존 동일 이름 App 정리
+# 재설치/재실행 시 같은 이름의 Chatflow App 이 남아 있으면 import 는 새 App 을
+# 중복 생성해 API Key 발급 대상이 흔들린다. DSL 의 app.name 과 일치하는 기존 App
+# 을 먼저 DELETE 해서 idempotent 하게 만든다.
+if [ "$DIFY_LOGGED_IN" = "true" ]; then
+  # dify-chatflow.yaml 의 app.name 추출 (DSL 단일 진실 공급원)
+  # app: 블록 바로 아래(2-space 들여쓰기)의 name: 만 뽑는다.
+  APP_NAME=$(python3 - << PYEOF 2>/dev/null
+import re
+in_app = False
+with open('${SCRIPT_DIR}/dify-chatflow.yaml', encoding='utf-8') as f:
+    for line in f:
+        if re.match(r'^app:\s*$', line):
+            in_app = True; continue
+        if in_app:
+            if re.match(r'^\S', line):  # 다음 최상위 키 시작
+                break
+            m = re.match(r'^  name:\s*(.+?)\s*$', line)
+            if m:
+                print(m.group(1).strip('"\''))
+                break
+PYEOF
+)
+  # 추출 실패 시 DSL 하드코딩 값으로 fallback
+  APP_NAME="${APP_NAME:-ZeroTouch QA Brain}"
+
+  log "4-3.5. 기존 Chatflow App 정리 (name=\"${APP_NAME}\")"
+  APPS_LIST=$(curl -sS -b "$DIFY_COOKIES" \
+      "${DIFY_URL}/console/api/apps?page=1&limit=100" \
+      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
+  debug "apps list response: $APPS_LIST"
+
+  EXISTING_IDS=$(echo "$APPS_LIST" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    name = '''${APP_NAME}'''
+    for a in d.get('data', []) or []:
+        if a.get('name') == name and a.get('id'):
+            print(a['id'])
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+
+  if [ -z "$EXISTING_IDS" ]; then
+    log "  → 동일 이름 App 없음. 신규 import 진행."
+  else
+    for _old_id in $EXISTING_IDS; do
+      log "  → 기존 App 삭제: ${_old_id}"
+      DEL_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
+          -X DELETE "${DIFY_URL}/console/api/apps/${_old_id}" \
+          -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo "HTTP:000")
+      debug "delete response: $DEL_RESP"
+      if echo "$DEL_RESP" | grep -qE 'HTTP:(200|204)'; then
+        ok "  기존 App 삭제 완료: ${_old_id}"
+      else
+        warn "  기존 App 삭제 실패 (id=${_old_id}): $DEL_RESP"
+        warn "  → 중복 import 로 API Key 가 흔들릴 수 있음. 콘솔에서 수동 삭제 권장."
+      fi
+    done
+  fi
+fi
+
 # 4-4 ~ 4-6. Chatflow DSL import → publish → API Key
 # 주의: Dify 1.13.3 에서 import 경로가 복수형으로 바뀌었고 body/응답 스키마가 다르다.
 #   URL   : POST /console/api/apps/imports   (imports, 복수)
@@ -1053,18 +1116,33 @@ required.each { name ->
   <secret>${DIFY_API_KEY}</secret>
 </org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl>"
 
+    # upsert: createCredentials(신규) 실패 시 config.xml(덮어쓰기) 로 폴백.
+    # 동일 id 가 이미 존재하면 createCredentials 는 409 또는 4xx 를 반환한다.
+    # 이 경우 config.xml POST 로 값을 교체해 API Key 갱신이 항상 반영되도록 한다.
     CRED_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -X POST \
         "${JENKINS_URL}/credentials/store/system/domain/_/createCredentials" \
         -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
         -H "Content-Type: application/xml" \
         --data "$CRED_XML" 2>&1 || echo "HTTP:000")
-    debug "credentials response: $CRED_RESP"
+    debug "credentials create response: $CRED_RESP"
     if echo "$CRED_RESP" | grep -qE 'HTTP:(200|302)'; then
       ok "Credentials 등록 완료 (id: dify-qa-api-token)"
     else
-      warn "Credentials 등록 실패"
-      warn "  응답: $CRED_RESP"
-      warn "  → 수동 등록 필요 (GUIDE.md §8.3)"
+      log "  → 기존 Credentials 감지 가능성. config.xml 로 업데이트 시도"
+      UPDATE_CRED_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -X POST \
+          "${JENKINS_URL}/credentials/store/system/domain/_/credential/dify-qa-api-token/config.xml" \
+          -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+          -H "Content-Type: application/xml" \
+          --data "$CRED_XML" 2>&1 || echo "HTTP:000")
+      debug "credentials update response: $UPDATE_CRED_RESP"
+      if echo "$UPDATE_CRED_RESP" | grep -qE 'HTTP:(200|302)'; then
+        ok "Credentials 업데이트 완료 (id: dify-qa-api-token)"
+      else
+        warn "Credentials 등록/업데이트 실패"
+        warn "  create 응답: $CRED_RESP"
+        warn "  update 응답: $UPDATE_CRED_RESP"
+        warn "  → 수동 등록 필요 (GUIDE.md §8.3)"
+      fi
     fi
   else
     warn "5-2. Dify API Key 없음 → Credentials 수동 등록 필요 (GUIDE.md §8.3)"
