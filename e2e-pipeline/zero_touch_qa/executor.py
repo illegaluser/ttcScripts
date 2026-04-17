@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import time
 import logging
 from dataclasses import dataclass, field
@@ -129,7 +130,10 @@ class QAExecutor:
 
         # ── 메타 액션 (타겟 불필요) ──
         if action in ("navigate", "maps"):
-            url = step.get("value") or step.get("target", "")
+            raw_url = step.get("value") or step.get("target", "")
+            url = self._normalize_url(str(raw_url))
+            if url != str(raw_url):
+                log.info("[Step %s] URL 자동 normalize: %r → %r", step_id, raw_url, url)
             page.goto(url)
             page.wait_for_load_state("domcontentloaded")
             ss = self._screenshot(page, artifacts, step_id, "pass")
@@ -317,6 +321,40 @@ class QAExecutor:
         "f7", "f8", "f9", "f10", "f11", "f12",
     }
 
+    # 사설망/로컬 IP 패턴 — 자동 normalize 시 https 가 아닌 http 적용
+    _LOCAL_HOST_PREFIXES = ("localhost", "127.", "0.0.0.0", "10.", "192.168.", "172.16.",
+                            "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
+                            "172.22.", "172.23.", "172.24.", "172.25.", "172.26.",
+                            "172.27.", "172.28.", "172.29.", "172.30.", "172.31.")
+    _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/.*)?$")
+
+    @staticmethod
+    def _normalize_url(raw: str) -> str:
+        """스킴 없는 URL 에 자동으로 https:// (또는 로컬은 http://) 를 붙인다.
+
+        사용자가 Jenkins 파라미터에 ``www.naver.com`` 만 넣거나 LLM 이 스킴 없이
+        반환해도 ``page.goto()`` 의 'invalid URL' 에러를 막는다.
+
+        Examples:
+            >>> QAExecutor._normalize_url("www.naver.com")
+            'https://www.naver.com'
+            >>> QAExecutor._normalize_url("localhost:3000")
+            'http://localhost:3000'
+            >>> QAExecutor._normalize_url("https://x.com")
+            'https://x.com'
+        """
+        url = (raw or "").strip()
+        if not url:
+            return url
+        if url.startswith(("http://", "https://", "file://", "data:", "about:")):
+            return url
+        if url.startswith("//"):
+            return "https:" + url
+        lower = url.lower()
+        if lower.startswith(QAExecutor._LOCAL_HOST_PREFIXES) or QAExecutor._IPV4_RE.match(lower):
+            return "http://" + url
+        return "https://" + url
+
     @staticmethod
     def _normalize_step(step: dict):
         """
@@ -333,10 +371,19 @@ class QAExecutor:
             step["target"] = ""
             log.debug("[보정] press: target '%s' → value로 이동", target)
 
-        if action == "navigate" and not value and target.startswith(("http://", "https://")):
-            step["value"] = target
-            step["target"] = ""
-            log.debug("[보정] navigate: target → value로 이동")
+        # navigate 의 흔한 LLM 실수: URL 을 target 에 넣음.
+        # 스킴 없어도 'foo.com', 'localhost:3000' 등 URL 같으면 swap.
+        if action == "navigate" and not value and target:
+            host_part = target.split("/", 1)[0].split("?", 1)[0]
+            looks_url = (
+                target.startswith(("http://", "https://", "//"))
+                or "." in host_part
+                or host_part.startswith("localhost")
+            )
+            if looks_url:
+                step["value"] = target
+                step["target"] = ""
+                log.debug("[보정] navigate: target → value로 이동")
 
     # ── 9대 DSL 액션 수행 ──
     @staticmethod
