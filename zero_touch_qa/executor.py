@@ -318,6 +318,29 @@ class QAExecutor:
                 except Exception:
                     continue
 
+        # ── [치유 7단계] fill "검색창" 의미적 휴리스틱 (H) ──
+        # LLM 이 사이트별 검색창 name/id 를 추측하다 빗나가도 (Yahoo 의 textarea[name=q] 등),
+        # description 에 "검색" 키워드가 있으면 일반 search input selector 들로 fallback.
+        # input[type=search] / [role=searchbox] / placeholder/aria-label 매치 / name 빈출값 순.
+        if action == "fill" and self._matches_search_input_intent(desc):
+            for sel in self._SEARCH_INPUT_CANDIDATES:
+                try:
+                    loc = page.locator(sel)
+                    if loc.count() == 0:
+                        continue
+                    loc.first.fill(str(step.get("value", "")))
+                    resolver.record_alias(original_target, sel)
+                    ss = self._screenshot(page, artifacts, step_id, "healed")
+                    log.info("[Step %s] '검색창' 휴리스틱 성공: %s", step_id, sel)
+                    return StepResult(
+                        step_id, action, sel,
+                        str(step.get("value", "")), desc,
+                        "HEALED", heal_stage="search_input",
+                        screenshot_path=ss,
+                    )
+                except Exception:
+                    continue
+
         # ── 모든 치유 실패 ──
         log.error("[Step %s] FAIL — 모든 치유 실패", step_id)
         return StepResult(
@@ -362,6 +385,33 @@ class QAExecutor:
         "#results a[href]:visible",      # 일반
         "[id*='result' i] a[href]:visible",
         "[class*='result' i] a[href]:visible",
+    )
+
+    # H: "검색창에 입력" 의도 매칭 정규식 (한/영).
+    # search 단어는 search bar / search box 등 명사구 우선, 'research' 오매칭 회피.
+    _SEARCH_INPUT_RE = re.compile(
+        r"검색\s*(창|박스|필드|입력|어\s*입력)|search\s*(box|bar|input|field)",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _matches_search_input_intent(desc: str) -> bool:
+        """description 에서 '검색창 입력' 의도를 감지한다."""
+        return bool(QAExecutor._SEARCH_INPUT_RE.search(desc or ""))
+
+    # H: '검색창 fill' 의도일 때 시도할 일반 search input 후보.
+    # 시맨틱(type=search/role=searchbox) 우선, placeholder/aria-label 매치 다음,
+    # 마지막으로 검색엔진별 흔한 name 속성(q, p, query, search, wd 등).
+    _SEARCH_INPUT_CANDIDATES = (
+        "input[type=search]:visible",
+        "[role=searchbox]:visible",
+        "[role=combobox][type=search]:visible",
+        "input[placeholder*='Search' i]:visible, input[placeholder*='검색']:visible",
+        "input[aria-label*='Search' i]:visible, input[aria-label*='검색']:visible",
+        "textarea[aria-label*='Search' i]:visible, textarea[aria-label*='검색']:visible",
+        "input[name='q']:visible, input[name='p']:visible, input[name='query']:visible, "
+        "input[name='search']:visible, input[name='keyword']:visible, input[name='wd']:visible",
+        "form[role=search] input:visible, [role=search] input:visible",
     )
 
     # ── LLM 출력 보정 ──
