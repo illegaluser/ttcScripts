@@ -141,6 +141,23 @@ class QAExecutor:
                             self.config.step_interval_max_ms,
                         ) / 1000.0
                         time.sleep(jitter_s)
+
+                # P-1. 모든 스텝 종료 후 final_state.png — 마지막 click 이 새 탭을
+                # 열어 page 가 전환된 경우, 기존 step_N_*.png 는 전환 직전 화면만
+                # 담는다. 여기서 최종 활성 페이지의 상태를 별도 캡처해 '실제로
+                # 어디로 이동했는지' 시각 증거로 남긴다.
+                try:
+                    page.bring_to_front()
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                final_path = os.path.join(artifacts, "final_state.png")
+                self._safe_screenshot(page, final_path)
+                log.info("[Final] 최종 활성 페이지: %s → %s", page.url, final_path)
+
+                # P-2. headed 모드에선 browser.close() 전에 짧게 대기 (사용자 시각 확인).
+                if headed:
+                    time.sleep(3)
             finally:
                 browser.close()
 
@@ -598,6 +615,15 @@ class QAExecutor:
             # 2) timeout 5s → 10s — 광고/이미지 lazy load 로 stability 늦은 페이지 대응.
             try:
                 locator.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+            # P-3. 클릭 대상의 href 미리 로깅 — stretched-box 같은 invisible overlay
+            # 를 클릭해 navigation 이 일어날 경우 어느 링크였는지 사후 추적 가능.
+            try:
+                target_href = locator.get_attribute("href", timeout=1000)
+                target_text = (locator.text_content(timeout=1000) or "").strip()[:60]
+                if target_href or target_text:
+                    log.info("[Click] href=%r text=%r", target_href, target_text)
             except Exception:
                 pass
             locator.click(timeout=10000)
