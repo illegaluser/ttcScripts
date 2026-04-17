@@ -8,7 +8,7 @@
 #   OLLAMA_PROFILE=container ./setup.sh      # 컨테이너 Ollama 모드
 #
 # 환경변수로 기본값 오버라이드 가능:
-#   OLLAMA_MODEL=qwen3.5:4b                  # Pull/검증할 Ollama 모델명
+#   OLLAMA_MODEL=gemma4:e2b                  # Pull/검증할 Ollama 모델명
 #   OLLAMA_PROFILE=host|container            # host(기본) / container
 #   DIFY_EMAIL=admin@example.com             # Dify 관리자 이메일
 #   DIFY_PASSWORD=Admin1234!                 # Dify 관리자 비밀번호
@@ -61,7 +61,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 설정 (환경변수 → .env → 기본값 순으로 결정)
 # ─────────────────────────────────────────────────────────────────────────────
-OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:4b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e2b}"
 OLLAMA_PROFILE="${OLLAMA_PROFILE:-host}"                  # host | container
 DIFY_EMAIL="${DIFY_EMAIL:-admin@example.com}"
 DIFY_PASSWORD="${DIFY_PASSWORD:-Admin1234!}"
@@ -777,19 +777,180 @@ else
   warn "이후 Chatflow 자동 import 는 건너뛰고 수동 안내로 전환 — GUIDE.md §7 참조"
 fi
 
-# 4-3. Dify Ollama 플러그인/모델 등록 안내 (자동화 불가 — 마켓플레이스 UI 강제)
-log "4-3. Dify Ollama 플러그인/모델 공급자 등록 (수동 수행 필요)"
-warn "Dify 1.x 는 Ollama 공급자가 플러그인 기반이다. 마켓플레이스 설치는 API 자동화를 지원하지 않는다."
-warn "아래 단계를 Dify 콘솔에서 직접 수행해야 한다 (GUIDE.md §6.2 참조):"
-warn "  1) http://localhost:18081/signin 에서 로그인"
-warn "  2) 설정 → 플러그인 → 마켓플레이스 → 'Ollama' 검색 → Install"
-warn "  3) 설정 → 모델 공급자 → Ollama 카드 → + Add Model"
+# ───────────────────────────────────────────────────────────────────────────
+# 4-3a. Dify Ollama 플러그인 자동 설치
+#       Dify 1.x 의 Ollama 모델 공급자는 플러그인 기반.
+#       down -v 후 Postgres+plugin 볼륨이 비면 plugin/provider 가 모두 사라져
+#       Chatflow 가 LLM 호출 시 무응답 hang → 클라이언트 측 Read timeout 으로 보임.
+#
+#       설치 흐름:
+#         1) /workspaces/current/plugin/list 로 langgenius/ollama 이미 있으면 skip
+#         2) marketplace.dify.ai/api/v1/plugins/batch 로 latest_package_identifier 조회
+#         3) /workspaces/current/plugin/install/marketplace 호출 (async)
+#         4) plugin/list 에 langgenius/ollama 가 보일 때까지 폴링 (최대 90초)
+#
+#       fallback: marketplace 조회 실패 시 검증된 hardcode identifier 시도.
+# ───────────────────────────────────────────────────────────────────────────
+DIFY_OLLAMA_INSTALLED="false"
+DIFY_OLLAMA_MODEL_REGISTERED="false"
+
+# 호스트 → 컨테이너 모드별 Ollama Base URL
 if [ "$OLLAMA_PROFILE" = "container" ]; then
-  warn "     - Base URL: http://ollama:11434"
+  OLLAMA_BASE_URL_FOR_DIFY="http://ollama:11434"
 else
-  warn "     - Base URL: http://host.docker.internal:11434"
+  OLLAMA_BASE_URL_FOR_DIFY="http://host.docker.internal:11434"
 fi
-warn "     - Model Name: ${OLLAMA_MODEL}  (dify-chatflow.yaml 과 정확히 일치해야 함)"
+
+# 마지막 검증 시점에 알려진 unique_identifier (marketplace 조회 실패 시 fallback)
+OLLAMA_PLUGIN_FALLBACK_ID="langgenius/ollama:0.1.3@66e156c4f612964c131c49168882e78c2cdfe366879506b97ad855b23c5d6d98"
+
+if [ "$DIFY_LOGGED_IN" = "true" ]; then
+  log "4-3a. Dify Ollama 플러그인 설치 상태 확인"
+  PLUGIN_LIST_RESP=$(curl -sS -b "$DIFY_COOKIES" \
+      "${DIFY_URL}/console/api/workspaces/current/plugin/list" \
+      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
+  if echo "$PLUGIN_LIST_RESP" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    sys.exit(0 if any(p.get('plugin_id')=='langgenius/ollama' for p in d.get('plugins',[])) else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+    ok "  Ollama 플러그인 이미 설치됨 — 설치 단계 skip"
+    DIFY_OLLAMA_INSTALLED="true"
+  else
+    log "  Ollama 플러그인 미설치 — marketplace 조회 후 자동 설치"
+    PLUGIN_BATCH_RESP=$(curl -sS -m 15 -X POST https://marketplace.dify.ai/api/v1/plugins/batch \
+        -H "Content-Type: application/json" \
+        -H "X-Dify-Version: 1.13.3" \
+        -d '{"plugin_ids":["langgenius/ollama"]}' 2>&1 || echo '{}')
+    PLUGIN_UID=$(echo "$PLUGIN_BATCH_RESP" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    plugins=d.get('data',{}).get('plugins',[])
+    print(plugins[0].get('latest_package_identifier','') if plugins else '')
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    if [ -z "$PLUGIN_UID" ]; then
+      warn "  marketplace.dify.ai 조회 실패 — fallback identifier 사용"
+      PLUGIN_UID="$OLLAMA_PLUGIN_FALLBACK_ID"
+    else
+      log "  latest unique_identifier: ${PLUGIN_UID:0:60}..."
+    fi
+
+    INSTALL_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
+        -X POST "${DIFY_URL}/console/api/workspaces/current/plugin/install/marketplace" \
+        -H "Content-Type: application/json" \
+        -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
+        -d "{\"plugin_unique_identifiers\":[\"${PLUGIN_UID}\"]}" 2>&1 || echo "HTTP:000")
+    debug "plugin install response: $INSTALL_RESP"
+    if echo "$INSTALL_RESP" | grep -qE 'HTTP:(200|201|202)'; then
+      log "  설치 요청 전송 완료. plugin daemon 처리 대기 (최대 90초)"
+      _waited=0
+      while [ $_waited -lt 90 ]; do
+        sleep 5
+        _waited=$((_waited + 5))
+        CHECK_RESP=$(curl -sS -b "$DIFY_COOKIES" \
+            "${DIFY_URL}/console/api/workspaces/current/plugin/list" \
+            -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
+        if echo "$CHECK_RESP" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    sys.exit(0 if any(p.get('plugin_id')=='langgenius/ollama' for p in d.get('plugins',[])) else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+          ok "  Ollama 플러그인 설치 완료 (${_waited}초 경과)"
+          DIFY_OLLAMA_INSTALLED="true"
+          break
+        fi
+      done
+      if [ "$DIFY_OLLAMA_INSTALLED" != "true" ]; then
+        warn "  90초 대기 후에도 plugin/list 에 langgenius/ollama 없음"
+        warn "  → Dify 콘솔에서 수동 설치 필요 (GUIDE.md §6.2)"
+      fi
+    else
+      warn "  플러그인 설치 요청 실패: $INSTALL_RESP"
+      warn "  → Dify 콘솔에서 수동 설치 필요 (GUIDE.md §6.2)"
+    fi
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# 4-3b. Ollama 모델 공급자에 OLLAMA_MODEL 자동 등록
+#       Endpoint: POST /workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials
+#       Body schema (Dify 1.13.3 ollama plugin 0.1.3):
+#         { model, model_type, credentials: { base_url, mode, context_size,
+#           max_tokens, vision_support, function_call_support } }
+#       모든 credential 값은 string. customizable-model 이라 model 별로 등록 필요.
+# ───────────────────────────────────────────────────────────────────────────
+if [ "$DIFY_OLLAMA_INSTALLED" = "true" ]; then
+  log "4-3b. Ollama 모델 공급자에 ${OLLAMA_MODEL} 등록 상태 확인"
+  MODELS_RESP=$(curl -sS -b "$DIFY_COOKIES" \
+      "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models" \
+      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
+  if echo "$MODELS_RESP" | python3 -c "
+import json,sys
+target='''${OLLAMA_MODEL}'''
+try:
+    d=json.load(sys.stdin)
+    sys.exit(0 if any(m.get('model')==target for m in d.get('data',[])) else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+    ok "  ${OLLAMA_MODEL} 이미 등록됨 — 등록 단계 skip"
+    DIFY_OLLAMA_MODEL_REGISTERED="true"
+  else
+    log "  ${OLLAMA_MODEL} 미등록 — credentials POST 로 자동 등록"
+    REG_BODY=$(python3 - << PYEOF 2>/dev/null
+import json
+print(json.dumps({
+    "model": "${OLLAMA_MODEL}",
+    "model_type": "llm",
+    "credentials": {
+        "base_url": "${OLLAMA_BASE_URL_FOR_DIFY}",
+        "mode": "chat",
+        "context_size": "4096",
+        "max_tokens": "4096",
+        "vision_support": "false",
+        "function_call_support": "false"
+    }
+}))
+PYEOF
+)
+    REG_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
+        -X POST "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials" \
+        -H "Content-Type: application/json" \
+        -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
+        -d "$REG_BODY" 2>&1 || echo "HTTP:000")
+    debug "model register response: $REG_RESP"
+    if echo "$REG_RESP" | grep -qE 'HTTP:(200|201)'; then
+      ok "  ${OLLAMA_MODEL} 모델 등록 완료"
+      DIFY_OLLAMA_MODEL_REGISTERED="true"
+    else
+      warn "  모델 등록 실패: $REG_RESP"
+      warn "  → Dify 콘솔에서 수동 등록 필요 (GUIDE.md §6.2)"
+    fi
+  fi
+fi
+
+# 자동화 실패 시에만 수동 안내 출력 (이전 버전 호환 + 사용자 가시성)
+if [ "$DIFY_OLLAMA_INSTALLED" != "true" ] || [ "$DIFY_OLLAMA_MODEL_REGISTERED" != "true" ]; then
+  warn "==> Dify Ollama 자동 설정 일부 실패 — Dify 콘솔에서 수동 보완 필요:"
+  warn "  1) http://localhost:18081/signin 로그인"
+  if [ "$DIFY_OLLAMA_INSTALLED" != "true" ]; then
+    warn "  2) 설정 → 플러그인 → 마켓플레이스 → 'Ollama' 검색 → Install"
+  fi
+  if [ "$DIFY_OLLAMA_MODEL_REGISTERED" != "true" ]; then
+    warn "  3) 설정 → 모델 공급자 → Ollama 카드 → + Add Model"
+    warn "     - Base URL: ${OLLAMA_BASE_URL_FOR_DIFY}"
+    warn "     - Model Name: ${OLLAMA_MODEL}"
+  fi
+fi
 
 # 4-3.5. 기존 동일 이름 App 정리
 # 재설치/재실행 시 같은 이름의 Chatflow App 이 남아 있으면 import 는 새 App 을
@@ -1605,22 +1766,32 @@ if [ "$_USING_DEFAULT_DIFY_PW" = "1" ] || [ "$_USING_DEFAULT_JENKINS_PW" = "1" ]
 fi
 echo "  로그 파일  → ${SETUP_LOG}"
 echo ""
+if [ "$DIFY_OLLAMA_INSTALLED" = "true" ] && [ "$DIFY_OLLAMA_MODEL_REGISTERED" = "true" ]; then
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  [필수 수동 작업 — Dify 1.x 플러그인 기반 아키텍처]"
+echo "  [Dify Ollama 자동 설정 — ✅ 완료]"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+echo "  ✓ langgenius/ollama 플러그인 자동 설치 완료"
+echo "  ✓ ${OLLAMA_MODEL} 모델 자동 등록 완료 (Base URL: ${OLLAMA_BASE_URL_FOR_DIFY})"
+echo ""
+else
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  [⚠️ Dify Ollama 자동 설정 일부 실패 — 수동 보완 필요]"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+if [ "$DIFY_OLLAMA_INSTALLED" != "true" ]; then
 echo "  1. Dify 콘솔에서 Ollama 플러그인 설치:"
 echo "     http://localhost:18081/signin → 설정 → 플러그인 → 마켓플레이스"
 echo "     → 'Ollama' 검색 → Install (plugin_daemon 가 venv 초기화, ~30초)"
 echo ""
-echo "  2. 설정 → 모델 공급자 → Ollama 카드 → + Add Model"
-if [ "$OLLAMA_PROFILE" = "container" ]; then
-echo "     Base URL   : http://ollama:11434"
-else
-echo "     Base URL   : http://host.docker.internal:11434"
 fi
+if [ "$DIFY_OLLAMA_MODEL_REGISTERED" != "true" ]; then
+echo "  2. 설정 → 모델 공급자 → Ollama 카드 → + Add Model"
+echo "     Base URL   : ${OLLAMA_BASE_URL_FOR_DIFY}"
 echo "     Model Name : ${OLLAMA_MODEL}"
 echo ""
+fi
+fi
 if [ -z "$DIFY_API_KEY" ]; then
 echo "  3. (Chatflow import 실패 시) Dify 콘솔 → 앱 → + 앱 만들기"
 echo "     → DSL 파일에서 가져오기 → ${SCRIPT_DIR}/dify-chatflow.yaml"

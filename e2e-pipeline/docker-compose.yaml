@@ -26,10 +26,9 @@
 # [호스트 Ollama 모드의 모델 전제]
 # 이 스택은 기본 기동(호스트 Ollama 모드)에서 아래 모델이 호스트에 이미
 # Pull 되어 있다고 가정한다. 가이드와 dify-chatflow.yaml 도 동일 전제.
-#   - qwen3.5:4b     (Planner/Healer 기본값 — JSON fidelity 위해 선택)
-#   - gemma3:4b      (대안/실험용)
+#   - gemma4:e2b     (Planner/Healer 기본값 — 경량/저자원 호스트용)
 # 호스트 확인:  ollama list
-# 호스트 Pull:  ollama pull qwen3.5:4b && ollama pull gemma3:4b
+# 호스트 Pull:  ollama pull gemma4:e2b
 # 호스트 바인딩: OLLAMA_HOST=0.0.0.0 (기본값 127.0.0.1 이면 컨테이너에서 못 닿음)
 # ─────────────────────────────────────────────────────────────────────────────
 #
