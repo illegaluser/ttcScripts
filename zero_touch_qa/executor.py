@@ -134,8 +134,10 @@ class QAExecutor:
             url = self._normalize_url(str(raw_url))
             if url != str(raw_url):
                 log.info("[Step %s] URL 자동 normalize: %r → %r", step_id, raw_url, url)
-            page.goto(url)
-            page.wait_for_load_state("domcontentloaded")
+            # wait_until="domcontentloaded": 광고/트래커 로딩까지 기다리지 않고
+            # DOM 만 준비되면 진행. yahoo.com 처럼 무거운 페이지의 'load'
+            # event 30초 timeout 회피. timeout 도 60초로 상향.
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
             ss = self._screenshot(page, artifacts, step_id, "pass")
             log.info("[Step %s] navigate -> PASS", step_id)
             return StepResult(
