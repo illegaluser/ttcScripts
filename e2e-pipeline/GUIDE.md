@@ -432,7 +432,7 @@ DIFY_PASSWORD='QuickTest1!' ./setup.sh
 
 | Phase | 내용 | 상태 |
 | --- | --- | --- |
-| 0 | 사전 요구사항 확인 (docker, python3, 필수 파일). macOS: Homebrew 부재 시 공식 스크립트 자동 설치, python3 부재 시 `brew install python3`, Docker 데몬 미응답 시 `open -a Docker` + 최대 90초 대기. 호스트 Ollama 부재 시 winget/brew/curl 로 자동 설치. macOS 는 설치 직후 `ensure_ollama_host_binding` 으로 `0.0.0.0` 바인딩 보장 | ✅ 자동 |
+| 0 | 사전 요구사항 확인 (docker, python3, 필수 파일). macOS: Homebrew 부재 시 공식 스크립트 자동 설치, python3 부재 시 `brew install python3`, Docker 데몬 미응답 시 `open -a Docker` + 최대 90초 대기. 호스트 Ollama 부재 시 winget/brew/curl 로 자동 설치. macOS 는 설치 직후 `ensure_ollama_host_binding` 으로 `0.0.0.0` 바인딩 보장. **WSL2 감지 시 Linux Ollama 자동 설치 거부** — Windows Ollama GUI 앱 사용 강제 + 중복 인스턴스 감지 시 제거 안내 후 중단 (§5.2.1) | ✅ 자동 (WSL 은 수동 Windows 앱 설치 강제) |
 | 1 | `jenkins-init/` + `docker-compose.override.yaml` 생성, `docker compose up -d --build` (프로파일 인식) | ✅ 자동 |
 | 2 | nginx / api / plugin_daemon / jenkins 헬스 대기 | ✅ 자동 |
 | 3 | Ollama 모델 확인/Pull (호스트 or 컨테이너), Dify api → Ollama 도달성 검증. macOS 는 실패 시 `ensure_ollama_host_binding` 으로 바인딩 교정 후 1회 재시도 | ✅ 자동 |
@@ -681,6 +681,41 @@ ollama list
 ollama pull gemma4:e2b
 ollama pull gemma3:4b  # 선택
 ```
+
+#### 5.2.1 ⚠️ WSL2 환경에서의 Ollama — Windows GUI 앱만 사용
+
+> **절대 WSL 내부에 Linux Ollama 를 설치하지 마십시오.**
+> WSL2 + Windows Ollama GUI 조합에서 Linux ollama 를 같이 깔면 두 인스턴스가 각자 다른 모델 저장소 + GPU/RAM 경쟁으로 빌드 디버깅이 매우 혼란해집니다 (실제 사고 사례: 한 쪽은 `gemma4:e2b` 있고 다른 쪽은 없어서 Dify 호출만 실패하는데 WSL CLI 테스트는 성공하는 현상).
+
+**올바른 설치 절차:**
+
+1. **Windows** 에서 https://ollama.com/download/windows 에서 `OllamaSetup.exe` 다운로드 후 설치
+2. 시작메뉴 → **Ollama** 실행 → 트레이 아이콘 확인
+3. **시스템 환경변수** 에 `OLLAMA_HOST=0.0.0.0` 등록:
+   - 시작메뉴 → `시스템 환경 변수 편집` → 환경 변수 → 시스템 변수 → 새로 만들기
+   - 이름: `OLLAMA_HOST` / 값: `0.0.0.0`
+   - 저장 후 Ollama 트레이 앱 **우클릭 → Quit** → 다시 실행
+   - (이 설정 없으면 Docker 컨테이너가 `host.docker.internal:11434` 로 접근 불가)
+4. **PowerShell** 에서 모델 Pull:
+   ```powershell
+   ollama pull gemma4:e2b
+   ollama list
+   ```
+5. WSL 터미널에서 `./setup.sh` 실행
+
+**WSL 터미널에서 `ollama` 커맨드 쓰고 싶다면:**
+- PATH 에 Windows 설치 경로 추가: `export PATH="/mnt/c/Users/<username>/AppData/Local/Programs/Ollama:$PATH"`
+- 또는 그냥 PowerShell 에서 `ollama pull` 등 실행하는 게 간편
+
+**이미 WSL 내부에 Linux Ollama 가 설치돼 있다면 제거:**
+```bash
+sudo systemctl stop ollama
+sudo systemctl disable ollama
+sudo rm -f /usr/local/bin/ollama /etc/systemd/system/ollama.service
+sudo rm -rf /usr/share/ollama ~/.ollama
+```
+
+setup.sh 는 WSL 환경을 자동 감지해 WSL 내부 Linux Ollama 설치를 **거부**하고, 중복 인스턴스가 있으면 제거를 안내한 뒤 중단합니다.
 
 ### 5.3 컨테이너 Ollama 모드 — 컨테이너 안에서 Pull
 

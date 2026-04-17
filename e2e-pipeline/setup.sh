@@ -152,9 +152,22 @@ json_get() {
 # ─────────────────────────────────────────────────────────────────────────────
 # OS 감지 + 호스트 Ollama 자동 설치
 # ─────────────────────────────────────────────────────────────────────────────
+is_wsl() {
+  # WSL2 식별: kernel osrelease 에 microsoft 포함 또는 WSL_DISTRO_NAME 환경변수 존재.
+  grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && return 0
+  [ -n "${WSL_DISTRO_NAME:-}" ] && return 0
+  return 1
+}
+
 detect_os() {
   case "$(uname -s)" in
-    Linux*)                 echo linux ;;
+    Linux*)
+      if is_wsl; then
+        echo wsl
+      else
+        echo linux
+      fi
+      ;;
     Darwin*)                echo macos ;;
     MINGW*|MSYS*|CYGWIN*)   echo windows ;;
     *)                      echo unknown ;;
@@ -318,6 +331,31 @@ install_host_ollama() {
         warn "  → 바인딩 자동 적용 실패. Phase 3 도달성 검증에서 재시도한다."
       ;;
 
+    wsl)
+      err "================================================================"
+      err "  WSL2 환경에서는 Ollama 를 WSL 내부에 설치하지 않는다."
+      err "  → Windows 호스트의 Ollama 데스크톱 GUI 앱을 사용한다."
+      err "================================================================"
+      err ""
+      err "설치/구성 절차:"
+      err "  1. Windows 에서 https://ollama.com/download/windows 다운로드 후 설치"
+      err "  2. 시작메뉴 → 'Ollama' 실행 (트레이 아이콘 표시 확인)"
+      err "  3. 시스템 환경변수 OLLAMA_HOST=0.0.0.0 등록 후 Ollama 앱 재시작"
+      err "     (Docker 컨테이너에서 host.docker.internal:11434 접근 가능하게)"
+      err "  4. PowerShell 에서:  ollama pull ${OLLAMA_MODEL}"
+      err "  5. WSL 터미널에서 이 setup.sh 재실행"
+      err ""
+      err "WSL 내부에 중복 ollama 가 이미 설치돼 있다면 제거:"
+      err "  sudo systemctl stop ollama"
+      err "  sudo systemctl disable ollama"
+      err "  sudo rm -f /usr/local/bin/ollama /etc/systemd/system/ollama.service"
+      err "  sudo rm -rf /usr/share/ollama ~/.ollama"
+      err ""
+      err "이유: WSL Linux ollama 와 Windows Ollama 가 각자 다른 모델 저장소 +"
+      err "       GPU/RAM 경쟁 → 디버깅 혼란 + 리소스 낭비. GUIDE.md §WSL 참조."
+      return 1
+      ;;
+
     linux)
       log "공식 설치 스크립트 실행 (sudo 필요)..."
       if run bash -c 'curl -fsSL https://ollama.com/install.sh | sh'; then
@@ -478,7 +516,51 @@ esac
 log "Ollama 프로파일 검증..."
 case "$OLLAMA_PROFILE" in
   host)
-    if command -v ollama >/dev/null 2>&1; then
+    # WSL2 전용 특수 처리 — Windows Ollama 사용 강제.
+    # WSL 안에 Linux Ollama 가 있으면 중복 인스턴스 경고 후 중단.
+    if [ "$_OS_DETECTED" = "wsl" ]; then
+      # 중복 감지: /usr/local/bin/ollama 가 있거나 systemd 서비스가 있으면 중복
+      if [ -x /usr/local/bin/ollama ] || [ -f /etc/systemd/system/ollama.service ]; then
+        err "================================================================"
+        err "  WSL 내부에 Linux Ollama 가 설치되어 있음 — 중복 인스턴스!"
+        err "================================================================"
+        err "  감지: $(ls -la /usr/local/bin/ollama 2>/dev/null || true)"
+        err "         $(ls -la /etc/systemd/system/ollama.service 2>/dev/null || true)"
+        err ""
+        err "이 프로젝트는 Windows Ollama 데스크톱 앱만 사용한다."
+        err "WSL 내부 ollama 는 Dify 가 접근하지도 않고, 모델 저장소 중복 +"
+        err "GPU/RAM 경쟁을 일으킨다. 제거 절차:"
+        err "  sudo systemctl stop ollama"
+        err "  sudo systemctl disable ollama"
+        err "  sudo rm -f /usr/local/bin/ollama /etc/systemd/system/ollama.service"
+        err "  sudo rm -rf /usr/share/ollama ~/.ollama"
+        err ""
+        err "제거 후 이 setup.sh 를 재실행한다."
+        err "자세한 내용: GUIDE.md §6.1 Ollama 설치 (WSL2 특수 절차)"
+        exit 1
+      fi
+      # Windows Ollama 가 Docker 에서 보이는지 검증 — host.docker.internal:11434
+      # Dify 컨테이너는 아직 없을 수 있으므로, WSL 에서 우회 경로로 확인:
+      # Windows 호스트 IP 에 11434 포트가 들려있는지 PowerShell 로 체크
+      log "  WSL 감지 — Windows Ollama GUI 앱 유효성 검증..."
+      if powershell.exe -NoProfile -Command \
+          '(Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count' 2>/dev/null | grep -qE '[1-9]'; then
+        ok "Windows 호스트 11434 포트 리스닝 중 (Ollama GUI 앱 정상)"
+      else
+        err "================================================================"
+        err "  Windows Ollama 앱이 실행되지 않음 (11434 포트 미리스닝)"
+        err "================================================================"
+        err "  1. https://ollama.com/download/windows 설치 (안 돼 있으면)"
+        err "  2. 시작메뉴 → 'Ollama' 실행 → 트레이 아이콘 확인"
+        err "  3. 시스템 환경변수 OLLAMA_HOST=0.0.0.0 등록 후 Ollama 앱 재시작"
+        err "  4. PowerShell 에서:  ollama pull ${OLLAMA_MODEL}"
+        err "  5. 이 setup.sh 재실행"
+        err ""
+        err "자세한 내용: GUIDE.md §6.1 Ollama 설치 (WSL2 특수 절차)"
+        exit 1
+      fi
+      ok "WSL 환경 검증 완료 — Windows Ollama 사용"
+    elif command -v ollama >/dev/null 2>&1; then
       ok "호스트 ollama CLI 발견: $(ollama --version 2>/dev/null | head -n1 || echo 'version unknown')"
     else
       warn "호스트 ollama CLI 미발견 — 자동 설치 시도 (OS: $(detect_os))"
@@ -660,7 +742,23 @@ if [ "$OLLAMA_PROFILE" = "container" ]; then
 
 else
   log "호스트 Ollama 모드 — 호스트 ollama CLI 사용 (Phase 0 에서 설치 보장 완료)"
-  if ! command -v ollama >/dev/null 2>&1; then
+  if [ "$_OS_DETECTED" = "wsl" ]; then
+    # WSL: Windows Ollama 에 직접 API 호출로 모델 확인 (WSL 안에서는 ollama CLI 없음)
+    log "  WSL 감지 — Windows Ollama API 로 모델 확인 (host.docker.internal:11434)"
+    if docker exec e2e-dify-api sh -c "curl -s http://host.docker.internal:11434/api/tags" 2>/dev/null \
+        | python3 -c "import json,sys; sys.exit(0 if any(m['name']=='$OLLAMA_MODEL' for m in json.load(sys.stdin).get('models',[])) else 1)" 2>/dev/null; then
+      ok "$OLLAMA_MODEL 이미 설치되어 있음 (Windows Ollama)"
+    else
+      err "================================================================"
+      err "  Windows Ollama 에 $OLLAMA_MODEL 모델이 없음"
+      err "================================================================"
+      err "  WSL 환경에서는 setup.sh 가 모델을 자동 pull 하지 않는다."
+      err "  PowerShell 에서 직접 실행:"
+      err "    ollama pull $OLLAMA_MODEL"
+      err "  완료 후 setup.sh 재실행."
+      exit 1
+    fi
+  elif ! command -v ollama >/dev/null 2>&1; then
     err "호스트 ollama 명령을 찾을 수 없음. Phase 0 설치 로직이 제대로 통과하지 않았다 — 재실행 필요."
     exit 1
   elif ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$OLLAMA_MODEL"; then
