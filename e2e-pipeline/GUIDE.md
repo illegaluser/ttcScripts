@@ -1831,6 +1831,8 @@ python3 -c "from playwright.sync_api import sync_playwright; print('OK')"
 
 ## 9. E2E 테스트 실행
 
+> **💡 검증용 회귀 시나리오 15개**: [docs/test-suite.md](docs/test-suite.md) 참조. 9대 DSL 을 모두 커버하는 `TARGET_URL + SRS_TEXT` 복붙셋 (Naver / DuckDuckGo / Wikipedia / the-internet.herokuapp.com / GitHub 등). 스모크 셋 5개 먼저 돌려보고 전체로 확장 권장.
+
 ### 9.1 파라미터 안내
 
 | 파라미터 | 설명 |
@@ -2484,6 +2486,27 @@ for p in d['plugins']:
    실행 엔진이 fallback_targets 다 실패해도 alternatives 를 자동 시도.
 
 치유 우선순위: `target → fallback_targets → action_alternatives → LocalHealer → Dify heal → press 휴리스틱`.
+
+---
+
+### PASS 5/5 인데 실제로는 엉뚱한 페이지 — 휴리스틱 false positive (E-1 ~ E-4)
+
+**증상:** 로그에는 모든 스텝이 PASS/HEALED 지만 `final_state.png` 는 목적지가 아닌 페이지(예: 검색결과 대신 홈의 trending 카드). B-1 chrome-error 필터가 `_perform_action.press` 에는 걸렸지만 **그 뒤 press→click 휴리스틱이나 "첫 결과" 휴리스틱 단계에서 다시 chrome-error 새 탭을 "성공"으로 흘려보냄**.
+
+**근본 원인:** 휴리스틱(B, E) 과 `_perform_action.click` / `_perform_action.verify` 가 **"액션 자체 성공 = 의도 성공"** 으로 착각. 실제 navigation 효과(URL 변경 또는 유효 새 탭) 를 확인하지 않아 봇 차단 + overlay 클릭이 false PASS 로 통과.
+
+**해결 (자동, 코드 반영):**
+
+| 지점 | 검증 | 실패 시 |
+|---|---|---|
+| **E-1** `_execute_step` press→click B 휴리스틱 | click 전후 URL 변경 또는 유효 새 탭 (desc 에 "검색\|search") | 다음 후보 시도, 전부 실패 시 FAIL |
+| **E-2** `_perform_action.verify` | desc 가 "검색결과 (목록/존재/표시)" 의도면 현재 URL 이 검색결과 패턴 (`q=`, `p=`, `/search/`, `/results/` 등) 매치 | `AssertionError` → 전체 FAIL |
+| **E-3** `_perform_action.click` | desc 가 "첫 결과/링크/항목" 의도면 click 후 navigation 효과 필수 | `RuntimeError` → fallback chain 진행 |
+| **E-4** `_execute_step` "첫 결과" E 휴리스틱 | 같은 — URL 변경 또는 유효 새 탭 | 다음 후보 시도, 전부 실패 시 FAIL |
+
+공통 헬퍼 [`_had_navigation_effect`](../zero_touch_qa/executor.py) / [`_wait_for_navigation_effect`](../zero_touch_qa/executor.py) 가 네비게이션 효과를 폴링 3초 동안 확인. chrome-error/about:blank 새 탭은 효과 없음으로 간주.
+
+**결과:** 봇 차단 사이트(Yahoo 등) 에서 검색이 실제로 안 됐으면 Step 3 press 가 FAIL → break → 빌드가 FAILURE 로 정직하게 끝남.
 
 ---
 

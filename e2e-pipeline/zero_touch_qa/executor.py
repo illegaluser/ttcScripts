@@ -332,13 +332,28 @@ class QAExecutor:
         # ── [치유 5단계] press(Enter/Return) 휴리스틱 — 검색버튼 click (B) ──
         # 사람이라면 엔터 안 먹을 때 검색버튼을 누른다. 이 마지막 안전망이
         # Naver/Google 류 검색 페이지에서 가장 자주 PASS 를 살린다.
+        #
+        # E-1: click 자체 성공만으로는 불충분. "검색/search" 의도 맥락이면
+        # click 후 navigation 효과(URL 변경 or 유효 새 탭) 까지 확인해서
+        # chrome-error 새 탭 같은 봇 차단 산물을 false PASS 로 흘려보내지 않는다.
         if action == "press" and str(step.get("value", "")).lower() in ("enter", "return"):
+            needs_nav_check = bool(re.search(r"검색|search", desc, re.IGNORECASE))
             for sel in self._SEARCH_BUTTON_CANDIDATES:
                 try:
                     btn = page.locator(sel)
                     if btn.count() == 0:
                         continue
+                    before_url = page.url
+                    before_pages_count = len(page.context.pages)
                     btn.first.click(timeout=3000)
+                    if needs_nav_check and not self._wait_for_navigation_effect(
+                        page, before_url, before_pages_count
+                    ):
+                        log.warning(
+                            "[Step %s] press→click 후 유효한 navigation 없음 — 다음 후보 시도 (sel=%s)",
+                            step_id, sel,
+                        )
+                        continue
                     ss = self._screenshot(page, artifacts, step_id, "healed")
                     log.info("[Step %s] press→click 휴리스틱 성공: %s", step_id, sel)
                     return StepResult(
@@ -353,13 +368,28 @@ class QAExecutor:
         # LLM 의 site-specific selector 추측이 다 빗나가도, "첫 번째 검색결과 링크"
         # 같은 의도가 description 에 있으면 main/article 영역의 첫 visible 링크 시도.
         # Naver/Google/Yahoo 류 검색 결과에서 마지막 안전망 역할.
+        #
+        # E-4: click 자체 성공만으로는 불충분. "첫 결과" click 은 본질적으로
+        # 다른 페이지로의 이동이므로 URL 변경 or 유효 새 탭을 반드시 확인.
+        # Yahoo 홈에서 search form 내부 엉뚱한 링크 매치해 "HEALED" 로 끝나는
+        # false positive (build #21 trending 이동) 를 차단.
         if action == "click" and self._matches_first_result_intent(desc):
             for sel in self._FIRST_RESULT_CANDIDATES:
                 try:
                     loc = page.locator(sel)
                     if loc.count() == 0:
                         continue
+                    before_url = page.url
+                    before_pages_count = len(page.context.pages)
                     loc.first.click(timeout=3000)
+                    if not self._wait_for_navigation_effect(
+                        page, before_url, before_pages_count
+                    ):
+                        log.warning(
+                            "[Step %s] '첫 결과' 후보 click 후 navigation 없음 — 다음 후보 시도 (sel=%s)",
+                            step_id, sel,
+                        )
+                        continue
                     ss = self._screenshot(page, artifacts, step_id, "healed")
                     log.info("[Step %s] '첫 결과' 휴리스틱 성공: %s", step_id, sel)
                     return StepResult(
@@ -488,6 +518,55 @@ class QAExecutor:
     def _matches_search_results_intent(desc: str) -> bool:
         """description 에서 '검색결과 존재 확인' 의도를 감지한다."""
         return bool(QAExecutor._SEARCH_RESULTS_RE.search(desc or ""))
+
+    # E-2: 검색결과 페이지 URL 패턴. 쿼리스트링에 검색어 key, 또는 /search/ /results/ /find/ path.
+    # 이 패턴에 매치 안 되면 "검색 결과 페이지에 있다" 고 간주할 수 없다.
+    _SEARCH_RESULT_URL_RE = re.compile(
+        r"[?&](q|p|query|search|keyword|wd|k|term|s|searchterm)=|"
+        r"/search[/?]|/results?[/?]|/find[/?]|/web[/?]|/results?$|/search$",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _had_navigation_effect(
+        page: Page, before_url: str, before_pages_count: int
+    ) -> bool:
+        """click/press 후 실제로 navigation 효과가 있었는지 판정.
+
+        효과 = (a) 현재 페이지 URL 이 변경되었거나, (b) 유효한 새 탭이 열렸다.
+        chrome-error:// / about:blank / data: 새 탭은 봇 차단 산물이므로 효과 없음으로 간주.
+
+        Args:
+            page: 현재 활성 Playwright Page.
+            before_url: 액션 직전의 page.url.
+            before_pages_count: 액션 직전의 context.pages 길이.
+
+        Returns:
+            유효한 네비게이션 효과가 있었으면 True.
+        """
+        if (page.url or "") != (before_url or ""):
+            return True
+        pages = page.context.pages
+        if len(pages) <= before_pages_count:
+            return False
+        for pg in pages[before_pages_count:]:
+            url = pg.url or ""
+            if not url.startswith(("chrome-error://", "about:blank", "data:text/html")):
+                return True
+        return False
+
+    @staticmethod
+    def _wait_for_navigation_effect(
+        page: Page, before_url: str, before_pages_count: int,
+        deadline_sec: float = 3.0,
+    ) -> bool:
+        """polling 으로 최대 ``deadline_sec`` 초까지 navigation 효과를 대기한다."""
+        deadline = time.time() + deadline_sec
+        while time.time() < deadline:
+            if QAExecutor._had_navigation_effect(page, before_url, before_pages_count):
+                return True
+            page.wait_for_timeout(100)
+        return QAExecutor._had_navigation_effect(page, before_url, before_pages_count)
 
     # J: '검색결과 존재 확인' 의도일 때 visible 인지 체크할 후보 컨테이너.
     # 하나라도 visible 이면 검색결과가 있다고 간주.
@@ -629,7 +708,22 @@ class QAExecutor:
                     log.info("[Click] href=%r text=%r", target_href, target_text)
             except Exception:
                 pass
+            # E-3: "첫 결과/링크/항목" click 은 **반드시** navigation 효과가 있어야 한다.
+            # Yahoo 홈의 stretched-box overlay 처럼 click 자체는 성공해도 이동이 안 되는
+            # false positive 를 막는다. 효과 없으면 RuntimeError → fallback chain 진행.
+            desc = str(step.get("description", ""))
+            need_nav = QAExecutor._matches_first_result_intent(desc)
+            before_url = page.url if need_nav else ""
+            before_pages_count = len(page.context.pages) if need_nav else 0
             locator.click(timeout=10000)
+            if need_nav and not QAExecutor._wait_for_navigation_effect(
+                page, before_url, before_pages_count
+            ):
+                raise RuntimeError(
+                    f"'첫 결과' click 후 navigation 없음 — "
+                    f"URL 유지({before_url}), 유효한 새 탭 없음. "
+                    f"링크가 overlay 에 가려졌거나 봇 차단 가능성."
+                )
         elif action == "fill":
             locator.fill(str(value))
         elif action == "press":
@@ -681,6 +775,18 @@ class QAExecutor:
         elif action == "hover":
             locator.hover()
         elif action == "verify":
+            # E-2: "검색결과 (목록/존재/표시) 확인" 의도 verify 는 **URL 자체가
+            # 검색결과 페이지** 여야 한다. 봇 차단으로 홈에 머문 상태에서
+            # 홈의 임의 요소(main/article)가 visible 이라고 false PASS 내는 것 차단.
+            desc = str(step.get("description", ""))
+            if QAExecutor._matches_search_results_intent(desc):
+                current_url = page.url or ""
+                if not QAExecutor._SEARCH_RESULT_URL_RE.search(current_url):
+                    raise AssertionError(
+                        f"검색결과 verify 실패 — 현재 URL 이 검색결과 페이지가 아님: "
+                        f"{current_url} "
+                        f"(검색 제출이 실제로 이뤄졌는지 이전 스텝 확인 필요)"
+                    )
             if not value:
                 assert locator.is_visible(), (
                     f"요소가 보이지 않습니다: {step.get('target')}"
