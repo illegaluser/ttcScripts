@@ -255,11 +255,23 @@ ensure_ollama_host_binding() {
     return 1
   fi
 
-  if command -v brew >/dev/null 2>&1; then
+  # 설치 방식 감지 후 적절한 재시작 경로 선택.
+  # brew formula vs /Applications/Ollama.app 은 서로 다른 재시작 절차가 필요하다.
+  if command -v brew >/dev/null 2>&1 \
+      && brew services list 2>/dev/null | awk 'NR>1 && $1=="ollama"{found=1} END{exit !found}'; then
     log "brew services restart ollama (새 환경변수로 재기동)..."
     try brew services restart ollama
+  elif [ -d "/Applications/Ollama.app" ]; then
+    log "Ollama.app 재시작 (새 환경변수 반영)..."
+    try osascript -e 'quit app "Ollama"'
+    # app 이 실제로 종료되길 대기 (최대 10초)
+    local _q=0
+    while pgrep -x Ollama >/dev/null 2>&1 && [ $_q -lt 10 ]; do
+      sleep 1; _q=$((_q + 1))
+    done
+    try open -a Ollama
   else
-    warn "brew 명령 없음 — Ollama 서비스 재기동 건너뜀"
+    warn "Ollama 설치 방식을 감지하지 못함 — 수동으로 Ollama 재시작 필요"
   fi
 
   # 2) 재검증 (최대 20초)
