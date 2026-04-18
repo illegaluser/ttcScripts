@@ -8,7 +8,7 @@
 #   - 기본값은 호스트 설치 Ollama 사용 (host.docker.internal:11434)
 #   - Vector store 는 Qdrant 로 고정 (upstream 기본 weaviate 대신)
 #   - 이름 있는 볼륨 사용 (upstream 바인드 마운트 대신, Windows Docker Desktop 호환)
-#   - 포트 충돌 회피: Dify 콘솔 18081, Jenkins 18080
+#   - 포트 충돌 회피: Dify 콘솔 18081, Jenkins UI 18080, Jenkins JNLP 50001
 #
 # 사용법:
 #   호스트 Ollama 모드(기본):
@@ -191,7 +191,7 @@ services:
     user: root
     ports:
       - "18080:8080"
-      - "50000:50000"
+      - "50001:50001"
     volumes:
       - e2e-jenkins-home:/var/jenkins_home
       - .:/var/jenkins_home/scripts
@@ -199,6 +199,10 @@ services:
       - e2e-net
     environment:
       TZ: Asia/Seoul
+      # JNLP 에이전트 포트 — 루트 리포의 Jenkins(50000 기본)와 분리하기 위해
+      # 50001 로 고정. Jenkins 가 발급하는 slave-agent.jnlp 파일이 이 값을 그대로
+      # advertise 하므로 에이전트/setup.sh 측 추가 변경은 불필요.
+      JENKINS_SLAVE_AGENT_PORT: "50001"
 
   # ============================================================
   # init_permissions — 볼륨 소유권 초기화 (upstream 패턴 반영)
