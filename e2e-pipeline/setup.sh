@@ -263,7 +263,9 @@ ensure_ollama_host_binding() {
     try brew services restart ollama
   elif [ -d "/Applications/Ollama.app" ]; then
     log "Ollama.app 재시작 (새 환경변수 반영)..."
-    try osascript -e 'quit app "Ollama"'
+    # osascript 는 macOS Automation 권한 프롬프트를 띄워 취소될 수 있어
+    # 권한 요구가 없는 pkill (SIGTERM) 로 종료 → open -a 로 재기동한다.
+    try pkill -x Ollama
     # app 이 실제로 종료되길 대기 (최대 10초)
     local _q=0
     while pgrep -x Ollama >/dev/null 2>&1 && [ $_q -lt 10 ]; do
