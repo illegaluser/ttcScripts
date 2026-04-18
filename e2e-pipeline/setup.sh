@@ -1071,10 +1071,14 @@ fi
 if [ "$DIFY_LOGGED_IN" = "true" ]; then
   # dify-chatflow.yaml 의 app.name 추출 (DSL 단일 진실 공급원)
   # app: 블록 바로 아래(2-space 들여쓰기)의 name: 만 뽑는다.
-  APP_NAME=$(python3 - << PYEOF 2>/dev/null
-import re
+  # bash 3.2(macOS 기본)는 $(...) 내부 heredoc 의 quote 를 추적하므로 body 에 있는
+  # single/double quote 가 짝이 안 맞으면 parser 가 EOF 에러로 오해한다.
+  # - quoted terminator(<< 'PYEOF')로 body expansion 차단 + SCRIPT_DIR 은 env 로 전달
+  # - Python 쪽은 .strip('"').strip("'") 로 2단계 분해 — 라인별 quote 쌍이 항상 닫히게
+  APP_NAME=$(SCRIPT_DIR="$SCRIPT_DIR" python3 - << 'PYEOF' 2>/dev/null
+import os, re
 in_app = False
-with open('${SCRIPT_DIR}/dify-chatflow.yaml', encoding='utf-8') as f:
+with open(os.environ['SCRIPT_DIR'] + '/dify-chatflow.yaml', encoding='utf-8') as f:
     for line in f:
         if re.match(r'^app:\s*$', line):
             in_app = True; continue
@@ -1083,7 +1087,7 @@ with open('${SCRIPT_DIR}/dify-chatflow.yaml', encoding='utf-8') as f:
                 break
             m = re.match(r'^  name:\s*(.+?)\s*$', line)
             if m:
-                print(m.group(1).strip('"\''))
+                print(m.group(1).strip('"').strip("'"))
                 break
 PYEOF
 )
