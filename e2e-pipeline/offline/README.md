@@ -767,7 +767,244 @@ PG 마이그레이션이 있으면 Dify api 기동 시 자동 수행 (Alembic).
 
 ---
 
-## 4. 트러블슈팅
+## 4. Ollama 모델 관리
+
+이 이미지는 GUI Ollama (Ollama Desktop) 를 포함하지 않는다. 모델 추가·교체·삭제는 모두 **컨테이너 안의 Ollama 서버(`127.0.0.1:11434`) 와 Dify REST/UI** 로 수행한다. 폐쇄망이라 `ollama pull` 이 외부 레지스트리에 닿지 못하므로, 신규 모델 투입은 **재빌드** 또는 **온라인 머신 → 오프라인 전송** 두 경로뿐이다.
+
+### 4.1 현재 상태 확인
+
+```bash
+# (1) Ollama 데몬에 탑재된 모델 목록 + 크기
+docker exec dscore-qa ollama list
+# NAME             ID              SIZE      MODIFIED
+# gemma4:e4b       abcd1234...     4.1 GB    2 hours ago
+
+# (2) 개별 모델 세부 정보 (context length, params)
+docker exec dscore-qa ollama show gemma4:e4b
+
+# (3) 실제 디스크 사용량 + 저장 위치 (OLLAMA_MODELS=/data/ollama/models)
+docker exec dscore-qa du -sh /data/ollama/models
+
+# (4) Ollama 데몬 상태 / 로그
+docker exec dscore-qa supervisorctl status ollama
+docker exec dscore-qa tail -30 /data/logs/ollama.log
+
+# (5) Dify 의 Ollama 프로바이더에 등록된 모델 목록 (빠른 자가진단)
+docker exec dscore-qa bash -c '
+  curl -sS -b /tmp/dify-cookies.txt \
+    http://127.0.0.1:18081/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models \
+  | python3 -m json.tool | grep -E "\"model\"|\"model_type\""
+'
+```
+
+> **쿠키가 만료됐다면** `/tmp/dify-cookies.txt` 가 비어 있을 수 있다. 이 경우 Dify UI 로그인 확인이 더 빠르다 — `http://<host>:18081` → Settings → Model Provider → Ollama.
+
+### 4.2 시작(기본) 모델 바꾸기 — 재빌드 (깨끗한 방법)
+
+이미지를 처음부터 다른 모델로 만드는 가장 표준적인 방법. 빌드 타임에 `ollama pull` 이 돌아 모델이 이미지에 seed 로 박힌다.
+
+```bash
+# 온라인 빌드 머신에서
+cd e2e-pipeline
+OLLAMA_MODEL=llama3.1:8b ./offline/build-allinone.sh 2>&1 | tee /tmp/build.log
+```
+
+연쇄적으로 바뀌는 것:
+
+- [Dockerfile.allinone:14-24](Dockerfile.allinone#L14-L24) 의 `ARG OLLAMA_MODEL` → `ollama pull` 대상
+- [provision-apps.sh:44](provision-apps.sh#L44) 의 `OLLAMA_MODEL` → Dify 에 등록되는 모델 id
+- **주의**: [dify-chatflow.yaml](../dify-chatflow.yaml) 의 LLM 노드에는 **모델 id 가 하드코딩**돼 있다. 모델을 바꾸면 chatflow 도 함께 수정해야 하거나, 대안으로 4.5 의 UI 경로로 chatflow 의 모델만 재선택한다.
+
+**사전 점검 — 모델이 Ollama 레지스트리에 실제 존재하는지**:
+
+```bash
+# 빌드 시작 전에 온라인 머신에서 확인 (빌드 중 pull 실패로 40GB 폐기되는 것 방지)
+docker run --rm ollama/ollama:latest bash -lc '
+  ollama serve &>/dev/null & sleep 2
+  ollama pull llama3.1:8b && echo OK || echo FAIL
+'
+```
+
+**디스크·메모리 가이드**:
+
+| 모델 | 크기 (blob) | 실행 시 RAM | 용도 |
+| ---- | --------- | --------- | ---- |
+| `gemma4:e4b` | ~4GB | 6-8GB | 기본 (빠름, 저사양) |
+| `llama3.1:8b` | ~4.7GB | 8-10GB | 품질↑ |
+| `qwen2.5:7b` | ~4.4GB | 8-10GB | 다국어 강세 |
+| `llama3.1:70b` | ~40GB | 80GB+ | 고사양 전용 — **폐쇄망 16GB RAM 기준 불가** |
+
+### 4.3 런타임에 모델 추가 투입 — 오프라인 전송
+
+이미 운영 중인 컨테이너에 신규 모델을 **재빌드 없이** 더하는 방법. 재빌드가 부담스러운 경우에만 쓴다.
+
+**(1) 온라인 머신에서 모델을 pull 하고 blob/manifest 를 아카이브**
+
+```bash
+# 임시 디렉토리에 ollama 데이터만 모으기 — 전체 이미지 빌드 불필요
+WORK=$(mktemp -d)
+docker run --rm -v "$WORK":/root/.ollama ollama/ollama:latest bash -lc '
+  ollama serve &>/dev/null & sleep 2
+  ollama pull llama3.1:8b
+'
+ls "$WORK/models"   # blobs/, manifests/ 가 있으면 정상
+
+# models 디렉토리만 tar — 약 4-5GB
+tar czf llama3.1-8b.ollama.tar.gz -C "$WORK" models
+rm -rf "$WORK"
+
+# sha256 메모
+sha256sum llama3.1-8b.ollama.tar.gz
+```
+
+**(2) tar 를 폐쇄망 서버로 이동 (USB/scp/사내망)**
+
+**(3) 폐쇄망에서 컨테이너 내부에 푼다**
+
+```bash
+# 무결성 검증
+sha256sum llama3.1-8b.ollama.tar.gz
+
+# 컨테이너의 /data/ollama 밑에 풀기 (같은 볼륨이므로 host 에서 직접 풀어도 됨)
+docker cp llama3.1-8b.ollama.tar.gz dscore-qa:/tmp/
+docker exec dscore-qa bash -c '
+  cd /data/ollama
+  tar xzf /tmp/llama3.1-8b.ollama.tar.gz   # models/ 에 blobs/manifests 병합
+  chown -R root:root /data/ollama/models
+  rm /tmp/llama3.1-8b.ollama.tar.gz
+'
+
+# Ollama 데몬이 새 manifest 를 다시 스캔하도록 재기동 (10초 소요)
+docker exec dscore-qa supervisorctl restart ollama
+sleep 5
+
+# 확인
+docker exec dscore-qa ollama list   # llama3.1:8b 가 보여야 함
+docker exec dscore-qa curl -sS http://127.0.0.1:11434/api/tags | python3 -m json.tool
+```
+
+> **주의**: `docker cp` 는 컨테이너를 멈추지 않지만, tar 풀기 중 Ollama 가 blob 을 lock 할 수 있다. 이 경우 먼저 `supervisorctl stop ollama` → `docker cp` → tar 풀기 → `supervisorctl start ollama` 순서가 안전하다.
+
+### 4.4 Dify 에 신규 모델 등록
+
+Ollama 에 모델이 올라가도 Dify 의 드롭다운에는 자동으로 뜨지 않는다. 공급자 레벨에서 한 번 등록해야 한다.
+
+#### (a) UI 경로 — 권장
+
+1. 브라우저에서 `http://<host>:18081` 로그인
+2. 우상단 계정 아이콘 → **Settings** → **Model Provider**
+3. **Ollama** 카드 → **+ Add Model** 클릭
+4. 입력:
+   - **Model Name**: `llama3.1:8b` (정확히 `ollama list` 에 나온 id)
+   - **Base URL**: `http://127.0.0.1:11434`
+   - **Completion mode**: `Chat`
+   - **Context size**: `8192` (모델별 공식 max 참고)
+   - **Upper bound for max tokens**: `4096`
+   - **Vision / Function call**: 끄기 (gemma/llama/qwen 일반 모델)
+5. **Save** → 드롭다운에서 선택 가능
+
+#### (b) CLI 경로 — 자동화
+
+provision-apps.sh 의 2-3b 단계와 동일한 REST 호출. 컨테이너 내부에서:
+
+```bash
+docker exec dscore-qa bash <<'SH'
+MODEL="llama3.1:8b"
+COOKIES=/tmp/dify-cookies.txt
+
+# 쿠키 재로그인 (만료된 경우)
+curl -sS -c $COOKIES -b $COOKIES \
+  -X POST http://127.0.0.1:18081/console/api/login \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"${DIFY_EMAIL:-admin@example.com}\",\"password\":\"${DIFY_PASSWORD:-Admin1234!}\",\"remember_me\":true}" \
+  > /dev/null
+
+CSRF=$(awk '$6=="csrf_token"{print $7}' $COOKIES | tail -n1)
+
+curl -sS -b $COOKIES -X POST \
+  "http://127.0.0.1:18081/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials" \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" \
+  -d "{
+    \"model\": \"$MODEL\",
+    \"model_type\": \"llm\",
+    \"credentials\": {
+      \"base_url\": \"http://127.0.0.1:11434\",
+      \"mode\": \"chat\",
+      \"context_size\": \"8192\",
+      \"max_tokens\": \"4096\",
+      \"vision_support\": \"false\",
+      \"function_call_support\": \"false\"
+    }
+  }"
+SH
+```
+
+성공 시 HTTP 200/201. 실패는 체크리스트:
+
+- 403 → CSRF 토큰 추출 실패. 쿠키 파일 (`cat /tmp/dify-cookies.txt`) 에 `csrf_token` 라인이 있는지 확인
+- 400 `model not found` → Ollama 에 실제로 그 이름이 없음. `ollama list` 로 이름 재확인
+- 500 `plugin not found` → langgenius/ollama 플러그인 미설치. [체크리스트 #2](#25-프로비저닝-체크리스트) 확인
+
+### 4.5 Chatflow 에서 사용 모델 변경
+
+`DSCORE-ZeroTouch-QA-Docker` Jenkins Pipeline 이 호출하는 Dify App 은 **chatflow DSL 안에 모델 id 가 박혀 있다**. Ollama/Dify 양쪽에 모델을 등록해도 chatflow 는 여전히 예전 모델을 쓰므로 별도 수정 필요.
+
+**UI 경로 — 가장 빠름**:
+
+1. Dify → Apps → `DSCORE-ZeroTouch-QA` 클릭
+2. 좌측 캔버스에서 **LLM 노드** (노드 타이틀: Planner 등) 클릭
+3. 오른쪽 패널의 **Model** 드롭다운에서 새 모델 선택
+4. 캔버스 상단 **Publish** → "Publish as API" 확인
+5. Pipeline 재실행 시 즉시 반영 (API Key 는 변경되지 않으므로 Jenkins Credentials 손댈 필요 없음)
+
+**DSL 직수정 경로 — 재배포용**:
+
+빌드 머신에서 [dify-chatflow.yaml](../dify-chatflow.yaml) 의 LLM 노드를 편집한 뒤 전체 번들을 재빌드하거나, 폐쇄망에서 Dify → Apps → **Import DSL** 로 새 버전 업로드.
+
+### 4.6 모델 삭제 / 디스크 회수
+
+```bash
+# Ollama 에서 제거 (blob GC 포함)
+docker exec dscore-qa ollama rm gemma4:e4b
+
+# 디스크 절감 확인
+docker exec dscore-qa du -sh /data/ollama/models
+```
+
+Dify 공급자 등록 삭제는 UI: Settings → Model Provider → Ollama → 해당 모델 행의 휴지통 아이콘.
+
+> **경고**: chatflow 가 참조 중인 모델을 삭제하면 Pipeline 실행 시 `ollama model "...": not found` 으로 실패한다. 삭제 전 [4.5](#45-chatflow-에서-사용-모델-변경) 로 먼저 교체.
+
+### 4.7 Ollama 런타임 설정 튜닝
+
+대부분의 설정은 Ollama 데몬의 **환경변수** 로 제어한다 ([supervisord.conf:73-75](supervisord.conf#L73-L75)).
+
+| 환경변수 | 기본 | 의미 |
+| ------- | ---- | ---- |
+| `OLLAMA_HOST` | `127.0.0.1:11434` | 바인드 주소. 컨테이너 밖에서 직접 호출하려면 `0.0.0.0:11434` + `-p 11434:11434` 추가 |
+| `OLLAMA_MODELS` | `/data/ollama/models` | 모델 저장소. `/data` 볼륨이므로 변경 비권장 |
+| `OLLAMA_NUM_PARALLEL` | `1` (버전별 다름) | 동시 요청 수 |
+| `OLLAMA_MAX_LOADED_MODELS` | `1` | 메모리에 올릴 모델 수. RAM 여유 있으면 2-3 |
+| `OLLAMA_KEEP_ALIVE` | `5m` | 모델 언로드 지연. `-1` 이면 영구 상주 |
+| `OLLAMA_FLASH_ATTENTION` | 미설정 | `1` 로 설정 시 FA 활성 (지원 모델 한정) |
+
+변경 방법 — [supervisord.conf](supervisord.conf) 의 `[program:ollama]` 블록 편집 후 재빌드, 또는 런타임 응급 패치:
+
+```bash
+# 응급 — 재빌드 없이 적용 (다음 재기동까진 유지)
+docker exec dscore-qa bash -c '
+  sed -i "s|OLLAMA_MODELS=\"/data/ollama/models\"|&,OLLAMA_KEEP_ALIVE=\"-1\",OLLAMA_MAX_LOADED_MODELS=\"2\"|" \
+    /etc/supervisor/supervisord.conf
+  supervisorctl reread && supervisorctl update && supervisorctl restart ollama
+'
+```
+
+Dify 쪽 `context_size` / `max_tokens` 는 [provision-apps.sh:49-50](provision-apps.sh#L49-L50) 의 `OLLAMA_CONTEXT_SIZE`, `OLLAMA_MAX_TOKENS` 환경변수로 — 첫 기동 `docker run` 에 `-e OLLAMA_CONTEXT_SIZE=16384` 형태로 주입하거나, UI (4.4(a)) 에서 해당 모델 행을 열어 수정.
+
+---
+
+## 5. 트러블슈팅
 
 ### 컨테이너가 기동 직후 죽는다
 
@@ -883,7 +1120,7 @@ docker logs dscore-qa | tail -50
 
 ---
 
-## 5. 내부 구조 참고
+## 6. 내부 구조 참고
 
 ### 파일 레이아웃
 ```
