@@ -103,8 +103,47 @@ RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
 # dify-api 이미지는 Python 3.12 + poetry 기반이라 가상환경이 /app 내부에 있을 수 있다.
 # 런타임에 PYTHONPATH 및 entrypoint 를 그대로 호출하면 되므로 추가 pip 는 생략.
 
-# -- Playwright 브라우저 엔진 (Chromium) --
+# -- Playwright 브라우저 엔진 (Chromium) — base 의 python3(=3.13) 에 설치 --
 RUN python3 -m playwright install --with-deps chromium
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dify 서비스 런타임 보강 — pip / playwright 설치 후에 수행해야 한다.
+# (아래 단계가 pip 가 사용하는 /usr/bin/python3.13 과 별도로 /usr/local/bin/python3.12
+#  를 끌어오고 /usr/local/bin/python3 심볼릭을 python3.12 로 덮어쓰기 때문에 순서가 중요.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# -- dify-api 이미지에서 Python 3.12 런타임 끌어오기 --
+# dify-api 의 .venv 는 /usr/local/bin/python3 (=python3.12) 심볼릭에 의존한다.
+# Debian trixie 기본 python3 은 3.13 이라 venv 가 broken. 필요 바이너리·동적 라이브러리·
+# stdlib 를 dify-api-src 에서 그대로 가져온다.
+COPY --from=dify-api-src /usr/local/bin/python3.12         /usr/local/bin/python3.12
+COPY --from=dify-api-src /usr/local/bin/python3.12-config  /usr/local/bin/python3.12-config
+COPY --from=dify-api-src /usr/local/lib/libpython3.12.so.1.0 /usr/local/lib/libpython3.12.so.1.0
+COPY --from=dify-api-src /usr/local/lib/libpython3.so       /usr/local/lib/libpython3.so
+COPY --from=dify-api-src /usr/local/lib/python3.12          /usr/local/lib/python3.12
+RUN ln -sf python3.12 /usr/local/bin/python3 && \
+    ln -sf python3    /usr/local/bin/python && \
+    ln -sf python3.12-config /usr/local/bin/python3-config && \
+    ln -sf libpython3.12.so.1.0 /usr/local/lib/libpython3.12.so && \
+    ldconfig
+
+# -- Node.js 22 LTS (glibc 빌드) — dify-web 실행용 --
+# dify-web 이미지의 node 는 Alpine(musl) 빌드라 Debian(glibc) 기반 allinone 에서
+# 실행 불가. nodejs.org 공식 prebuilt glibc x64 tar 를 받아 /usr/local 에 설치.
+ARG NODE_VERSION=22.22.1
+RUN curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz && \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+      --no-same-owner --wildcards '*/bin/node' '*/include/node' && \
+    rm /tmp/node.tar.xz && \
+    node --version
+
+# -- dify 앱 경로 호환 심볼릭 링크 --
+# dify-api / dify-web 의 entrypoint.sh 가 /app/api, /app/web 을 하드코딩하므로
+# /app/{api,web} 를 /opt/dify-*/ 로 연결해 호환성 확보.
+RUN mkdir -p /app && \
+    ln -sfn /opt/dify-api/api       /app/api && \
+    ln -sfn /opt/dify-web/web       /app/web && \
+    ln -sfn /opt/dify-plugin-daemon /app/plugin_daemon
 
 # -- Jenkins 플러그인 hpi 사전 배치 (build-allinone.sh 가 채움) --
 COPY offline/jenkins-plugins/ /opt/seed/jenkins-plugins/
