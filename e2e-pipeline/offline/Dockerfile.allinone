@@ -75,14 +75,22 @@ COPY --from=ollama-src /bin/ollama  /usr/bin/ollama
 COPY --from=ollama-src /root/.ollama /opt/seed/ollama
 
 # -- Qdrant 바이너리 (공식 릴리스 tar) --
-# 폐쇄망 빌드 머신에서 온라인 필수 단계
+# TARGETARCH 는 buildx 가 `--platform linux/<arch>` 에 맞춰 자동 주입.
+# amd64 → x86_64-unknown-linux-gnu, arm64 → aarch64-unknown-linux-gnu.
 ARG QDRANT_VERSION=v1.8.3
-ARG QDRANT_ARCH=x86_64-unknown-linux-gnu
-RUN curl -fL -o /tmp/qdrant.tar.gz \
-      "https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/qdrant-${QDRANT_ARCH}.tar.gz" && \
-    tar xzf /tmp/qdrant.tar.gz -C /usr/local/bin && \
-    chmod +x /usr/local/bin/qdrant && \
-    rm /tmp/qdrant.tar.gz
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) QDRANT_ARCH=x86_64-unknown-linux-gnu ;; \
+      arm64) QDRANT_ARCH=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fL -o /tmp/qdrant.tar.gz \
+      "https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/qdrant-${QDRANT_ARCH}.tar.gz"; \
+    tar xzf /tmp/qdrant.tar.gz -C /usr/local/bin; \
+    chmod +x /usr/local/bin/qdrant; \
+    rm /tmp/qdrant.tar.gz; \
+    /usr/local/bin/qdrant --version
 
 # -- Dify 서비스 바이너리/애플리케이션 --
 # api/worker 는 동일 이미지(dify-api)에서 MODE 로 동작을 전환한다.
@@ -146,12 +154,19 @@ RUN ln -sf python3.12 /usr/local/bin/python3 && \
 
 # -- Node.js 22 LTS (glibc 빌드) — dify-web 실행용 --
 # dify-web 이미지의 node 는 Alpine(musl) 빌드라 Debian(glibc) 기반 allinone 에서
-# 실행 불가. nodejs.org 공식 prebuilt glibc x64 tar 를 받아 /usr/local 에 설치.
+# 실행 불가. nodejs.org 공식 prebuilt glibc tar 를 받아 /usr/local 에 설치.
+# TARGETARCH (buildx 자동 주입) 에 따라 x64/arm64 중 맞는 tar 를 선택한다.
 ARG NODE_VERSION=22.22.1
-RUN curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz && \
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) NODE_ARCH=x64 ;; \
+      arm64) NODE_ARCH=arm64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz; \
     tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-      --no-same-owner --wildcards '*/bin/node' '*/include/node' && \
-    rm /tmp/node.tar.xz && \
+      --no-same-owner --wildcards '*/bin/node' '*/include/node'; \
+    rm /tmp/node.tar.xz; \
     node --version
 
 # -- dify 앱 경로 호환 심볼릭 링크 --
