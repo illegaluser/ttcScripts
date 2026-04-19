@@ -2,7 +2,7 @@
 # ============================================================================
 # provision-apps.sh — All-in-One 컨테이너 내부 전용 앱 프로비저닝
 #
-# 이 스크립트는 오프라인 단일 이미지(dscore-qa:allinone) 의 entrypoint 에서
+# 이 스크립트는 오프라인 단일 이미지(dscore.ttc.playwright:latest) 의 entrypoint 에서
 # 최초 1회 호출된다. 기존 setup.sh 의 Phase 4 (Dify REST 설정) 와 Phase 5
 # (Jenkins REST Credentials/Job/Node) 에 해당하는 동작을 수행하되, 다음을 전제한다:
 #
@@ -610,10 +610,10 @@ def instance = Jenkins.getInstance()
 def existingNode = instance.getNode('mac-ui-tester')
 def node
 
-// 하이브리드 설계: remoteFS 를 호스트 사용자의 ~/.dscore-qa-agent 기준 절대 경로로.
+// 하이브리드 설계: remoteFS 를 호스트 사용자의 ~/.dscore.ttc.playwright-agent 기준 절대 경로로.
 // mac-agent-setup.sh 가 이 디렉토리를 생성하므로 Node 는 prescriptive 값을 사용.
 // Jenkins master 입장에선 텍스트일 뿐이고 실제 해석은 agent 쪽.
-def REMOTE_FS = System.getenv('MAC_AGENT_WORKDIR') ?: '~/.dscore-qa-agent'
+def REMOTE_FS = System.getenv('MAC_AGENT_WORKDIR') ?: '~/.dscore.ttc.playwright-agent'
 
 if (existingNode != null) {
     node = existingNode

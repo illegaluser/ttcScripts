@@ -14,7 +14,7 @@
 #   3) docker buildx build 로 단일 이미지 제작
 #   4) docker save | gzip 으로 배포용 tar.gz 산출
 #
-# 출력: dscore-qa-allinone-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
+# 출력: dscore.ttc.playwright-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
 #
 # 요구:
 #   - Docker 26+ (buildx 활성), 디스크 20GB+ 여유
@@ -33,7 +33,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 # ── 설정값 ────────────────────────────────────────────────────────────────
-IMAGE_TAG="${IMAGE_TAG:-dscore-qa:allinone}"
+IMAGE_TAG="${IMAGE_TAG:-dscore.ttc.playwright:latest}"
 
 # TARGET_PLATFORM: 호스트 아키텍처를 자동 감지하되, env 로 override 가능.
 # Mac 브랜치의 주된 use case 는 "Mac 에서 빌드해 Mac 에서 실행" 이므로 Apple
@@ -52,7 +52,7 @@ fi
 # 이 값은 docker buildx 가 Dockerfile ARG 로 받아두긴 하지만 실질적 효과는 없음.
 # 실제 런타임 모델 지정은 docker run 의 `-e OLLAMA_MODEL=...` 로 Dify provider 에 등록됨.
 OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
-OUTPUT_TAR="${OUTPUT_TAR:-dscore-qa-allinone-$(date +%Y%m%d-%H%M%S).tar.gz}"
+OUTPUT_TAR="${OUTPUT_TAR:-dscore.ttc.playwright-$(date +%Y%m%d-%H%M%S).tar.gz}"
 
 JENKINS_PLUGINS=(
   workflow-aggregator
@@ -196,7 +196,7 @@ log "  C. Python:  brew install python@3.12   (3.11+)"
 log ""
 log "[이미지 로드 및 컨테이너 기동]"
 log "  docker load -i $OUTPUT_TAR"
-log "  docker run -d --name dscore-qa \\"
+log "  docker run -d --name dscore.ttc.playwright \\"
 log "    -p 18080:18080 -p 18081:18081 -p 50001:50001 \\"
 log "    -v dscore-data:/data \\"
 log "    --add-host host.docker.internal:host-gateway \\"
@@ -206,7 +206,7 @@ log "    --restart unless-stopped \\"
 log "    $IMAGE_TAG"
 log ""
 log "[호스트 agent 연결 — 컨테이너 기동 완료 후]"
-log "  1) docker logs dscore-qa | grep NODE_SECRET        # 64자 hex 값 확인"
+log "  1) docker logs dscore.ttc.playwright | grep NODE_SECRET        # 64자 hex 값 확인"
 log "  2) NODE_SECRET=<위 값> ./offline/mac-agent-setup.sh"
 log "     → JDK/venv/Chromium 설치 + agent 연결. 성공 시 Mac 화면에 headed Chromium"
 log ""

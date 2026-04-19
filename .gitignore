@@ -19,7 +19,7 @@ e2e-pipeline/*.jar
 .DS_Store
 
 # All-in-One 빌드 산출물 (크고 재생성 가능 — 수GB)
-e2e-pipeline/dscore-qa-*.tar.gz
+e2e-pipeline/dscore.ttc.playwright-*.tar.gz
 # build-allinone.sh 가 빌드 시 채우는 중간 산출물 (재빌드 시 재다운로드)
 e2e-pipeline/offline/.plugins.txt
 e2e-pipeline/offline/jenkins-plugin-manager.jar

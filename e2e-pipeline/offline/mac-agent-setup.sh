@@ -2,24 +2,31 @@
 # ============================================================================
 # mac-agent-setup.sh — macOS 호스트에 Jenkins agent + Playwright 환경 구성
 #
-# 역할:
-#   1) JDK 21 존재 확인 (없으면 brew 안내)
-#   2) Python 3.11+ venv 생성 — ~/.dscore-qa-agent/venv
-#   3) Playwright + Chromium 호스트 설치 (headed 모드에서 macOS 화면에 창 뜨도록)
-#   4) Jenkins controller 에서 agent.jar 다운로드
-#   5) 기동 스크립트 생성 + 포그라운드 agent 연결
+# 역할 (7 단계, idempotent):
+#   1) Ollama 데몬 + 모델 확인 (없으면 설치/기동/pull)
+#   2) JDK 21 확인/설치
+#   3) Python 3.11+ 확인/설치
+#   4) venv 생성 + Playwright Chromium 호스트 설치
+#   5) Jenkins Node remoteFS 절대경로 갱신 + workspace venv 사전 링크
+#   6) Jenkins controller 에서 agent.jar 다운로드
+#   7) 기동 스크립트 생성 + 포그라운드 agent 연결
 #
-# 컨테이너 기동 후 entrypoint 로그에 찍히는 NODE_SECRET 을 env 로 넘겨 실행:
+# 기본 실행 (이미 ollama/JDK 21/python 3.11+ 설치된 환경):
 #     NODE_SECRET=<64자> ./offline/mac-agent-setup.sh
+#
+# 의존성 자동 설치 (brew 필요; ollama + 모델 pull, openjdk@21, python@3.12):
+#     NODE_SECRET=<64자> AUTO_INSTALL_DEPS=true ./offline/mac-agent-setup.sh
 #
 # 재실행은 idempotent — 이미 설치된 것은 스킵.
 # ============================================================================
 set -euo pipefail
 
-AGENT_DIR="${MAC_AGENT_WORKDIR:-$HOME/.dscore-qa-agent}"
+AGENT_DIR="${MAC_AGENT_WORKDIR:-$HOME/.dscore.ttc.playwright-agent}"
 JENKINS_URL="${JENKINS_URL:-http://localhost:18080}"
 AGENT_NAME="${AGENT_NAME:-mac-ui-tester}"
 PY_VERSION_MIN="${PY_VERSION_MIN:-3.11}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
+AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-false}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"     # e2e-pipeline/
@@ -39,7 +46,7 @@ if [ -z "${NODE_SECRET:-}" ]; then
     NODE_SECRET=abcdef0123... ./offline/mac-agent-setup.sh
 
   또는 docker exec 로 직접 추출:
-    NODE_SECRET=$(docker exec dscore-qa curl -sS -u admin:password \
+    NODE_SECRET=$(docker exec dscore.ttc.playwright curl -sS -u admin:password \
       http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp \
       | sed -n 's/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p' | head -n1)
     NODE_SECRET=$NODE_SECRET ./offline/mac-agent-setup.sh
@@ -49,42 +56,94 @@ fi
 
 command -v curl >/dev/null || err "curl 필요"
 
+# AUTO_INSTALL_DEPS=true 일 때는 brew 가 반드시 있어야 함.
+if [ "$AUTO_INSTALL_DEPS" = "true" ] && ! command -v brew >/dev/null 2>&1; then
+  err "AUTO_INSTALL_DEPS=true 지만 Homebrew 미설치. https://brew.sh 설치 후 재시도."
+fi
+
 log "작업 디렉토리: $AGENT_DIR"
+log "AUTO_INSTALL_DEPS=$AUTO_INSTALL_DEPS  OLLAMA_MODEL=$OLLAMA_MODEL"
 mkdir -p "$AGENT_DIR"
 
-# ── 1. JDK 21 확인 (fail-fast) ──────────────────────────────────────────────
+# ── 1. Ollama 데몬 + 모델 ──────────────────────────────────────────────────
+log "[1/7] Ollama 데몬 + 모델($OLLAMA_MODEL) 확인"
+
+if ! command -v ollama >/dev/null 2>&1; then
+  if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
+    log "  ollama 미설치 — brew install ollama"
+    brew install ollama
+  else
+    err "ollama 미설치. 'brew install ollama' 실행 (또는 AUTO_INSTALL_DEPS=true 재실행)"
+  fi
+fi
+
+# 데몬 기동 여부 — API ping 으로 최종 판정. brew 로 설치된 경우 services start 시도.
+if ! curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    log "  ollama 데몬 미기동 — brew services start ollama"
+    brew services start ollama >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+  fi
+  curl -fsS --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 \
+    || err "ollama 데몬 기동 실패. 'brew services start ollama' 또는 Ollama.app 수동 실행 확인."
+fi
+log "  데몬 OK — http://127.0.0.1:11434"
+
+# 모델 존재 여부 — ollama list 의 NAME 컬럼(첫 필드) 정확 일치
+if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qxF "$OLLAMA_MODEL"; then
+  log "  모델 $OLLAMA_MODEL 이미 존재 — 스킵"
+else
+  if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
+    log "  모델 $OLLAMA_MODEL 미존재 — ollama pull (4GB 내외, 1-3분)"
+    ollama pull "$OLLAMA_MODEL"
+  else
+    err "모델 $OLLAMA_MODEL 없음. 'ollama pull $OLLAMA_MODEL' 실행 (또는 AUTO_INSTALL_DEPS=true)"
+  fi
+fi
+
+# ── 2. JDK 21 확인/설치 ────────────────────────────────────────────────────
 # Jenkins 2.479+ 및 remoting 3355.v 는 Java 21 로 컴파일된 bytecode 를 에이전트에
 # 다운로드하므로, agent 쪽 JDK 가 21 미만이면 연결 직후 UnsupportedClassVersionError
 # 로 offline 상태에 머문다. 따라서 fail-fast 로 처리.
-log "[1/5] JDK 21 확인 (fail-fast — 21 미만이면 중단)"
+log "[2/7] JDK 21 확인"
 
-# 자동 탐지: /opt/homebrew/opt/openjdk@21 우선 → /usr/libexec/java_home -v21 → 시스템 java
-JAVA_BIN=""
-for CAND in \
-    "/opt/homebrew/opt/openjdk@21/bin/java" \
-    "/usr/local/opt/openjdk@21/bin/java" \
-    "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home/bin/java" \
-  ; do
-  if [ -x "$CAND" ]; then JAVA_BIN="$CAND"; break; fi
-done
-if [ -z "$JAVA_BIN" ]; then
+detect_java21() {
+  local cand home21
+  for cand in \
+      "/opt/homebrew/opt/openjdk@21/bin/java" \
+      "/usr/local/opt/openjdk@21/bin/java" \
+      "/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home/bin/java" \
+    ; do
+    if [ -x "$cand" ]; then echo "$cand"; return 0; fi
+  done
   # java_home 은 요구 버전 없을 때 낮은 버전으로 fallback 하므로 엄격히 체크
-  HOME21=$(/usr/libexec/java_home -v 21 2>/dev/null || true)
-  if [ -n "$HOME21" ] && [ -x "$HOME21/bin/java" ]; then
-    if "$HOME21/bin/java" -version 2>&1 | head -1 | grep -qE 'version "21'; then
-      JAVA_BIN="$HOME21/bin/java"
+  home21=$(/usr/libexec/java_home -v 21 2>/dev/null || true)
+  if [ -n "$home21" ] && [ -x "$home21/bin/java" ]; then
+    if "$home21/bin/java" -version 2>&1 | head -1 | grep -qE 'version "21'; then
+      echo "$home21/bin/java"; return 0
     fi
   fi
-fi
-if [ -z "$JAVA_BIN" ] && command -v java >/dev/null 2>&1; then
-  # 시스템 java 가 21 이면 허용
-  if java -version 2>&1 | head -1 | grep -qE 'version "21'; then
-    JAVA_BIN="$(command -v java)"
+  if command -v java >/dev/null 2>&1 && java -version 2>&1 | head -1 | grep -qE 'version "21'; then
+    command -v java
+    return 0
   fi
-fi
+  return 1
+}
 
+JAVA_BIN="$(detect_java21 || true)"
 if [ -z "$JAVA_BIN" ]; then
-  cat >&2 <<'EOT'
+  if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
+    log "  JDK 21 미설치 — brew install openjdk@21 (formula, sudo 불요)"
+    brew install openjdk@21
+    JAVA_BIN="$(detect_java21 || true)"
+    [ -z "$JAVA_BIN" ] && err "openjdk@21 설치 후에도 JDK 21 바이너리 탐색 실패"
+  else
+    cat >&2 <<'EOT'
 [mac-agent-setup] ERROR: JDK 21 이 설치되지 않았습니다.
 
 Jenkins 2.479+ (현재 이미지) 는 Java 21 bytecode 를 에이전트에 전송하므로
@@ -95,57 +154,105 @@ JDK 21 미만은 UnsupportedClassVersionError 로 즉시 연결 실패합니다.
   # 또는
   brew install --cask temurin@21              # sudo 필요, GUI 메뉴에서 JDK 노출
 
-설치 후 이 스크립트 재실행.
+자동 설치 (이 스크립트가 brew install 수행):
+  AUTO_INSTALL_DEPS=true NODE_SECRET=... ./offline/mac-agent-setup.sh
 EOT
-  exit 2
+    exit 2
+  fi
 fi
 export JAVA_BIN
 log "  OK: $JAVA_BIN"
 log "  $("$JAVA_BIN" -version 2>&1 | head -1)"
 
-# ── 2. Python 3.11+ 및 venv ────────────────────────────────────────────────
-log "[2/5] Python $PY_VERSION_MIN+ venv 준비"
-PY_BIN="$(command -v python3 2>/dev/null || true)"
-[ -z "$PY_BIN" ] && err "python3 미설치. 설치: brew install python@3.12"
+# ── 3. Python 3.11+ 확인/설치 ──────────────────────────────────────────────
+log "[3/7] Python $PY_VERSION_MIN+ 확인"
 
+detect_python() {
+  local min_major min_minor cand
+  min_major="${PY_VERSION_MIN%%.*}"
+  min_minor="${PY_VERSION_MIN##*.}"
+  for cand in \
+      "/opt/homebrew/bin/python3.12" \
+      "/opt/homebrew/bin/python3.11" \
+      "/usr/local/bin/python3.12" \
+      "/usr/local/bin/python3.11" \
+      "$(command -v python3.12 2>/dev/null || true)" \
+      "$(command -v python3.11 2>/dev/null || true)" \
+      "$(command -v python3 2>/dev/null || true)" \
+    ; do
+    [ -n "$cand" ] && [ -x "$cand" ] || continue
+    if "$cand" -c "import sys; sys.exit(0 if sys.version_info >= ($min_major,$min_minor) else 1)" 2>/dev/null; then
+      echo "$cand"; return 0
+    fi
+  done
+  return 1
+}
+
+PY_BIN="$(detect_python || true)"
+if [ -z "$PY_BIN" ]; then
+  if [ "$AUTO_INSTALL_DEPS" = "true" ]; then
+    log "  python3 $PY_VERSION_MIN+ 미존재 — brew install python@3.12"
+    brew install python@3.12
+    PY_BIN="$(detect_python || true)"
+    [ -z "$PY_BIN" ] && err "python@3.12 설치 후에도 python3 탐색 실패"
+  else
+    err "python3 $PY_VERSION_MIN+ 필요. 'brew install python@3.12' 실행 (또는 AUTO_INSTALL_DEPS=true)"
+  fi
+fi
 PY_VER=$("$PY_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-log "  시스템 python3: $PY_VER ($PY_BIN)"
+log "  OK: $PY_BIN (python $PY_VER)"
+
+# ── 4. venv + Playwright Chromium (호스트 설치 — headed 모드 핵심) ─────────
+log "[4/7] venv 준비 + Playwright Chromium 호스트 설치 (macOS 네이티브)"
 
 VENV_DIR="$AGENT_DIR/venv"
+# venv 는 pip / playwright / 기타 console_scripts 의 shebang 에 원래 생성 경로가
+# 하드코딩된다 (sys.prefix 는 실행 파일 위치에서 계산되므로 OK 지만 스크립트는 깨짐).
+# AGENT_DIR 가 옮겨졌거나 Python 이 교체된 경우 `pip ...` 호출이 "bad interpreter"
+# 로 실패하면서 set -e 에 의해 스크립트가 조용히 죽는다 → 무결성을 확실히 검증.
+venv_ok() {
+  [ -x "$VENV_DIR/bin/python3" ] || return 1
+  "$VENV_DIR/bin/python3" -c "import sys; assert sys.prefix == '$VENV_DIR'" 2>/dev/null || return 1
+  # pip 모듈이 살아있고 또한 console script 의 shebang 도 유효해야 함
+  "$VENV_DIR/bin/python3" -m pip --version >/dev/null 2>&1 || return 1
+  [ -x "$VENV_DIR/bin/pip" ] && "$VENV_DIR/bin/pip" --version >/dev/null 2>&1
+}
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
   log "  venv 생성: $VENV_DIR"
+  "$PY_BIN" -m venv "$VENV_DIR"
+elif ! venv_ok; then
+  log "  venv 무결성 손상 감지 (이동됐거나 Python 이 교체됨) — 재생성"
+  rm -rf "$VENV_DIR"
   "$PY_BIN" -m venv "$VENV_DIR"
 else
   log "  venv 이미 존재 — 스킵"
 fi
 
-# shellcheck disable=SC1090
-source "$VENV_DIR/bin/activate"
-pip install --upgrade pip >/dev/null 2>&1
+# pip / playwright 를 console script 대신 `python -m` 으로 호출 — shebang 깨짐 회피
+VENV_PY="$VENV_DIR/bin/python3"
+"$VENV_PY" -m pip install --upgrade pip >/dev/null 2>&1
 REQ_PKGS=(requests playwright pillow)
 log "  pip install: ${REQ_PKGS[*]}"
-pip install --quiet "${REQ_PKGS[@]}"
+"$VENV_PY" -m pip install --quiet "${REQ_PKGS[@]}"
 
-# ── 3. Playwright Chromium (호스트 설치 — headed 모드 핵심) ────────────────
-log "[3/5] Playwright Chromium 호스트 설치 (macOS 네이티브)"
 # playwright install 은 ~/Library/Caches/ms-playwright/ 에 Chromium 설치
-if [ -d "$HOME/Library/Caches/ms-playwright/chromium-"* ] 2>/dev/null; then
-  log "  이미 설치된 Chromium 감지 — 스킵"
+if ls -d "$HOME/Library/Caches/ms-playwright/chromium-"* >/dev/null 2>&1; then
+  log "  Chromium 이미 설치됨 — 스킵"
 else
-  python -m playwright install chromium
+  "$VENV_PY" -m playwright install chromium
 fi
 
-# ── 3-1. Jenkins Node remoteFS 절대경로 + workspace venv 심볼릭 링크 사전 준비 ──
+# ── 5. Jenkins Node remoteFS 절대경로 + workspace venv 심볼릭 링크 사전 준비 ──
 #
-# provision-apps.sh 는 Node 생성 시 remoteFS 를 "~/.dscore-qa-agent" 로 설정했지만
+# provision-apps.sh 는 Node 생성 시 remoteFS 를 "~/.dscore.ttc.playwright-agent" 로 설정했지만
 # Jenkins remoting 이 `~` 를 expansion 하지 않아 workspace 가
-# /absolute/.dscore-qa-agent/~/.dscore-qa-agent/workspace 로 꼬인다. 여기서
+# /absolute/.dscore.ttc.playwright-agent/~/.dscore.ttc.playwright-agent/workspace 로 꼬인다. 여기서
 # 호스트 쪽 실제 홈 경로를 알고 있으므로 Groovy 로 Node config.xml 을 절대경로로 갱신.
 #
 # 또한 Pipeline Stage 1 이 ${WORKSPACE}/.qa_home/venv/bin/activate 를 요구하므로,
 # 우리가 만든 AGENT_DIR/venv 를 해당 워크스페이스에 미리 심볼릭 링크.
 ABS_WORKSPACE="$AGENT_DIR/workspace/DSCORE-ZeroTouch-QA-Docker"
-log "[3b] Jenkins Node remoteFS 절대경로 갱신 + workspace venv 사전 링크"
+log "[5/7] Jenkins Node remoteFS 절대경로 갱신 + workspace venv 사전 링크"
 
 # (a) Node remoteFS 를 절대경로로 (Groovy)
 CRUMB=$(curl -sS -u admin:password "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null \
@@ -177,8 +284,8 @@ if [ -d "$VENV_DIR/bin" ]; then
   log "  workspace venv 링크: $ABS_WORKSPACE/.qa_home/venv → $VENV_DIR"
 fi
 
-# ── 4. agent.jar 다운로드 ──────────────────────────────────────────────────
-log "[4/5] Jenkins agent.jar 다운로드: $JENKINS_URL/jnlpJars/agent.jar"
+# ── 6. agent.jar 다운로드 ──────────────────────────────────────────────────
+log "[6/7] Jenkins agent.jar 다운로드: $JENKINS_URL/jnlpJars/agent.jar"
 AGENT_JAR="$AGENT_DIR/agent.jar"
 if [ -f "$AGENT_JAR" ] && [ "${FORCE_AGENT_DOWNLOAD:-false}" != "true" ]; then
   log "  agent.jar 이미 존재 — 스킵 (강제 재다운로드: FORCE_AGENT_DOWNLOAD=true)"
@@ -188,7 +295,39 @@ else
   log "  다운로드 완료: $(du -h "$AGENT_JAR" | cut -f1)"
 fi
 
-# ── 5. 기동 스크립트 생성 + agent 연결 ─────────────────────────────────────
+# ── 7. 기동 스크립트 생성 + agent 연결 ─────────────────────────────────────
+#
+# 이전 run 에서 띄운 java agent.jar 프로세스가 살아있으면 Jenkins controller 가
+# 동일 Node 의 새 연결을 "already connected" 로 거부한다 (ConnectionRefusalException).
+# 재실행 시에는 기존 프로세스를 먼저 정리해야 깨끗하게 재연결된다.
+AGENT_MATCH="agent.jar.*-name $AGENT_NAME"
+EXISTING_AGENT_PIDS=$(pgrep -f "$AGENT_MATCH" 2>/dev/null || true)
+if [ -n "$EXISTING_AGENT_PIDS" ]; then
+  log "기존 agent 프로세스 감지 — 종료 후 재연결 (pid: $(echo "$EXISTING_AGENT_PIDS" | tr '\n' ' '))"
+  # SIGTERM → 최대 5초 대기 → SIGKILL
+  kill $EXISTING_AGENT_PIDS 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    pgrep -f "$AGENT_MATCH" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  if pgrep -f "$AGENT_MATCH" >/dev/null 2>&1; then
+    log "  SIGTERM 무응답 — SIGKILL"
+    pkill -9 -f "$AGENT_MATCH" 2>/dev/null || true
+    sleep 1
+  fi
+  # Jenkins 가 disconnect 를 인지할 때까지 잠깐 대기 (최대 10초).
+  # 인지 전에 새 연결 시도하면 다시 "already connected" 로 거부됨.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS -u admin:password "$JENKINS_URL/computer/$AGENT_NAME/api/json" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('offline') else 1)" 2>/dev/null
+    then
+      break
+    fi
+    sleep 1
+  done
+  log "  기존 프로세스 정리 완료 — Jenkins disconnect 인지됨"
+fi
+
 RUN_SCRIPT="$AGENT_DIR/run-agent.sh"
 cat > "$RUN_SCRIPT" <<RUN_EOF
 #!/usr/bin/env bash
@@ -208,7 +347,7 @@ exec "$JAVA_BIN" -jar agent.jar \\
   -workDir "$AGENT_DIR"
 RUN_EOF
 chmod +x "$RUN_SCRIPT"
-log "[5/5] 기동 스크립트: $RUN_SCRIPT"
+log "[7/7] 기동 스크립트: $RUN_SCRIPT"
 log "  SCRIPTS_HOME=$ROOT_DIR"
 log "  venv=$VENV_DIR"
 log "  JENKINS_URL=$JENKINS_URL"
