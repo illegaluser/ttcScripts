@@ -207,8 +207,10 @@ install_homebrew() {
   fi
 }
 
-# macOS 전용: brew 로 설치한 openjdk@17 을 현재 셸 PATH 에 연결한다.
+# macOS 전용: brew 로 설치한 openjdk@21 을 현재 셸 PATH 에 연결한다.
 # Homebrew 의 openjdk 는 keg-only 라 자동으로 PATH 에 들어가지 않는다.
+# Jenkins 컨트롤러(jenkins/jenkins:lts-jdk21) 와 remoting class 버전(v65)을 맞추려면
+# 에이전트도 Java 21 이 필요하다. 17 로는 UnsupportedClassVersionError.
 # 성공 시 0, 실패 시 1.
 ensure_java_on_path() {
   if ! command -v brew >/dev/null 2>&1; then
@@ -216,16 +218,16 @@ ensure_java_on_path() {
     return 1
   fi
   local jdk_prefix
-  jdk_prefix="$(brew --prefix openjdk@17 2>/dev/null || echo '')"
+  jdk_prefix="$(brew --prefix openjdk@21 2>/dev/null || echo '')"
   if [ -z "$jdk_prefix" ] || [ ! -x "$jdk_prefix/bin/java" ]; then
-    warn "openjdk@17 prefix 를 찾을 수 없음 (brew install 이 실패했거나 경로 변경)"
+    warn "openjdk@21 prefix 를 찾을 수 없음 (brew install 이 실패했거나 경로 변경)"
     return 1
   fi
   export PATH="$jdk_prefix/bin:$PATH"
   ok "현재 셸 PATH 에 $jdk_prefix/bin prepend"
 
   # 맥 전역에서 `java` 가 인식되도록 JavaVirtualMachines 심링크 생성 (없을 때만).
-  local jvm_link="/Library/Java/JavaVirtualMachines/openjdk-17.jdk"
+  local jvm_link="/Library/Java/JavaVirtualMachines/openjdk-21.jdk"
   if [ ! -e "$jvm_link" ] && [ -e "$jdk_prefix/libexec/openjdk.jdk" ]; then
     log "JavaVirtualMachines 심링크 생성 (sudo 비밀번호 프롬프트가 뜰 수 있음)..."
     if run sudo ln -sfn "$jdk_prefix/libexec/openjdk.jdk" "$jvm_link"; then
@@ -407,7 +409,7 @@ log " Dify 계정       : $DIFY_EMAIL  (비밀번호: $([ "$_USING_DEFAULT_DIFY_
 log " Jenkins 계정    : $JENKINS_ADMIN_USER  (비밀번호: $([ "$_USING_DEFAULT_JENKINS_PW" = "1" ] && echo '⚠ 기본값 Admin1234!' || echo '✓ 사용자 지정'))"
 log " DEBUG 모드      : $([ "$DEBUG" = "1" ] && echo ON || echo OFF)"
 if [ "$(detect_os)" = "macos" ]; then
-  log " macOS 자동화    : Homebrew · python3 · openjdk@17 · OLLAMA_HOST 바인딩 자동 설치/설정 (Docker Desktop 만 수동)"
+  log " macOS 자동화    : Homebrew · python3 · openjdk@21 · OLLAMA_HOST 바인딩 자동 설치/설정 (Docker Desktop 만 수동)"
 fi
 
 if [ "$_USING_DEFAULT_DIFY_PW" = "1" ] || [ "$_USING_DEFAULT_JENKINS_PW" = "1" ]; then
@@ -1603,35 +1605,37 @@ phase_end
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 6: 에이전트 머신 사전 요구사항 자동 설치
-#   Java 17, python3-venv, Playwright, agent.jar 를 설치 여부 확인 후 자동 설치
+#   Java 21, python3-venv, Playwright, agent.jar 를 설치 여부 확인 후 자동 설치
 #   (이 스크립트를 돌리는 머신 = 에이전트 머신 전제)
 # ─────────────────────────────────────────────────────────────────────────────
 phase_start "Phase 6: 에이전트 머신 사전 요구사항 설치"
 
 AGENT_OS=$(detect_os)
 
-# ── 6-1. Java (JDK 17) ──────────────────────────────────────────────────────
+# ── 6-1. Java (JDK 21) ──────────────────────────────────────────────────────
+# Jenkins 컨트롤러 이미지가 jenkins/jenkins:lts-jdk21 이므로 에이전트도 Java 21 필수.
+# Java 17 에이전트는 "UnsupportedClassVersionError: class file version 65.0" 로 거부당한다.
 log "6-1. Java 설치 확인..."
 JAVA_OK=false
 if command -v java >/dev/null 2>&1; then
   JAVA_VER=$(java -version 2>&1 | head -n1 | sed -E 's/.*"([0-9]+).*/\1/')
-  if [ "$JAVA_VER" -ge 11 ] 2>/dev/null; then
-    ok "Java $JAVA_VER 감지 — 요구사항 충족 (≥11)"
+  if [ "$JAVA_VER" -ge 21 ] 2>/dev/null; then
+    ok "Java $JAVA_VER 감지 — 요구사항 충족 (≥21)"
     JAVA_OK=true
   else
-    warn "Java $JAVA_VER 감지 — 버전이 낮음 (11 이상 필요). 업그레이드 시도..."
+    warn "Java $JAVA_VER 감지 — 버전이 낮음 (21 이상 필요, 컨트롤러가 jdk21). 업그레이드 시도..."
   fi
 fi
 
 if [ "$JAVA_OK" = "false" ]; then
-  log "Java 17 설치 시도 (OS: $AGENT_OS)..."
+  log "Java 21 설치 시도 (OS: $AGENT_OS)..."
   case "$AGENT_OS" in
     linux)
       if command -v apt-get >/dev/null 2>&1; then
         run sudo apt-get update -qq
-        run sudo apt-get install -y openjdk-17-jre-headless
+        run sudo apt-get install -y openjdk-21-jre-headless
       elif command -v yum >/dev/null 2>&1; then
-        run sudo yum install -y java-17-openjdk-headless
+        run sudo yum install -y java-21-openjdk-headless
       else
         warn "패키지 매니저를 감지할 수 없음. 수동 설치 필요: https://adoptium.net"
       fi
@@ -1642,24 +1646,24 @@ if [ "$JAVA_OK" = "false" ]; then
         install_homebrew || warn "Homebrew 설치 실패. 수동 설치 후 재실행: https://brew.sh"
       fi
       if command -v brew >/dev/null 2>&1; then
-        if run brew install openjdk@17; then
+        if run brew install openjdk@21; then
           # Homebrew 의 openjdk 는 keg-only — 현재 셸 PATH 와 JVM 심링크를 자동 연결
           ensure_java_on_path || warn "Java PATH 자동 설정 실패 — 수동 구성 필요"
         else
-          warn "brew install openjdk@17 실패. 수동 설치 필요."
+          warn "brew install openjdk@21 실패. 수동 설치 필요."
         fi
       fi
       ;;
     windows)
       if command -v winget >/dev/null 2>&1 || command -v winget.exe >/dev/null 2>&1; then
-        run winget install --id EclipseAdoptium.Temurin.17.JDK --silent \
+        run winget install --id EclipseAdoptium.Temurin.21.JDK --silent \
             --accept-package-agreements --accept-source-agreements
       else
         warn "winget 없음. 수동 설치 필요: https://adoptium.net"
       fi
       ;;
     *)
-      warn "OS 감지 실패. Java 17 수동 설치 필요."
+      warn "OS 감지 실패. Java 21 수동 설치 필요."
       ;;
   esac
 
