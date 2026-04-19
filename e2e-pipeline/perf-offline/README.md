@@ -134,7 +134,7 @@ bash install-mac.sh
 |---|---|---|
 | **Apache JMeter** | 5.6.3 | 성능시험 엔진 (GUI + CLI) |
 | **JMeter Plugins Manager** | 1.12 | 플러그인 자동 설치/관리 |
-| **JMeter 플러그인** | (jmeter-plugins.org) | 18개 ID 일괄 설치 — Custom Thread Groups, Throughput Shaping Timer, 그래프 4종, PerfMon, AutoStop, WebSocket Samplers 등 ([§5.6 완전 인벤토리](#56-설치된-jmeter-플러그인-완전-인벤토리), [jmeter-plugin-list.txt](jmeter-plugin-list.txt)) |
+| **JMeter 플러그인** | (jmeter-plugins.org) | 23개 ID 일괄 설치 — Custom Thread Groups, Throughput Shaping Timer, 그래프 4종, PerfMon, AutoStop, WebSocket Samplers 등 ([§5.6 완전 인벤토리](#56-설치된-jmeter-플러그인-완전-인벤토리), [jmeter-plugin-list.txt](jmeter-plugin-list.txt)) |
 | **Feather Wand (jmeter.ai)** | 2.0.4 | LLM 기반 시나리오 자동 생성/분석 어시스턴트 ([§5.8](#58-jmeterai-feather-wand-심화-가이드)) |
 | **Xvfb / fluxbox / x11vnc / noVNC 1.6.0** | — | 브라우저에서 JMeter Swing GUI 사용 |
 | **nginx / supervisord / tini** | — | 프로세스 관리 + 게이트웨이 |
@@ -492,7 +492,7 @@ jmeter.reportgenerator.apdex_tolerated_threshold=1500
 
 이 이미지는 빌드 시 [jmeter-plugin-list.txt](jmeter-plugin-list.txt) 의 ID 를
 [PluginsManagerCMD](https://jmeter-plugins.org/wiki/PluginsManagerAutomated/) 로
-일괄 설치합니다. **설치된 플러그인 ID 총 18개** (Standard Set 메타 포함):
+일괄 설치합니다. **설치된 플러그인 ID 총 23개** (Standard Set 메타 포함):
 
 ```bash
 # 현재 설치 상태 확인
