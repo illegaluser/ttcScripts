@@ -390,12 +390,22 @@ except Exception: print('')
 
     if [ -n "$APP_ID" ]; then
       ok "  Import 완료 — App ID: $APP_ID"
-      # Publish
+      # Publish — Dify 1.13.3 은 빈 JSON body 라도 Content-Type: application/json
+      # 헤더가 없으면 400 bad_request 를 반환한다. 이후 /v1/chat-messages 호출이
+      # "Workflow not published" 로 영구 실패하므로 응답 검증을 명시적으로 수행.
       log "  Workflow publish"
-      curl -sS -b "$DIFY_COOKIES" \
+      PUBLISH_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
           -X POST "${DIFY_URL}/console/api/apps/$APP_ID/workflows/publish" \
-          -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" >/dev/null 2>&1 || true
-      ok "  Publish 요청 전송"
+          -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "{}" 2>&1 || echo "HTTP:000")
+      debug "publish response: $PUBLISH_RESP"
+      if echo "$PUBLISH_RESP" | grep -qE 'HTTP:(200|201)'; then
+        ok "  Publish 성공"
+      else
+        warn "  Publish 실패: $PUBLISH_RESP"
+        warn "  → 이 상태에서 /v1/chat-messages 호출은 'Workflow not published' 로 실패한다."
+      fi
 
       # API Key 발급
       log "  API Key 발급"
