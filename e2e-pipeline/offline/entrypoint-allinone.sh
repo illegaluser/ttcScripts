@@ -77,14 +77,18 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 2. symlink — 서비스가 기대하는 경로를 /data 로 연결
+# 2. 경로 리다이렉트 — 모두 환경변수 기반 (symlink 불가)
 # ────────────────────────────────────────────────────────────────────────────
-# Jenkins 는 ENV 로 설정되지만 일부 경로는 /var/jenkins_home 하드코딩 의존이 있음
-rm -rf /var/jenkins_home
-ln -sfn "$DATA/jenkins" /var/jenkins_home
-
-# Ollama 모델 경로는 OLLAMA_MODELS 환경변수로 리다이렉트 (supervisord.conf 참조)
-# Dify storage 도 OPENDAL_FS_ROOT 환경변수로 리다이렉트
+# PoC 2026-04-19: 이전 버전은 /var/jenkins_home → /data/jenkins 심볼릭 링크를
+# 시도했으나, jenkins/jenkins base 이미지가 `VOLUME /var/jenkins_home` 를 선언해
+# Docker 가 해당 경로에 익명 볼륨을 자동 마운트한다. 마운트 포인트는 rm 불가라
+# `rm: cannot remove '/var/jenkins_home': Device or resource busy` 로 엔트리포인트가
+# 즉사하고 crash loop 가 발생했다. 해결: symlink 를 포기하고 supervisord 의
+# [program:jenkins] 환경변수 JENKINS_HOME="/data/jenkins" 로만 리다이렉트한다.
+# /var/jenkins_home 익명 볼륨은 사용되지 않은 채 남지만 런타임 영향은 없다.
+#
+# Ollama 모델 경로는 OLLAMA_MODELS, Dify storage 는 OPENDAL_FS_ROOT 환경변수로
+# supervisord.conf 에서 리다이렉트된다.
 
 # ────────────────────────────────────────────────────────────────────────────
 # 3. supervisord 백그라운드 기동
