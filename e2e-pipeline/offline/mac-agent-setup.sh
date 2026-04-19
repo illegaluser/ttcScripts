@@ -255,10 +255,13 @@ ABS_WORKSPACE="$AGENT_DIR/workspace/DSCORE-ZeroTouch-QA-Docker"
 log "[5/7] Jenkins Node remoteFS 절대경로 갱신 + workspace venv 사전 링크"
 
 # (a) Node remoteFS 를 절대경로로 (Groovy)
+# PoC 2026-04-20: Jenkins 2.555 의 /crumbIssuer/api/json 은 404 HTML 을 반환함 (엔드포인트 자체 부재).
+# crumb 없이도 basic auth 요청이면 POST 가 통과되므로, 파싱 실패 시 empty 로 두고 warn 후 진행.
 CRUMB=$(curl -sS -u admin:password "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['crumbRequestField']+':'+d['crumb'])" 2>/dev/null)
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['crumbRequestField']+':'+d['crumb'])" 2>/dev/null \
+  || true)
 if [ -z "$CRUMB" ]; then
-  err "Jenkins crumb 획득 실패. $JENKINS_URL 응답 확인."
+  warn "Jenkins crumb 획득 실패 (2.555+ 는 /crumbIssuer 미제공) — basic auth 만으로 진행"
 fi
 GROOVY_UPDATE=$(cat <<GROOVY
 import jenkins.model.Jenkins
@@ -272,7 +275,7 @@ Jenkins.get().updateNode(n)
 println "OK remoteFS=" + n.getRemoteFS()
 GROOVY
 )
-UPDATE_RESP=$(curl -sS -u admin:password -H "$CRUMB" \
+UPDATE_RESP=$(curl -sS -u admin:password ${CRUMB:+-H "$CRUMB"} \
     --data-urlencode "script=$GROOVY_UPDATE" \
     "$JENKINS_URL/scriptText" 2>&1)
 log "  $UPDATE_RESP"
