@@ -87,32 +87,130 @@ docker buildx ls
 docker run --privileged --rm tonistiigi/binfmt --install all
 ```
 
-### 1.2 빌드 실행 (한 줄 명령)
+### 1.2 빌드 실행
+
+#### (a) 기본 빌드 — 옵션 없이
+
+대부분의 경우 이 한 줄이면 된다. 폐쇄망 타겟이 **일반 Linux 서버(x86_64)** 이고 **기본 LLM(`gemma4:e4b`)** 을 쓸 계획이라면 환경변수를 건드리지 않아도 된다.
 
 ```bash
 cd e2e-pipeline
 ./offline/build-allinone.sh 2>&1 | tee /tmp/build-allinone.log
 ```
 
-> 로그를 `tee` 로 떠두면 실패 시 어느 단계에서 멈췄는지 추적이 쉽다.
+- `2>&1 | tee /tmp/build-allinone.log` — 콘솔에 출력을 유지하면서 로그 파일로도 떠둔다. 실패 시 `grep -E 'ERROR|FAIL' /tmp/build-allinone.log` 로 어느 단계에서 멈췄는지 바로 찾을 수 있다.
 
-#### 환경변수로 동작 변경
+#### (b) 옵션 — 환경변수 5개
 
-| 변수 | 기본값 | 의미 |
-| ---- | ------ | ---- |
-| `IMAGE_TAG` | `dscore-qa:allinone` | 산출 이미지 태그 |
-| `TARGET_PLATFORM` | `linux/amd64` | 폐쇄망 타겟 아키 — arm64 서버는 `linux/arm64` |
-| `OLLAMA_MODEL` | `gemma4:e4b` | seed 할 LLM 모델 (~4GB) |
-| `JENKINS_VERSION` | (자동 감지) | `jenkins/jenkins:lts-jdk21` 에서 동적 추출. 명시 시 그 버전 고정 |
-| `OUTPUT_TAR` | `dscore-qa-allinone-<timestamp>.tar.gz` | 최종 압축 파일명 |
+| 변수 | 기본값 | 언제 바꿔야 하나 |
+| ---- | ------ | --------------- |
+| `TARGET_PLATFORM` | `linux/amd64` | **폐쇄망 서버가 ARM64** (예: AWS Graviton, 라즈베리파이 서버, Apple Silicon 기반 Mac mini 서버) 일 때만 `linux/arm64` 로 바꾼다. 일반 Intel/AMD 서버는 건드리지 말 것. |
+| `OLLAMA_MODEL` | `gemma4:e4b` | 다른 LLM 을 쓰고 싶을 때 (예: `llama3.1:8b`, `qwen2.5:7b`). **주의**: 이미지가 ~4-6GB 더 커진다. |
+| `IMAGE_TAG` | `dscore-qa:allinone` | 동시에 여러 버전을 빌드·구분하고 싶을 때 (예: `dscore-qa:v2`). 기본값이면 기존 이미지가 덮어쓰기됨. |
+| `OUTPUT_TAR` | `dscore-qa-allinone-<timestamp>.tar.gz` | 전달할 파일명을 직접 지정하고 싶을 때 (예: `dscore-qa-2026-04-19.tar.gz`). |
+| `JENKINS_VERSION` | (자동 감지) | 거의 건드릴 필요 없음. Jenkins 플러그인이 특정 버전과만 호환되는 특수 상황에서만 `2.479.3` 같이 고정. |
+
+#### 환경변수 넣는 법 (Bash/Zsh 문법)
+
+환경변수는 **명령 실행 1회만 적용** 하는 것이 원칙. 두 가지 방법이 있다.
+
+**(방법 1) 명령 앞에 `VAR=VALUE` 로 붙이기 — 권장**
 
 ```bash
-# 예: 폐쇄망 서버가 arm64 인 경우
 TARGET_PLATFORM=linux/arm64 ./offline/build-allinone.sh
-
-# 예: 모델 변경 (Llama 3.1 8B)
-OLLAMA_MODEL=llama3.1:8b ./offline/build-allinone.sh
 ```
+
+- 이 빌드 1회만 `TARGET_PLATFORM=linux/arm64`. 끝나면 자동 원복.
+- 여러 변수 동시 지정 — 공백으로 나열:
+
+  ```bash
+  TARGET_PLATFORM=linux/arm64 OLLAMA_MODEL=llama3.1:8b ./offline/build-allinone.sh
+  ```
+
+**(방법 2) 터미널에 `export` — 연속 빌드 시**
+
+```bash
+export TARGET_PLATFORM=linux/arm64
+export OLLAMA_MODEL=llama3.1:8b
+
+./offline/build-allinone.sh          # 첫 빌드
+# (옵션) requirements 변경 후 다시
+./offline/build-allinone.sh          # 두 번째 빌드 — 동일 env 로
+```
+
+- 터미널 세션을 닫거나 `unset TARGET_PLATFORM` 하기 전까지 유지된다.
+- 끌 때: `unset TARGET_PLATFORM OLLAMA_MODEL`
+
+> 공백 없이 `VAR=VALUE` (등호 앞뒤 공백 X). `VAR = VALUE` 는 오류.
+
+#### 실전 시나리오별 커맨드
+
+##### (1) 폐쇄망 서버가 ARM64 (AWS Graviton, Apple Silicon Mac mini 등)
+
+```bash
+TARGET_PLATFORM=linux/arm64 ./offline/build-allinone.sh 2>&1 | tee /tmp/build-allinone.log
+```
+
+##### (2) 모델을 Llama 3.1 8B 로 바꾸고 싶을 때
+
+```bash
+OLLAMA_MODEL=llama3.1:8b ./offline/build-allinone.sh 2>&1 | tee /tmp/build-allinone.log
+```
+
+##### (3) 모델도 바꾸고 ARM64 도 타겟일 때 (동시 지정)
+
+```bash
+TARGET_PLATFORM=linux/arm64 OLLAMA_MODEL=qwen2.5:7b ./offline/build-allinone.sh 2>&1 | tee /tmp/build-allinone.log
+```
+
+##### (4) 날짜 붙은 tar 파일명으로 산출하고 싶을 때
+
+```bash
+OUTPUT_TAR=dscore-qa-2026-04-19-prod.tar.gz ./offline/build-allinone.sh 2>&1 | tee /tmp/build-allinone.log
+```
+
+##### (5) 이미지 태그를 버전으로 구분해 여러 번 빌드 (이전 이미지 유지)
+
+```bash
+# v1 빌드
+IMAGE_TAG=dscore-qa:v1 OUTPUT_TAR=dscore-qa-v1.tar.gz ./offline/build-allinone.sh
+
+# 이후 v2 빌드 (v1 이미지는 그대로 남음)
+IMAGE_TAG=dscore-qa:v2 OUTPUT_TAR=dscore-qa-v2.tar.gz ./offline/build-allinone.sh
+
+# 확인
+docker images | grep dscore-qa
+# dscore-qa  v1       ...  10GB
+# dscore-qa  v2       ...  10GB
+```
+
+##### (6) 한 셸 세션에서 연속 빌드 (export 방식)
+
+```bash
+export TARGET_PLATFORM=linux/arm64
+export OLLAMA_MODEL=llama3.1:8b
+
+cd e2e-pipeline
+./offline/build-allinone.sh 2>&1 | tee /tmp/build-1.log
+
+# 문제 수정 후 재빌드
+./offline/build-allinone.sh 2>&1 | tee /tmp/build-2.log
+
+# 작업 완료 후 정리
+unset TARGET_PLATFORM OLLAMA_MODEL
+```
+
+#### 빌드 직후 적용된 값 확인
+
+빌드 시작 시 다음 라인이 로그 맨 앞부분에 찍힌다 — 내가 준 옵션이 제대로 들어갔는지 눈으로 확인하라.
+
+```
+[build-allinone] 빌드 대상: dscore-qa:allinone (platform=linux/arm64)
+[build-allinone] 출력 파일: dscore-qa-allinone-20260419-143000.tar.gz
+[build-allinone]   대상 Jenkins 버전: 2.479.3
+```
+
+변수를 지정했는데 로그에 반영되지 않았다면 shell 문법 오류 가능성 (`VAR = VALUE` 형태 등). Ctrl+C 로 중단 후 다시 입력한다.
 
 ### 1.3 빌드 단계별 상세
 
