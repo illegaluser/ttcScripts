@@ -36,6 +36,7 @@ jsonschema
 jsonpath-ng==1.6.1
 pytest==8.0.0
 pytest-xdist==3.5.0
+pyyaml  # provision-apps.sh 의 chatflow.yaml 파싱용
 
 # --- 문서 처리 / 유틸 ---
 requests

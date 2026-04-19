@@ -55,6 +55,11 @@ DIFY_LOGGED_IN="false"
 DIFY_OLLAMA_INSTALLED="false"
 DIFY_API_KEY=""
 
+# 스크립트 전용 Python — Debian apt python3 (3.13) 을 고정 사용.
+# /usr/local/bin/python3 는 dify-api 전용 python3.12 (pyyaml 등 pip 설치 안 됨) 이므로
+# `python3` 을 쓰면 import 실패. 시스템 python 을 명시해 의존성(pyyaml/jsonschema 등) 보장.
+PY=/usr/bin/python3
+
 # ── 로깅 유틸 ──────────────────────────────────────────────────────────────
 _ts()   { date +%H:%M:%S; }
 log()   { printf '[%s] [·] %s\n' "$(_ts)" "$*"; }
@@ -104,6 +109,33 @@ done
 [ $_je -lt 180 ] && ok "Jenkins REST 인증 확인 (${_je}초)"
 
 # ────────────────────────────────────────────────────────────────────────────
+# Jenkins CSRF crumb 준비 — Jenkins 2.479+ 는 POST 에 항상 crumb 필요.
+# /crumbIssuer 로 한 번 받아서 이후 모든 curl 에 동일 쿠키 jar + header 로 붙인다.
+# ────────────────────────────────────────────────────────────────────────────
+JENKINS_COOKIES="/tmp/jenkins-cookies.txt"
+JENKINS_CRUMB_HEADER=""
+rm -f "$JENKINS_COOKIES"
+
+JENKINS_CRUMB_RAW=$(curl -sS -c "$JENKINS_COOKIES" \
+    -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+    "${JENKINS_URL}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)" \
+    2>/dev/null || echo "")
+if [ -n "$JENKINS_CRUMB_RAW" ] && [ "${JENKINS_CRUMB_RAW#*:}" != "$JENKINS_CRUMB_RAW" ]; then
+  JENKINS_CRUMB_HEADER="$JENKINS_CRUMB_RAW"
+  ok "Jenkins crumb 획득: ${JENKINS_CRUMB_HEADER%%:*}=${JENKINS_CRUMB_HEADER#*:} (${#JENKINS_CRUMB_HEADER}자)"
+else
+  warn "Jenkins crumb 발급 실패 — POST 호출이 403 으로 실패할 수 있음"
+fi
+
+# Jenkins POST 요청용 헬퍼 — -u 인증 + crumb 헤더 + 쿠키 jar 자동 부착
+jkpost() {
+  curl -sS -b "$JENKINS_COOKIES" -c "$JENKINS_COOKIES" \
+       -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+       ${JENKINS_CRUMB_HEADER:+-H "$JENKINS_CRUMB_HEADER"} \
+       "$@"
+}
+
+# ────────────────────────────────────────────────────────────────────────────
 # Phase 4: Dify 초기 설정
 # ────────────────────────────────────────────────────────────────────────────
 step "=== 2. Dify 초기 설정 ==="
@@ -115,7 +147,7 @@ SETUP_RESP=$(curl -sS -X POST "${DIFY_URL}/console/api/setup" \
     -d "{\"email\":\"${DIFY_EMAIL}\",\"name\":\"Admin\",\"password\":\"${DIFY_PASSWORD}\"}" \
     2>&1 || echo '{"result":"error"}')
 debug "setup response: $SETUP_RESP"
-if echo "$SETUP_RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);exit(0 if d.get('result')=='success' else 1)" 2>/dev/null; then
+if echo "$SETUP_RESP" | $PY -c "import json,sys;d=json.load(sys.stdin);exit(0 if d.get('result')=='success' else 1)" 2>/dev/null; then
   ok "관리자 계정 생성 완료: ${DIFY_EMAIL}"
 else
   warn "계정 생성 응답: ${SETUP_RESP}"
@@ -124,7 +156,7 @@ fi
 
 # 2-2. 로그인 (password base64 인코딩 필수: @decrypt_password_field 데코레이터)
 log "2-2. 로그인 — POST /console/api/login (password base64 인코딩 + 쿠키 저장)"
-DIFY_PASSWORD_B64=$(printf '%s' "$DIFY_PASSWORD" | python3 -c 'import base64,sys;print(base64.b64encode(sys.stdin.buffer.read()).decode())')
+DIFY_PASSWORD_B64=$(printf '%s' "$DIFY_PASSWORD" | $PY -c 'import base64,sys;print(base64.b64encode(sys.stdin.buffer.read()).decode())')
 
 LOGIN_RESP=$(curl -sS -c "$DIFY_COOKIES" \
     -X POST "${DIFY_URL}/console/api/login" \
@@ -133,7 +165,7 @@ LOGIN_RESP=$(curl -sS -c "$DIFY_COOKIES" \
     2>&1 || echo '{}')
 debug "login response: $LOGIN_RESP"
 
-LOGIN_RESULT=$(echo "$LOGIN_RESP" | python3 -c "
+LOGIN_RESULT=$(echo "$LOGIN_RESP" | $PY -c "
 import json,sys
 try: d=json.load(sys.stdin); print(d.get('result',''))
 except Exception: print('')
@@ -157,7 +189,7 @@ if [ "$DIFY_LOGGED_IN" = "true" ]; then
   PLUGIN_LIST_RESP=$(curl -sS -b "$DIFY_COOKIES" \
       "${DIFY_URL}/console/api/workspaces/current/plugin/list" \
       -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-  if echo "$PLUGIN_LIST_RESP" | python3 -c "
+  if echo "$PLUGIN_LIST_RESP" | $PY -c "
 import json,sys
 try:
     d=json.load(sys.stdin)
@@ -183,7 +215,7 @@ except Exception: sys.exit(1)
           -F "pkg=@${OFFLINE_PKG}" 2>&1 || echo "HTTP:000")
       debug "upload response: $UPLOAD_RESP"
       if echo "$UPLOAD_RESP" | grep -qE 'HTTP:(200|201|202)'; then
-        UNIQUE_ID=$(echo "$UPLOAD_RESP" | python3 -c "
+        UNIQUE_ID=$(echo "$UPLOAD_RESP" | $PY -c "
 import json,sys,re
 body = re.split(r'\\nHTTP:', sys.stdin.read())[0]
 try:
@@ -205,7 +237,7 @@ except Exception: print('')
             CHECK_RESP=$(curl -sS -b "$DIFY_COOKIES" \
                 "${DIFY_URL}/console/api/workspaces/current/plugin/list" \
                 -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-            if echo "$CHECK_RESP" | python3 -c "
+            if echo "$CHECK_RESP" | $PY -c "
 import json,sys
 try:
     d=json.load(sys.stdin)
@@ -234,7 +266,7 @@ if [ "$DIFY_OLLAMA_INSTALLED" = "true" ]; then
   MODELS_RESP=$(curl -sS -b "$DIFY_COOKIES" \
       "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models" \
       -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-  if echo "$MODELS_RESP" | python3 -c "
+  if echo "$MODELS_RESP" | $PY -c "
 import json,sys
 target='''${OLLAMA_MODEL}'''
 try:
@@ -244,7 +276,7 @@ except Exception: sys.exit(1)
 " 2>/dev/null; then
     ok "  ${OLLAMA_MODEL} 이미 등록됨"
   else
-    REG_BODY=$(python3 - << PYEOF
+    REG_BODY=$($PY - << PYEOF
 import json
 print(json.dumps({
     "model": "${OLLAMA_MODEL}",
@@ -277,7 +309,7 @@ fi
 # 2-4. Chatflow import (기존 app 이 있으면 삭제 후 재import)
 if [ "$DIFY_LOGGED_IN" = "true" ] && [ -f "$OFFLINE_DIFY_CHATFLOW_YAML" ]; then
   log "2-4. Chatflow DSL import"
-  APP_NAME=$(python3 -c "
+  APP_NAME=$($PY -c "
 import yaml,sys
 with open('$OFFLINE_DIFY_CHATFLOW_YAML') as f:
     d = yaml.safe_load(f)
@@ -291,7 +323,7 @@ print(d.get('app',{}).get('name',''))
     APP_LIST=$(curl -sS -b "$DIFY_COOKIES" \
         "${DIFY_URL}/console/api/apps?page=1&limit=100" \
         -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-    EXISTING_IDS=$(echo "$APP_LIST" | python3 -c "
+    EXISTING_IDS=$(echo "$APP_LIST" | $PY -c "
 import json,sys
 target='''$APP_NAME'''
 try:
@@ -307,7 +339,7 @@ except Exception: pass
     done
 
     # Import
-    YAML_CONTENT=$(python3 -c "
+    YAML_CONTENT=$($PY -c "
 import json,sys
 with open('$OFFLINE_DIFY_CHATFLOW_YAML') as f: content = f.read()
 print(json.dumps({'mode':'yaml-content','yaml_content':content}))
@@ -319,7 +351,7 @@ print(json.dumps({'mode':'yaml-content','yaml_content':content}))
         -d "$YAML_CONTENT" 2>&1 || echo "HTTP:000")
     debug "import response: $IMPORT_RESP"
 
-    IMPORT_ID=$(echo "$IMPORT_RESP" | python3 -c "
+    IMPORT_ID=$(echo "$IMPORT_RESP" | $PY -c "
 import json,sys,re
 body = re.split(r'\\nHTTP:', sys.stdin.read())[0]
 try:
@@ -327,7 +359,7 @@ try:
     print(d.get('id',''))
 except Exception: print('')
 " 2>/dev/null || echo "")
-    IMPORT_STATUS=$(echo "$IMPORT_RESP" | python3 -c "
+    IMPORT_STATUS=$(echo "$IMPORT_RESP" | $PY -c "
 import json,sys,re
 body = re.split(r'\\nHTTP:', sys.stdin.read())[0]
 try:
@@ -335,7 +367,7 @@ try:
     print(d.get('status',''))
 except Exception: print('')
 " 2>/dev/null || echo "")
-    APP_ID=$(echo "$IMPORT_RESP" | python3 -c "
+    APP_ID=$(echo "$IMPORT_RESP" | $PY -c "
 import json,sys,re
 body = re.split(r'\\nHTTP:', sys.stdin.read())[0]
 try:
@@ -349,7 +381,7 @@ except Exception: print('')
       CONFIRM_RESP=$(curl -sS -b "$DIFY_COOKIES" \
           -X POST "${DIFY_URL}/console/api/apps/imports/$IMPORT_ID/confirm" \
           -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-      APP_ID=$(echo "$CONFIRM_RESP" | python3 -c "
+      APP_ID=$(echo "$CONFIRM_RESP" | $PY -c "
 import json,sys
 try: print(json.load(sys.stdin).get('app_id',''))
 except Exception: print('')
@@ -371,7 +403,7 @@ except Exception: print('')
           -X POST "${DIFY_URL}/console/api/apps/$APP_ID/api-keys" \
           -H "Content-Type: application/json" \
           -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-      DIFY_API_KEY=$(echo "$KEY_RESP" | python3 -c "
+      DIFY_API_KEY=$(echo "$KEY_RESP" | $PY -c "
 import json,sys
 try: print(json.load(sys.stdin).get('token',''))
 except Exception: print('')
@@ -402,8 +434,7 @@ required.each { name ->
     else if (!p.isActive()) println "${name}=INACTIVE(version=${p.version})"
     else println "${name}=OK(version=${p.version})"
 }'
-PLUGIN_VERIFY_RESP=$(curl -sS --max-time 30 -X POST "${JENKINS_URL}/scriptText" \
-    -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+PLUGIN_VERIFY_RESP=$(jkpost --max-time 30 -X POST "${JENKINS_URL}/scriptText" \
     --data-urlencode "script=${PLUGIN_VERIFY_GROOVY}" 2>&1 || echo "failed")
 PLUGIN_MISSING=""
 for pname in workflow-cps plain-credentials file-parameters htmlpublisher; do
@@ -428,17 +459,15 @@ if [ -n "$DIFY_API_KEY" ]; then
   <secret>${DIFY_API_KEY}</secret>
 </org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl>"
 
-  CRED_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -X POST \
+  CRED_RESP=$(jkpost -w $'\nHTTP:%{http_code}' -X POST \
       "${JENKINS_URL}/credentials/store/system/domain/_/createCredentials" \
-      -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
       -H "Content-Type: application/xml" \
       --data "$CRED_XML" 2>&1 || echo "HTTP:000")
   if echo "$CRED_RESP" | grep -qE 'HTTP:(200|302)'; then
     ok "Credentials 등록 완료"
   else
-    UPDATE_CRED_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -X POST \
+    UPDATE_CRED_RESP=$(jkpost -w $'\nHTTP:%{http_code}' -X POST \
         "${JENKINS_URL}/credentials/store/system/domain/_/credential/dify-qa-api-token/config.xml" \
-        -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
         -H "Content-Type: application/xml" \
         --data "$CRED_XML" 2>&1 || echo "HTTP:000")
     if echo "$UPDATE_CRED_RESP" | grep -qE 'HTTP:(200|302)'; then
@@ -454,7 +483,7 @@ fi
 # 3-3. Pipeline Job 생성
 if [ -f "$OFFLINE_JENKINS_PIPELINE" ]; then
   log "3-3. Pipeline Job 생성: DSCORE-ZeroTouch-QA-Docker"
-  JOB_XML=$(python3 - << PYEOF 2>/dev/null
+  JOB_XML=$($PY - << PYEOF 2>/dev/null
 import xml.sax.saxutils as sax
 with open('${OFFLINE_JENKINS_PIPELINE}', encoding='utf-8') as f:
     script = f.read()
@@ -475,17 +504,15 @@ PYEOF
   if [ -z "$JOB_XML" ]; then
     warn "Job XML 생성 실패"
   else
-    JOB_RESP=$(printf '%s' "$JOB_XML" | curl -sS -w $'\nHTTP:%{http_code}' -X POST \
+    JOB_RESP=$(printf '%s' "$JOB_XML" | jkpost -w $'\nHTTP:%{http_code}' -X POST \
         "${JENKINS_URL}/createItem?name=DSCORE-ZeroTouch-QA-Docker" \
-        -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
         -H "Content-Type: application/xml" \
         --data-binary @- 2>&1 || echo "HTTP:000")
     if echo "$JOB_RESP" | grep -qE 'HTTP:(200|302)'; then
       ok "Pipeline Job 생성 완료"
     elif echo "$JOB_RESP" | grep -qE 'HTTP:400' && echo "$JOB_RESP" | grep -qi 'already exists'; then
-      UPDATE_RESP=$(printf '%s' "$JOB_XML" | curl -sS -w $'\nHTTP:%{http_code}' -X POST \
+      UPDATE_RESP=$(printf '%s' "$JOB_XML" | jkpost -w $'\nHTTP:%{http_code}' -X POST \
           "${JENKINS_URL}/job/DSCORE-ZeroTouch-QA-Docker/config.xml" \
-          -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
           -H "Content-Type: application/xml" \
           --data-binary @- 2>&1 || echo "HTTP:000")
       echo "$UPDATE_RESP" | grep -qE 'HTTP:(200|302)' && ok "Pipeline Job 업데이트 완료" \
@@ -522,7 +549,7 @@ node.setLabelString('mac-ui-tester')
 node.setMode(Node.Mode.EXCLUSIVE)
 node.setRetentionStrategy(strategy)
 
-def envList = new hudson.EnvironmentVariablesNodeProperty([
+def envList = new hudson.slaves.EnvironmentVariablesNodeProperty([
     new hudson.slaves.EnvironmentVariablesNodeProperty.Entry('SCRIPTS_HOME','/data/jenkins-agent/workspace/DSCORE-ZeroTouch-QA-Docker')
 ])
 node.getNodeProperties().add(envList)
@@ -531,8 +558,7 @@ instance.save()
 println "[node] mac-ui-tester 생성 완료"
 GROOVY_EOF
 )
-NODE_RESP=$(curl -sS --max-time 30 -X POST "${JENKINS_URL}/scriptText" \
-    -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
+NODE_RESP=$(jkpost --max-time 30 -X POST "${JENKINS_URL}/scriptText" \
     --data-urlencode "script=${NODE_GROOVY}" 2>&1 || echo "failed")
 debug "node create response: $NODE_RESP"
 if echo "$NODE_RESP" | grep -q '\[node\]'; then

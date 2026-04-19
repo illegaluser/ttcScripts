@@ -29,6 +29,9 @@ RUN ollama serve >/tmp/ollama.log 2>&1 & \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM langgenius/dify-api:1.13.3           AS dify-api-src
 FROM langgenius/dify-web:1.13.3           AS dify-web-src
+# PoC 2026-04-19: upstream dify 1.13.3 docker-compose 공식 값과 동일.
+# 0.5.8-local 은 GORM AutoMigrate 를 더이상 수행하지 않아 plugin_declarations
+# 등 테이블이 생성되지 않는다 (SQLSTATE 42P01). 0.5.3-local 이 최신 안정조합.
 FROM langgenius/dify-plugin-daemon:0.5.3-local AS dify-plugin-src
 
 # ─────────────────────────────────────────────────────────────────────────────
