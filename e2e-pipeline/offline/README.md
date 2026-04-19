@@ -528,6 +528,108 @@ docker run -d --name dscore-qa \
 - [provision-apps.sh:37-40](provision-apps.sh#L37-L40) 가 동일 env 로 Dify 관리자 생성 및 로그인 수행
 - **주의**: env 는 `/data` 볼륨이 비어 있는 **첫 기동에서만** 적용된다. 이미 `/data/.initialized` 플래그가 있으면 무시되고 기존 계정이 유지됨 → 그 경우 [2.8 관리자 비밀번호 변경](#28-관리자-비밀번호-변경) 의 UI 경로를 사용한다.
 
+#### (c) Windows 11 WSL2 + NVIDIA GPU — GPU 가속 모드
+
+Linux 컨테이너 안 Ollama 가 **Windows 호스트의 NVIDIA GPU** 를 직접 사용하도록
+하는 경로. WSL2 2.0+ 가 CUDA 드라이버를 컨테이너에 노출하기 때문에 가능하며,
+Mac Docker Desktop 과 달리 호스트에 별도 Ollama 를 설치할 필요가 없다.
+
+**(c-1) 호스트 전제조건 (한 번만 설정)**:
+
+- Windows 11 + NVIDIA GPU (RTX 20/30/40 시리즈, **VRAM 8GB 이상** 권장 — gemma4:e4b 는 5-6GB 소비)
+- [NVIDIA Windows 드라이버](https://www.nvidia.com/Download/index.aspx) 최신 (WSL2 CUDA 지원 포함, 2024-01 이후 버전)
+- Docker Desktop 4.30+ (WSL2 백엔드 활성, NVIDIA Container Toolkit 자동 내장)
+- `.wslconfig` 메모리 할당 — Windows 사용자 홈 (`C:\Users\<user>\.wslconfig`, 없으면 신규 생성):
+
+  ```ini
+  [wsl2]
+  memory=24GB
+  processors=8
+  swap=8GB
+  ```
+
+  설정 적용: PowerShell 관리자에서 `wsl --shutdown` → Docker Desktop 재기동.
+
+- **GPU 가용성 사전 검증** (실패하면 아래 `docker run` 도 실패):
+
+  ```bash
+  docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi
+  # 예상: GPU 모델, 드라이버 버전 표, 메모리 용량이 출력되어야 함
+  ```
+
+  이 명령이 실패하면 드라이버/Docker Desktop/NVIDIA Container Toolkit 설정 문제 —
+  [트러블슈팅 "WSL2 컨테이너에서 nvidia-smi 가 안 보임"](#wsl2-컨테이너에서-nvidia-smi-가-안-보임) 참조.
+
+**(c-2) docker run — GPU 옵션 2 개 필수**:
+
+```bash
+docker run -d --name dscore-qa \
+  -p 18080:18080 -p 18081:18081 -p 50001:50001 \
+  -v dscore-data:/data \
+  --add-host host.docker.internal:host-gateway \
+  --gpus all \
+  --shm-size=2g \
+  --restart unless-stopped \
+  dscore-qa:allinone
+```
+
+| 옵션 | 역할 |
+| ---- | ---- |
+| `--gpus all` | **GPU 가속 핵심**. NVIDIA Container Toolkit 이 `/dev/nvidia*` 디바이스와 `libnvidia-*.so` 라이브러리를 컨테이너에 주입한다. 누락 시 Ollama 가 CPU 모드로 떨어져 Mac 동일한 성능 저하 (타임아웃 빈발). |
+| `--shm-size=2g` | Playwright Chromium 이 `/dev/shm` 을 공유 메모리로 사용. Docker 기본 64MB 는 Chromium 렌더러 크래시(`Page crashed!`) 를 유발하므로 2GB 로 상향. |
+
+**(c-3) 검증**:
+
+```bash
+# (1) 컨테이너가 GPU 에 도달하는지
+docker exec dscore-qa nvidia-smi
+# 예상: Windows 호스트의 GPU 정보가 그대로 보임
+
+# (2) Ollama 가 GPU 로 레이어를 오프로드하는지 (모델 로드 후 30초 대기 후)
+docker exec dscore-qa bash -c 'sleep 30 && grep -E "offloaded [^0/]" /data/logs/ollama.log | head -3'
+# 예상: "offloaded 43/43 layers to GPU" 같은 비(非)-0 offload 라인.
+# "offloaded 0/43 layers to GPU" 가 보이면 CPU 모드로 떨어진 것 → --gpus all 누락 재확인.
+
+# (3) 속도 체감 — gemma4:e4b 직접 호출
+docker exec dscore-qa curl -fsS http://127.0.0.1:11434/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma4:e4b","prompt":"hi","stream":false,"options":{"num_predict":50}}' \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(f\"토큰/초: {d['eval_count']/d['eval_duration']*1e9:.1f}\")"
+# RTX 3060 이상: 30-80 토큰/초. CPU 모드: 1-3 토큰/초.
+```
+
+**(c-4) Jenkins Pipeline 실행 시 — HEADLESS 체크 필수**:
+
+컨테이너 안에는 X display server 가 없으므로 Playwright Chromium 이
+`--headed` 모드로 돌면 `Cannot open display` 로 즉시 실패한다. Dashboard →
+`DSCORE-ZeroTouch-QA-Docker` → **Build with Parameters** 화면에서
+`HEADLESS` 체크박스를 **반드시 체크**한 뒤 Build.
+
+WSL2 에서 GUI 디버깅이 꼭 필요하면 WSLg 를 활용해 호스트 `DISPLAY` 를
+컨테이너에 마운트하는 별도 설정이 필요 (본 가이드 범위 밖).
+
+#### (d) GPU 없는 WSL2 (Intel/AMD 내장 GPU) 또는 Linux — CPU 대체 경로
+
+WSL2 는 NVIDIA CUDA 만 노출하고 OpenCL/ROCm 은 지원하지 않는다. AMD/Intel
+내장 GPU 환경 또는 GPU 전무 서버에서는 CPU 모드를 감수하되 **모델을 줄여**
+실용 속도를 확보한다.
+
+```bash
+# 빌드 머신에서 경량 모델로 재빌드
+TARGET_PLATFORM=linux/amd64 OLLAMA_MODEL=qwen2.5:1.5b ./offline/build-allinone.sh
+```
+
+| 모델 | CPU 모드 속도 (대략) | 품질 |
+| ---- | --------------------- | ---- |
+| `qwen2.5:1.5b` | 10-30 토큰/초 | Planner LLM 용으로 **최소 하한**. 복잡한 시나리오는 취약 |
+| `gemma2:2b` | 5-15 토큰/초 | 다국어 괜찮음 |
+| `gemma4:e4b` (기본) | 1-3 토큰/초 | Dify timeout 빈발 — **CPU 환경에선 비권장** |
+
+CPU 모드는 Pipeline Stage 3 의 Planner 호출이 30-60초 걸린다. 기본
+[Jenkinsfile](../DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline) 의
+`HEAL_TIMEOUT_SEC=180` 으로는 충분하지만 heal 단계가 연쇄되면 빌드 1회에
+수 분 소요 가능성.
+
 #### 포트 / 볼륨
 
 | 항목 | 용도 |
@@ -1172,6 +1274,45 @@ docker logs dscore-qa | tail -50
 ### Jenkins 에이전트 offline / Ollama 모델 이슈
 
 프로비저닝 단계의 부분 실패인 경우가 대부분 — [2.6 부분 실패 진단](#26-부분-실패-진단) 의 `(B) Ollama 모델 등록 실패`, `(E) Node offline` 참조.
+
+### WSL2 컨테이너에서 nvidia-smi 가 안 보임
+
+Jenkins Pipeline Stage 3 가 5분 timeout 으로 실패하고 `docker exec dscore-qa nvidia-smi` 명령도 `command not found` 나 에러를 반환하는 경우.
+
+**진단 (상위부터 차례대로)**:
+
+1. **Windows 호스트의 드라이버 확인** — PowerShell 에서 `nvidia-smi`. 명령 없으면 NVIDIA 드라이버 미설치. 2024-01 이후 버전 설치: <https://www.nvidia.com/Download/index.aspx>
+2. **Docker Desktop → Settings → Resources → WSL Integration** 이 활성 배포판에 체크돼 있는지.
+3. **NVIDIA Container Toolkit 동작 확인**:
+
+   ```bash
+   docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi
+   ```
+
+   이 명령이 실패하면 **우리 이미지도 당연히 실패**. 먼저 이걸 성공시켜야 함.
+4. **`docker run` 에 `--gpus all` 누락** — 2.3(c-2) 의 `docker run` 예시 전체를 그대로 복사해 사용.
+5. 공식 가이드: <https://docs.docker.com/desktop/features/gpu/>
+
+### WSL2 에서 컨테이너가 기동 중 OOM 종료
+
+증상: `docker logs dscore-qa` 에 중단 없이 메모리 OOM 로그 또는 일부 서비스가 FATAL 로 표시. `docker stats` 에 메모리 사용량 급증.
+
+- **.wslconfig 메모리 부족** 이 주 원인. 본 이미지는 10-12GB (Ollama + 모델) + 2-3GB (Dify) + 1.5-2.5GB (Jenkins) + 500MB-1GB (PG/Redis/Qdrant) ≈ **피크 16-18GB 소비**.
+- Windows 사용자 홈 `C:\Users\<user>\.wslconfig` 를 다음과 같이 재설정 후 PowerShell 관리자 `wsl --shutdown` + Docker Desktop 재기동:
+
+  ```ini
+  [wsl2]
+  memory=24GB
+  processors=8
+  swap=8GB
+  ```
+
+- 적용 확인: WSL2 배포판 안에서 `free -g` 로 Total 이 설정값에 가까운지.
+
+### Jenkins Pipeline Stage 3 가 `Cannot open display` / Chromium `Page crashed!`
+
+- **`Cannot open display`**: Build with Parameters 에서 `HEADLESS` 를 체크하지 않고 실행했을 때. 컨테이너에는 X server 없음. 체크박스 활성화 후 재빌드.
+- **`Page crashed!` / Chromium 프로세스 랜덤 종료**: `/dev/shm` 64MB 기본값으로 인한 공유 메모리 부족. `docker run` 에 `--shm-size=2g` 추가 (2.3(c-2) 예시 참조).
 
 ### 이미지 크기가 너무 커서 USB 이전 곤란
 - 여러 조각으로 분할:
