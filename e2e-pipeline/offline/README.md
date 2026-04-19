@@ -73,7 +73,20 @@ git clone <이 저장소> && cd dscore-ttc/e2e-pipeline
 ./offline/build-allinone.sh 2>&1 | tee /tmp/build.log
 ```
 
-종료 시 `e2e-pipeline/dscore-qa-allinone-<timestamp>.tar.gz` (2-3GB) 생성. 빌드 단계 상세는 [§1.3](#13-빌드-단계-내부-이해) 참조.
+`TARGET_PLATFORM` 은 **호스트 아키텍처 자동 감지** — Apple Silicon 에선 `linux/arm64` 네이티브로 빌드된다. 로그 앞부분에서 확인:
+
+```text
+[build-allinone] 빌드 대상: dscore-qa:allinone (platform=linux/arm64)
+```
+
+`linux/amd64` 로 찍히면 호스트가 Intel Mac 또는 env override 된 것. Apple Silicon 인데 `amd64` 로 보이면 qemu 크로스 빌드로 들어가 **Playwright Chromium 이 silent-fail 할 수 있다** — § 5 "이미지가 너무 작다" 참조.
+
+종료 시:
+
+- `e2e-pipeline/dscore-qa-allinone-<timestamp>.tar.gz` — 배포 파일 (2-3GB)
+- 정상 이미지 크기: `docker images dscore-qa:allinone` 결과 **약 9-10GB**
+
+빌드 단계 상세는 [§1.3](#13-빌드-단계-내부-이해) 참조.
 
 ### 3단계 — 컨테이너 기동
 
@@ -190,6 +203,26 @@ TARGET_PLATFORM=linux/arm64 OLLAMA_MODEL=qwen2.5:7b \
 ```
 
 로그 앞부분에 `[build-allinone] 빌드 대상: ... (platform=...)` 이 찍혀 내가 준 값이 반영됐는지 즉시 확인 가능.
+
+#### 빌드 후 아키텍처 검증 (중요)
+
+빌드 끝난 직후 **실제 이미지 플랫폼** 을 호스트와 비교하라. qemu 크로스 빌드에서 Playwright Chromium 같은 대용량 바이너리가 silent-fail 하는 사례가 있다 — 이미지 크기만 봐도 즉시 판정 가능.
+
+```bash
+# 1) 플랫폼 일치 여부
+docker image inspect dscore-qa:allinone --format '{{.Architecture}}'
+# 호스트와 일치해야 정상: Apple Silicon = arm64, Intel/AMD = amd64
+uname -m
+
+# 2) 이미지 크기 sanity check
+docker images dscore-qa:allinone --format '{{.Size}}'
+# 정상: 약 9-10GB
+# 2-3GB 로 작으면 Playwright Chromium 등이 누락됐을 가능성 높음 → § 5 참조
+
+# 3) Chromium 유무 (Stage 3 실패 예방)
+docker run --rm --entrypoint ls dscore-qa:allinone -d /root/.cache/ms-playwright/chromium-*/chrome-linux
+# 파일 경로가 나오면 OK. "No such file or directory" 면 재빌드 필요
+```
 
 ### 1.3 빌드 단계 내부 이해
 
@@ -713,13 +746,55 @@ cat dscore-qa-part-* > dscore-qa.tar.gz
 docker load -i dscore-qa.tar.gz
 ```
 
-### 아키텍처 불일치 (`exec format error`)
+### 이미지가 너무 작다 (2-3GB) / Pipeline 실행 시 Chromium launch 실패
 
-Mac 에서 Linux x86 서버로 이미지 전송한 경우:
+**증상**:
+
+- `docker images dscore-qa:allinone` 크기가 **2-3GB 수준** (정상은 9-10GB)
+- Pipeline Stage 3 에서 Playwright `p.chromium.launch()` 실패 / `Executable doesn't exist at /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome`
+- 또는 docker run 시 `WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8)`
+
+**원인**: Apple Silicon Mac 에서 **`TARGET_PLATFORM=linux/amd64` 로 qemu 크로스 빌드**했을 때 발생. `python3 -m playwright install chromium` 단계가 qemu 에뮬레이션 환경에서 silent-fail 하여 Chromium 이 이미지에 포함되지 않는다. docker build exit code 는 0 이라 사용자는 성공으로 오해하기 쉽다.
+
+**진단**:
 
 ```bash
-TARGET_PLATFORM=linux/amd64 ./offline/build-allinone.sh
-# (Apple Silicon 에서 qemu 로 크로스 빌드. 느림)
+# (1) 이미지 플랫폼 vs 호스트
+docker image inspect dscore-qa:allinone --format '{{.Architecture}}'
+uname -m     # arm64 인데 위가 amd64 면 문제
+
+# (2) Chromium 유무
+docker run --rm --entrypoint ls dscore-qa:allinone -d /root/.cache/ms-playwright/chromium-*/chrome-linux
+# "No such file" 나오면 누락
+```
+
+**해결** (2026-04-19 이후 build-allinone.sh 는 `uname -m` 자동 감지하므로 env 없이 돌리면 됨):
+
+```bash
+# 잘못된 이미지 + 컨테이너 제거
+docker rm -f dscore-qa 2>/dev/null
+docker rmi dscore-qa:allinone
+
+# 네이티브로 재빌드 (자동 감지)
+cd e2e-pipeline
+./offline/build-allinone.sh 2>&1 | tee /tmp/build.log
+
+# 로그에서 "platform=linux/arm64" 확인 → 재검증
+docker image inspect dscore-qa:allinone --format '{{.Architecture}}'  # arm64
+docker images dscore-qa:allinone --format '{{.Size}}'                 # 9-10GB
+```
+
+Linux x86 서버로 교차 배포가 **진짜로** 필요한 경우엔 `TARGET_PLATFORM=linux/amd64` env 를 명시. 빌드가 느리지만 가능하며, 빌드 후 반드시 Chromium 존재 여부를 검증할 것.
+
+### 아키텍처 불일치 (`exec format error`)
+
+Mac 에서 빌드한 arm64 이미지를 Linux x86 서버에 로드한 경우, 또는 그 반대:
+
+```bash
+# 배포 대상에 맞춰 명시적으로 빌드
+TARGET_PLATFORM=linux/amd64 ./offline/build-allinone.sh   # Linux x86 대상
+# 또는
+TARGET_PLATFORM=linux/arm64 ./offline/build-allinone.sh   # ARM64 대상 (AWS Graviton 등)
 ```
 
 ---
