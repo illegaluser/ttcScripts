@@ -593,8 +593,14 @@ PYEOF
   fi
 fi
 
-# 3-4. mac-ui-tester 노드 등록 (loopback JNLP)
-log "3-4. mac-ui-tester 에이전트 노드 등록"
+# 3-4. mac-ui-tester 노드 등록 — 호스트 Mac agent 전제
+#
+# 하이브리드 설계: Jenkins controller 는 컨테이너, agent 는 호스트 Mac (JDK21 + Playwright).
+# remoteFS 는 호스트 사용자의 홈 기준 절대 경로. agent 는 Jenkins 에게 이 경로를
+# 워크스페이스 루트로 알린다. SCRIPTS_HOME 환경변수는 Node 에 **설정하지 않는다** —
+# 호스트 agent 의 mac-agent-setup.sh 가 시스템 또는 run-script 환경변수로 주입한다
+# (각 사용자의 e2e-pipeline clone 경로가 달라 컨테이너가 예측 불가).
+log "3-4. mac-ui-tester 에이전트 노드 등록 (호스트 Mac JNLP)"
 NODE_GROOVY=$(cat << 'GROOVY_EOF'
 import jenkins.model.*
 import hudson.model.*
@@ -603,33 +609,36 @@ import hudson.slaves.*
 def instance = Jenkins.getInstance()
 def existingNode = instance.getNode('mac-ui-tester')
 def node
+
+// 하이브리드 설계: remoteFS 를 호스트 사용자의 ~/.dscore-qa-agent 기준 절대 경로로.
+// mac-agent-setup.sh 가 이 디렉토리를 생성하므로 Node 는 prescriptive 값을 사용.
+// Jenkins master 입장에선 텍스트일 뿐이고 실제 해석은 agent 쪽.
+def REMOTE_FS = System.getenv('MAC_AGENT_WORKDIR') ?: '~/.dscore-qa-agent'
+
 if (existingNode != null) {
     node = existingNode
-    println "[node] mac-ui-tester 기존 노드 발견 — 환경변수 갱신"
+    println "[node] mac-ui-tester 기존 노드 발견 — 호스트 agent 전제로 갱신"
 } else {
     def launcher = new JNLPLauncher(true)
     def strategy = new RetentionStrategy.Always()
-    node = new DumbSlave('mac-ui-tester', '/data/jenkins-agent', launcher)
-    node.setNodeDescription('All-in-One 내부 loopback JNLP Agent')
+    node = new DumbSlave('mac-ui-tester', REMOTE_FS, launcher)
+    node.setNodeDescription('Host-side JNLP Agent (macOS, headed Playwright)')
     node.setNumExecutors(1)
     node.setLabelString('mac-ui-tester')
     node.setMode(Node.Mode.EXCLUSIVE)
     node.setRetentionStrategy(strategy)
     instance.addNode(node)
-    println "[node] mac-ui-tester 생성 완료"
+    println "[node] mac-ui-tester 생성 완료 (remoteFS=" + REMOTE_FS + ")"
 }
 
-// 환경변수 갱신 — 기존 EnvironmentVariablesNodeProperty 는 제거 후 재추가 (멱등)
+// 환경변수 갱신 — Node 에는 SCRIPTS_HOME 을 세팅하지 않는다. 호스트 agent 측에서
+// 실행 env 로 주입하는 쪽이 사용자별 clone 경로 차이를 수용하기 좋다.
+// 기존 EnvironmentVariablesNodeProperty 가 있으면 (과거 brands 의 잔재) 제거.
 node.getNodeProperties().removeAll { it instanceof hudson.slaves.EnvironmentVariablesNodeProperty }
-def envList = new hudson.slaves.EnvironmentVariablesNodeProperty([
-    new hudson.slaves.EnvironmentVariablesNodeProperty.Entry('SCRIPTS_HOME','/opt/scripts-home')
-])
-node.getNodeProperties().add(envList)
-// Jenkins 2.479+ 는 instance.save() 만으로 Node config.xml 에 디스크 flush 가
-// 되지 않는다. updateNode() 가 명시적으로 nodes/<name>/config.xml 을 재작성한다.
-// (과거 버전은 save() 만으로도 기록됐으나 현재는 무효 → 컨테이너 재기동 시 원복)
+// Jenkins 2.479+ 는 instance.save() 만으로 Node config.xml 에 디스크 flush 가 되지
+// 않는다. updateNode() 가 명시적으로 nodes/<name>/config.xml 을 재작성한다.
 instance.updateNode(node)
-println "[node] SCRIPTS_HOME=/opt/scripts-home (updateNode 로 디스크 flush)"
+println "[node] 호스트 Mac agent 연결 대기 중 (remoteFS=" + REMOTE_FS + ")"
 GROOVY_EOF
 )
 NODE_RESP=$(jkpost --max-time 30 -X POST "${JENKINS_URL}/scriptText" \
@@ -649,4 +658,11 @@ echo ""
 echo "  Jenkins:   ${JENKINS_URL}  (${JENKINS_ADMIN_USER} / ${JENKINS_ADMIN_PW})"
 echo "  Dify:      ${DIFY_URL}     (${DIFY_EMAIL} / ${DIFY_PASSWORD})"
 [ -n "$DIFY_API_KEY" ] && echo "  API Key:   ${DIFY_API_KEY:0:12}... (Jenkins Credentials 'dify-qa-api-token' 등록됨)"
+echo ""
+echo "  ⚠️  Jenkins Node 'mac-ui-tester' 는 **호스트 Mac** 에서 JNLP 로 연결해야 합니다."
+echo "     컨테이너 내부 agent 는 없으며, Playwright 는 호스트에서 실행되어야 Chromium"
+echo "     창이 macOS 에 뜹니다 (headed 모드). 연결 방법:"
+echo "       cd <e2e-pipeline 위치>"
+echo "       ./offline/mac-agent-setup.sh"
+echo "     entrypoint 로그에 NODE_SECRET 이 찍혀 있으니 그 값을 사용합니다."
 echo ""

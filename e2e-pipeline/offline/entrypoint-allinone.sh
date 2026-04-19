@@ -37,7 +37,8 @@ if [ ! -f "$DATA/.initialized" ]; then
     "$DATA/pg" "$DATA/redis" "$DATA/qdrant" \
     "$DATA/jenkins/plugins" \
     "$DATA/dify/storage" "$DATA/dify/plugins/cwd" \
-    "$DATA/logs" "$DATA/jenkins-agent"
+    "$DATA/logs"
+  # NOTE: /data/jenkins-agent 는 더 이상 사용 안 함 — agent 는 호스트 Mac 에서 실행
 
   # Ollama 모델 seed 제거됨 (Mac 브랜치) — 호스트 Ollama 를 사용하므로 컨테이너에
   # 모델 파일이 포함되지 않는다. 연결 경로는 OLLAMA_BASE_URL env 로 지정.
@@ -106,6 +107,33 @@ _term() {
 trap _term SIGTERM SIGINT
 
 # ────────────────────────────────────────────────────────────────────────────
+# 3-2. dify-plugin-daemon 이 확실히 기동된 뒤 dify-api 를 수동 start
+#
+# 과거 재현된 race: supervisord 가 plugin-daemon 과 dify-api 를 거의 동시에 spawn
+# → plugin-daemon 이 초반에 한 번 exit 1 로 죽었다가 재시작 → 그 공백 동안
+# dify-api 의 Flask app import 가 plugin-daemon 에 blocking call 을 시도 →
+# "Booting worker" 를 못 찍고 gunicorn worker 가 futex_wait_queue 에 영구 대기.
+#
+# 해결: supervisord.conf 에서 dify-api 를 autostart=false 로 두고 여기서 수동 start.
+# plugin-daemon /health/check 가 200 응답하는 것을 확인한 뒤에만 start.
+# ────────────────────────────────────────────────────────────────────────────
+log "dify-plugin-daemon 헬스 대기 (race 방지)..."
+_w=0
+until curl -sf --max-time 2 -o /dev/null http://127.0.0.1:5002/health/check; do
+  sleep 2
+  _w=$((_w + 2))
+  if [ $_w -ge 120 ]; then
+    warn "dify-plugin-daemon 이 2분 내 ready 되지 않음. dify-api 를 그래도 기동 시도."
+    break
+  fi
+done
+log "  dify-plugin-daemon ready (${_w}s 경과) — dify-api start"
+# 추가 안전 지연: plugin-daemon 이 health 응답 후에도 내부 플러그인 로드 1-2초 필요
+sleep 3
+supervisorctl -c /etc/supervisor/supervisord.conf start dify-api >/dev/null 2>&1 || \
+  warn "supervisorctl start dify-api 실패 — 수동 확인 필요"
+
+# ────────────────────────────────────────────────────────────────────────────
 # 4. 최초 앱 프로비저닝 (volume 최초 생성 후 1회만)
 #    Dify API 설정 (setup 4-1,4-2,4-3b,4-3c,4-3d,4-3e) +
 #    Jenkins REST Credentials/Job/Node (setup 5-2,5-4,5-5)
@@ -160,68 +188,44 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 5. Jenkins 에이전트 기동 준비 — 매 기동마다 실행 (멱등)
+# 5. 호스트 Mac agent 연결 안내 (컨테이너 내부 agent 는 제거됐음 — 하이브리드 설계)
 #
-# /opt 는 컨테이너 ephemeral 이므로 docker restart 시 사라진다. 실제 run-script 와
-# agent.jar 는 /data/jenkins-agent 에 저장하고 /opt/jenkins-agent-run.sh 는 심볼릭
-# 링크로만 유지한다. NODE_SECRET 은 Jenkins master 측에서 node 별로 고정되므로
-# 재추출해도 값이 바뀌지 않는다 (Node 를 삭제하지 않는 한 멱등).
+# 원본 설계 복원 — Jenkins agent 는 호스트 Mac 에서 직접 실행해야 Playwright 가
+# macOS 화면에 Chromium 창을 띄울 수 있다 (시각 검증). 컨테이너는 JNLP 포트 50001
+# 만 노출하고, 호스트 agent.jar 가 외부에서 이 포트로 접속한다.
 # ────────────────────────────────────────────────────────────────────────────
 if [ -f "$DATA/.app_provisioned" ]; then
-  log "Jenkins 에이전트 기동 준비..."
-  # Jenkins 가 응답 가능한지 재확인 (provision 없이 단순 restart 된 경우)
+  # Jenkins 응답 대기 (provision 없이 restart 된 경우)
   _waited=0
   until curl -sf --max-time 3 -o /dev/null -u admin:password http://127.0.0.1:18080/api/json; do
     sleep 3
     _waited=$((_waited + 3))
-    if [ $_waited -ge 120 ]; then
-      warn "Jenkins 가 2분 내 준비되지 않아 에이전트 기동 스킵. 수동 재시도 필요."
-      break
-    fi
+    [ $_waited -ge 120 ] && { warn "Jenkins 2분 내 응답 없음 — agent secret 추출 스킵"; break; }
   done
-
-  # Jenkins 워크스페이스 스켈레톤 — Pipeline Stage 1 이 .qa_home/venv/bin/activate 를
-  # 요구하지만 워크스페이스는 첫 빌드 시에만 생긴다. 미리 생성하고 전역 venv 를
-  # 심볼릭 링크해둬 첫 빌드도 바로 venv 를 찾게 한다. (멱등)
-  JENKINS_WS=/data/jenkins-agent/workspace/DSCORE-ZeroTouch-QA-Docker
-  mkdir -p "$JENKINS_WS/.qa_home/artifacts"
-  if [ -d /opt/qa-venv ]; then
-    ln -sfn /opt/qa-venv "$JENKINS_WS/.qa_home/venv"
-    log "  워크스페이스 .qa_home/venv → /opt/qa-venv 링크 완료"
-  else
-    warn "  /opt/qa-venv 미존재 — Pipeline 실행 시 venv 에러 가능 (이미지 재빌드 필요)"
-  fi
 
   SECRET=$(curl -sS -u admin:password \
     "http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp" 2>/dev/null \
     | sed -n 's/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p' | head -n1 || true)
   if [ -n "$SECRET" ]; then
-    mkdir -p /data/jenkins-agent
-    AGENT_RUN=/data/jenkins-agent/run.sh
-    cat > "$AGENT_RUN" <<AGENT_EOF
-#!/usr/bin/env bash
-set -e
-cd /data/jenkins-agent
-if [ ! -f agent.jar ]; then
-  cp /opt/jenkins-agent.jar agent.jar 2>/dev/null || \
-    curl -sf -o agent.jar http://127.0.0.1:18080/jnlpJars/agent.jar
-fi
-exec java -jar agent.jar -url http://127.0.0.1:18080 \\
-  -secret $SECRET -name mac-ui-tester -workDir /data/jenkins-agent
-AGENT_EOF
-    chmod +x "$AGENT_RUN"
-    # supervisord.conf 는 /opt/jenkins-agent-run.sh 를 참조하므로 심볼릭 링크 유지
-    ln -sfn "$AGENT_RUN" /opt/jenkins-agent-run.sh
-    supervisorctl -c /etc/supervisor/supervisord.conf start jenkins-agent 2>/dev/null || true
-    log "jenkins-agent 기동 요청 완료 (run-script: $AGENT_RUN)."
+    log "=========================================================================="
+    log "Jenkins agent 연결 정보 (호스트 Mac 에서 mac-agent-setup.sh 로 연결)"
+    log "  NODE_SECRET: $SECRET"
+    log "  AGENT_NAME : mac-ui-tester"
+    log "  JENKINS_URL: http://localhost:18080   (호스트 Mac 기준)"
+    log "=========================================================================="
+    log "호스트 Mac 에서:"
+    log "  cd <e2e-pipeline 위치>"
+    log "  NODE_SECRET=$SECRET ./offline/mac-agent-setup.sh"
+    log ""
+    log "첫 실행 시 JDK21 + Python venv + Playwright Chromium 설치 후 agent 연결 → headed Chromium 창이 Mac 에 뜸"
+    log "=========================================================================="
   else
-    warn "jenkins-agent NODE_SECRET 추출 실패. Jenkins Node 'mac-ui-tester' 존재 확인 필요."
-    warn "  수동 복구: docker exec <container> bash /opt/provision-apps.sh"
+    warn "Jenkins Node 'mac-ui-tester' 미등록 또는 응답 불가. 수동 복구: docker exec <container> bash /opt/provision-apps.sh"
   fi
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-# 5. foreground wait (supervisord 종료까지 blocking)
+# 6. foreground wait (supervisord 종료까지 blocking)
 # ────────────────────────────────────────────────────────────────────────────
 log "준비 완료. supervisord wait..."
 wait "$SUPERVISOR_PID"
