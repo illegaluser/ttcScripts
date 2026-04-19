@@ -134,9 +134,8 @@ bash install-mac.sh
 |---|---|---|
 | **Apache JMeter** | 5.6.3 | 성능시험 엔진 (GUI + CLI) |
 | **JMeter Plugins Manager** | 1.12 | 플러그인 자동 설치/관리 |
-| **JMeter 일반 부하시험 플러그인** | (jmeter-plugins.org) | Custom Thread Groups, Throughput Shaping Timer, 그래프 4종, PerfMon, FIFO, Auto-Stop 등 (총 ~20종) |
-| **WebSocket Samplers** | Peter Doornbosch | WebSocket 부하시험용 |
-| **Feather Wand (jmeter.ai)** | 2.0.4 | LLM 기반 시나리오 자동 생성/분석 어시스턴트 |
+| **JMeter 플러그인** | (jmeter-plugins.org) | 18개 ID 일괄 설치 — Custom Thread Groups, Throughput Shaping Timer, 그래프 4종, PerfMon, AutoStop, WebSocket Samplers 등 ([§5.6 완전 인벤토리](#56-설치된-jmeter-플러그인-완전-인벤토리), [jmeter-plugin-list.txt](jmeter-plugin-list.txt)) |
+| **Feather Wand (jmeter.ai)** | 2.0.4 | LLM 기반 시나리오 자동 생성/분석 어시스턴트 ([§5.8](#58-jmeterai-feather-wand-심화-가이드)) |
 | **Xvfb / fluxbox / x11vnc / noVNC 1.6.0** | — | 브라우저에서 JMeter Swing GUI 사용 |
 | **nginx / supervisord / tini** | — | 프로세스 관리 + 게이트웨이 |
 
@@ -489,23 +488,186 @@ jmeter.reportgenerator.apdex_satisfied_threshold=500
 jmeter.reportgenerator.apdex_tolerated_threshold=1500
 ```
 
-### 5.6 추천 플러그인 사용 가이드
+### 5.6 설치된 JMeter 플러그인 완전 인벤토리
 
-#### Custom Thread Groups (`jpgc-casutg`)
-| Thread Group 종류 | 사용 시점 |
+이 이미지는 빌드 시 [jmeter-plugin-list.txt](jmeter-plugin-list.txt) 의 ID 를
+[PluginsManagerCMD](https://jmeter-plugins.org/wiki/PluginsManagerAutomated/) 로
+일괄 설치합니다. **설치된 플러그인 ID 총 18개** (Standard Set 메타 포함):
+
+```bash
+# 현재 설치 상태 확인
+docker exec perf-allinone ls /opt/apache-jmeter/lib/ext/ | grep -Ei 'jpgc|websocket|feather'
+
+# Plugins Manager 로 설치 상태
+docker exec perf-allinone /opt/apache-jmeter/bin/PluginsManagerCMD.sh status
+```
+
+#### 5.6.1 부하 모델링 / 스레드 그룹
+
+##### `jpgc-casutg` — Custom Thread Groups ⭐
+
+가장 자주 쓰는 플러그인. 3가지 스레드 그룹 제공:
+
+| 스레드 그룹 | 기본 JMeter Thread Group 대비 | 사용 시점 |
+|---|---|---|
+| **bzm - Concurrency Thread Group** | 시간 기반 동시 사용자 제어 가능 | **기본값 추천** — 대부분의 API 부하 시험 |
+| **bzm - Arrivals Thread Group** | TPS(유입률) 기반으로 제어 | "분당 N건 들어오는 상황" 재현 |
+| **jp@gc - Stepping Thread Group** | 단계적으로 N명씩 ramp-up | 계단형 부하 (스파이크 탐지) |
+| **jp@gc - Ultimate Thread Group** | 복잡한 multi-stage 패턴 | Spike·Soak·Stress 복합 시나리오 |
+
+**경로**: Test Plan 우클릭 → **Add → Threads (Users)** → 위 목록
+
+##### `jpgc-tst` — Throughput Shaping Timer ⭐
+
+**목적**: 시간대별로 정확한 **RPS** (Requests Per Second) 제어. `Concurrency Thread Group`
+과 짝으로 쓰면 "동시 사용자 N명이 초당 M건 유입" 을 정밀하게 재현.
+
+**경로**: Thread Group 우클릭 → **Add → Timer → jp@gc - Throughput Shaping Timer**
+
+**예시 설정** (0-60초 100rps, 60-300초 500rps, 300-360초 0rps):
+| Start RPS | End RPS | Duration (sec) |
+|---|---|---|
+| 100 | 100 | 60 |
+| 500 | 500 | 240 |
+| 0 | 0 | 60 |
+
+#### 5.6.2 함수 / 컨트롤러
+
+##### `jpgc-functions` — Custom JMeter Functions
+
+기본 JMeter 함수(`__UUID`, `__time` 등) 를 보강하는 함수 팩.
+주요 추가 함수: `__strReplace`, `__substring`, `__isPropDefined`, `__envOrDefault`.
+
+**호출 방식**: 스크립트 입력 칸에 `${__envOrDefault(HOST,localhost)}` 같이 삽입.
+
+##### `jpgc-prmctl` — Parameterized Controller & Set Variables Action
+
+**Parameterized Controller**: 반복 블록을 함수처럼 호출 + 파라미터 주입.
+**Set Variables Action**: `vars.put` 를 GUI 로 (JSR223 없이).
+
+#### 5.6.3 결과 시각화 / 리포팅
+
+JMeter 기본 Summary Report 만으로는 부족한 **시간축 기반 그래프** 4종 + 리포트 도구.
+
+| 플러그인 ID | 제공 리스너 | 보여주는 것 |
+|---|---|---|
+| `jpgc-graphs-basic` | **Hits/sec**, **Active Threads Over Time**, **Response Times Over Time** | 기본 3종 — 시나리오 기동 직후 붙이면 됨 |
+| `jpgc-graphs-additional` | Bytes Throughput Over Time, Latencies Over Time, Connect Times Over Time, Response Codes per Second, Transactions per Second(TPS) | 세부 진단용 5종 |
+| `jpgc-graphs-composite` | **Composite Timeline Graph** | 여러 그래프를 한 타임라인에 겹쳐 보기 (TPS ⟷ Error% 같은 패턴) |
+| `jpgc-graphs-dist` | Response Times Distribution, Response Times Percentiles | 히스토그램·백분위 분포 |
+| `jpgc-perfmon` | **PerfMon Metrics Collector** | 대상 서버 CPU/Memory/Disk/Network — 대상 서버에 [ServerAgent](https://github.com/undera/perfmon-agent) 설치 필요 |
+| `jpgc-mergeresults` | — (Tool) | 여러 `.jtl` 합치기 (분산 시험 결과 통합) |
+| `jpgc-synthesis` | **Synthesis Report** | Aggregate + Summary 를 합친 개선판 리포트 |
+
+**경로** (리스너): Thread Group 우클릭 → **Add → Listener → jp@gc - ...**
+**경로** (Tool): **Tools 메뉴 → ...** (Merge Results, Synthesis Report)
+
+##### PerfMon 사용 시 주의
+대상 서버에 `ServerAgent` (Java 기반, ~10MB) 를 먼저 기동해야 합니다:
+```bash
+# 대상 서버에서
+cd ServerAgent-2.2.3
+./startAgent.sh                    # 기본 포트 4444
+```
+JMeter 에서는 PerfMon Metrics Collector 에 `<대상IP>:4444` + 수집 지표 선택.
+
+#### 5.6.4 샘플러 / 유틸
+
+| 플러그인 ID | 제공 요소 | 용도 |
+|---|---|---|
+| `jpgc-cmd` | **Command-Line Graph Plotting Tool (`JMeterPluginsCMD`)** | CLI 에서 .jtl → PNG 그래프 직접 생성 (CI 연동) |
+| `jpgc-dummy` | **jp@gc - Dummy Sampler** | 실제 HTTP 호출 없이 응답을 시뮬레이션 — 시나리오 로직 디버깅 |
+| `jpgc-ffw` | **Flexible File Writer** | 응답의 특정 필드만 CSV 로 기록 (대용량 .jtl 대비) |
+| `jpgc-fifo` | **Inter-Thread Communication** | FIFO Queue 로 스레드 간 데이터 전달 (프로듀서/컨슈머 패턴) |
+| `jpgc-csl` | **Console Status Logger** | CLI 실행 중 1초마다 실시간 카운터를 stdout 에 |
+| `jpgc-autostop` ⭐ | **Auto-Stop Listener** | 조건(에러율 5% 초과, 평균 응답 시간 5초 초과 등) 충족 시 테스트 자동 종료 |
+| `jpgc-csvars` | **Variables From CSV File** | 기본 CSV Data Set Config 의 개선판 (파일 전체를 한 번에 로드) |
+| `jpgc-plancheck` | **Test Plan Check Tool** | .jmx 의 정합성 검사 (중복 이름, 누락 참조 등) |
+| `jpgc-filterresults` | **Filter Results Tool** | .jtl 을 조건으로 필터링 (에러만 / 특정 샘플러만) |
+
+##### Auto-Stop Listener 실전 예시 ⭐
+
+폭주 시 측정 기계 자체가 다운되는 것을 예방하는 **안전망**. 정식 측정에 필수.
+
+**경로**: Thread Group 우클릭 → **Add → Listener → jp@gc - AutoStop Listener**
+
+권장 초기 설정:
+| 조건 | 값 | 의미 |
+|---|---|---|
+| Error rate | `> 50 %` for `30` sec | 30초 연속 에러율 50% 넘으면 중단 |
+| Average response time | `> 10000` ms for `30` sec | 평균 응답시간 10초 넘으면 중단 |
+| 95% line | `> 30000` ms for `60` sec | p95 가 30초 넘으면 중단 |
+
+##### CI 에서 그래프 자동 생성 (`jpgc-cmd`)
+
+```bash
+# .jtl 을 받은 후 PNG 생성
+docker exec perf-allinone /opt/apache-jmeter/bin/JMeterPluginsCMD.sh \
+  --generate-png /data/jmeter/reports/tps.png \
+  --input-jtl /data/jmeter/results/sample-${TS}.jtl \
+  --plugin-type TransactionsPerSecond \
+  --width 1280 --height 720
+```
+
+#### 5.6.5 WebSocket
+
+##### `websocket-samplers` — WebSocket Samplers by Peter Doornbosch ⭐
+
+WebSocket 연결·메시지 부하 시험용. 7개 샘플러 제공:
+
+| 샘플러 | 용도 |
 |---|---|
-| **Concurrency Thread Group** | 동시 사용자 수를 시간에 따라 변화 (가장 자주 사용) |
-| **Stepping Thread Group** | 사용자를 N명씩 단계적으로 추가 (계단형 부하) |
-| **Ultimate Thread Group** | 복잡한 부하 패턴 (Spike, Soak 등 multi-stage) |
+| **WebSocket Open Connection** | 연결 수립 (JSESSIONID 등 쿠키 자동 전파) |
+| **WebSocket Single Write Sampler** | 한 메시지 전송 |
+| **WebSocket Single Read Sampler** | 서버로부터 한 메시지 수신 (타임아웃 지정) |
+| **WebSocket Request-Response Sampler** | 1요청-1응답 패턴 (가장 자주 사용) |
+| **WebSocket Ping/Pong Sampler** | Keep-alive 체크 |
+| **WebSocket Close** | 명시적 종료 |
+| **WebSocket Session Filter** | 같은 스레드 내 샘플러들이 동일 세션 공유 |
 
-#### Throughput Shaping Timer (`jpgc-tst`)
-원하는 RPS(Requests Per Second) 를 시간대별로 정확히 제어. 예: 0-60초 100rps → 60-300초 500rps.
+> ⚠️ **주의**: 카탈로그의 `jpgc-wsc` 는 **Weighted Switch Controller** 이며 WebSocket 과
+> 무관합니다. WebSocket 부하 시험은 반드시 `websocket-samplers` 를 사용하세요.
+> (이 혼동은 실제로 자주 발생 — [jmeter-plugin-list.txt](jmeter-plugin-list.txt) 주석에도 명시)
 
-#### PerfMon (`jpgc-perfmon`)
-대상 서버의 CPU/Memory/Disk/Network를 부하시험과 동시 수집. 대상 서버에 `ServerAgent` 설치 필요.
+**경로**: Thread Group 우클릭 → **Add → Sampler → WebSocket ...**
 
-#### Auto-Stop Listener (`jpgc-autostop`)
-조건 만족 시 테스트 자동 종료 (예: 에러율 5% 초과, 평균 응답시간 5초 초과).
+#### 5.6.6 AI 어시스턴트
+
+##### `feather-wand-jmeter-ai-agent` — jmeter.ai (Feather Wand) ⭐
+
+로컬 LLM(Ollama) 기반 시나리오 어시스턴트. `user.properties` 의 `ollama.*` 키를 읽어
+동작. **전용 심화 가이드**: [§5.8](#58-jmeterai-feather-wand-심화-가이드).
+
+#### 5.6.7 메타 패키지
+
+##### `jpgc-standard` — Standard Set
+
+개별 ID 와 일부 중복되는 묶음 패키지. [jmeter-plugin-list.txt](jmeter-plugin-list.txt) 마지막에
+안전망 역할로 포함되어 있어 **향후 개별 ID 가 누락되더라도 주요 기능이 빠지지 않도록**
+보장합니다. PluginsManagerCMD 의 install 단계는 멱등이므로 중복 설치 문제 없음.
+
+#### 5.6.8 플러그인 추가·제거 방법
+
+**① `jmeter-plugin-list.txt` 수정 → 이미지 재빌드** (권장):
+```bash
+# e2e-pipeline/perf-offline/jmeter-plugin-list.txt 에 한 줄 추가/삭제
+./perf-offline/build-allinone.sh
+```
+
+**② 기동 중 컨테이너에 임시 추가** (다음 재기동까지만 유효하게 하려면 볼륨 밖에 설치):
+```bash
+docker exec perf-allinone /opt/apache-jmeter/bin/PluginsManagerCMD.sh install jpgc-rotating-listener
+docker exec perf-allinone supervisorctl restart jmeter-gui
+```
+
+**③ 사용자 제공 JAR 을 `/data/jmeter/lib-ext/` 에 배치** (볼륨 영속):
+```bash
+docker cp my-custom-plugin.jar perf-allinone:/data/jmeter/lib-ext/
+docker exec perf-allinone supervisorctl restart jmeter-gui
+# entrypoint 가 /data/jmeter/lib-ext/*.jar 를 /opt/apache-jmeter/lib/ext/ 로 심볼릭 링크
+```
+
+**카탈로그**: https://jmeter-plugins.org/wiki/Start/ (전체 플러그인 ID 목록)
 
 ### 5.8 jmeter.ai (Feather Wand) 심화 가이드
 
