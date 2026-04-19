@@ -147,13 +147,36 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
     warn "앱 프로비저닝 실패. 컨테이너는 계속 실행됩니다."
     warn "재시도: docker exec <container> bash /opt/provision-apps.sh"
   fi
+fi
 
-  # Jenkins 에이전트 secret 추출 후 supervisord 에 기동 요청
+# ────────────────────────────────────────────────────────────────────────────
+# 5. Jenkins 에이전트 기동 준비 — 매 기동마다 실행 (멱등)
+#
+# /opt 는 컨테이너 ephemeral 이므로 docker restart 시 사라진다. 실제 run-script 와
+# agent.jar 는 /data/jenkins-agent 에 저장하고 /opt/jenkins-agent-run.sh 는 심볼릭
+# 링크로만 유지한다. NODE_SECRET 은 Jenkins master 측에서 node 별로 고정되므로
+# 재추출해도 값이 바뀌지 않는다 (Node 를 삭제하지 않는 한 멱등).
+# ────────────────────────────────────────────────────────────────────────────
+if [ -f "$DATA/.app_provisioned" ]; then
+  log "Jenkins 에이전트 기동 준비..."
+  # Jenkins 가 응답 가능한지 재확인 (provision 없이 단순 restart 된 경우)
+  _waited=0
+  until curl -sf --max-time 3 -o /dev/null -u admin:password http://127.0.0.1:18080/api/json; do
+    sleep 3
+    _waited=$((_waited + 3))
+    if [ $_waited -ge 120 ]; then
+      warn "Jenkins 가 2분 내 준비되지 않아 에이전트 기동 스킵. 수동 재시도 필요."
+      break
+    fi
+  done
+
   SECRET=$(curl -sS -u admin:password \
     "http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp" 2>/dev/null \
     | sed -n 's/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p' | head -n1 || true)
   if [ -n "$SECRET" ]; then
-    cat > /opt/jenkins-agent-run.sh <<AGENT_EOF
+    mkdir -p /data/jenkins-agent
+    AGENT_RUN=/data/jenkins-agent/run.sh
+    cat > "$AGENT_RUN" <<AGENT_EOF
 #!/usr/bin/env bash
 set -e
 cd /data/jenkins-agent
@@ -164,11 +187,14 @@ fi
 exec java -jar agent.jar -url http://127.0.0.1:18080 \\
   -secret $SECRET -name mac-ui-tester -workDir /data/jenkins-agent
 AGENT_EOF
-    chmod +x /opt/jenkins-agent-run.sh
-    supervisorctl -c /etc/supervisor/supervisord.conf start jenkins-agent || true
-    log "jenkins-agent 기동 요청 완료."
+    chmod +x "$AGENT_RUN"
+    # supervisord.conf 는 /opt/jenkins-agent-run.sh 를 참조하므로 심볼릭 링크 유지
+    ln -sfn "$AGENT_RUN" /opt/jenkins-agent-run.sh
+    supervisorctl -c /etc/supervisor/supervisord.conf start jenkins-agent 2>/dev/null || true
+    log "jenkins-agent 기동 요청 완료 (run-script: $AGENT_RUN)."
   else
-    warn "jenkins-agent NODE_SECRET 추출 실패. 수동으로 agent.jnlp 확인 필요."
+    warn "jenkins-agent NODE_SECRET 추출 실패. Jenkins Node 'mac-ui-tester' 존재 확인 필요."
+    warn "  수동 복구: docker exec <container> bash /opt/provision-apps.sh"
   fi
 fi
 

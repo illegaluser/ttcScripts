@@ -637,18 +637,49 @@ docker logs dscore-qa 2>&1 | grep -E '\[⚠|\[✗'
 - **원인**: 빌드 시 `offline/jenkins-plugins/` 에 hpi 가 비어 있었음
 - **폐쇄망에서 복구 불가** → 온라인 머신에서 [1.3 빌드 단계별 상세](#13-빌드-단계별-상세) 재실행 후 새 tar.gz 재배포 필요
 
-#### (E) Node offline
+#### (E) Node offline — Jenkins Pipeline 이 `'mac-ui-tester' is offline` 에서 멈춤
 
-- **증상**: 체크리스트 #9 에서 `offline: true`
-- **원인**: jenkins-agent 가 NODE_SECRET 추출 실패 또는 JNLP 포트(50001) 충돌
-- **복구**:
+- **증상**: 체크리스트 #9 에서 `offline: true`, 또는 Pipeline Console 에 `Still waiting to schedule task / 'mac-ui-tester' is offline` 반복
+- **원인별 분기**:
+
+  1. **`/opt/jenkins-agent-run.sh` 부재** (가장 흔함) — `/opt` 는 컨테이너 ephemeral 이므로 `docker restart` / 재생성 시 사라진다. 과거 버전 이미지는 이 스크립트를 첫 프로비저닝 때만 만들어 `/data/.app_provisioned` 가 있으면 재생성하지 않음.
+  2. **NODE_SECRET 불일치** — Jenkins Node 를 삭제·재생성하면 secret 이 바뀌는데 run-script 는 옛 값 사용.
+  3. **JNLP 포트(50001) 충돌** — 드묾.
+- **진단**:
 
   ```bash
-  docker exec dscore-qa supervisorctl status jenkins-agent
-  docker exec dscore-qa supervisorctl restart jenkins-agent
-  # 여전히 offline 이면:
-  docker exec dscore-qa bash /opt/provision-apps.sh   # Node 재등록 + secret 재추출
+  docker exec dscore-qa bash -c '
+    ls -la /opt/jenkins-agent-run.sh /data/jenkins-agent/run.sh 2>&1
+    supervisorctl status jenkins-agent
+    tail -20 /data/logs/jenkins-agent.err.log
+    curl -sS -u admin:password http://127.0.0.1:18080/computer/mac-ui-tester/api/json \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(f\"offline={d.get(chr(39)+chr(111)+chr(102)+chr(102)+chr(108)+chr(105)+chr(110)+chr(101)+chr(39))}\")" 2>/dev/null || true
+  '
   ```
+
+- **복구 A — 자동 재생성 (2026-04-19 이후 이미지)**:
+
+  ```bash
+  docker restart dscore-qa   # entrypoint 가 매 기동마다 run.sh 재생성 + agent 기동
+  ```
+
+- **복구 B — 구버전 이미지 응급 패치 (재빌드 전 임시 복구)**:
+
+  ```bash
+  docker exec dscore-qa bash -c '
+    SECRET=$(curl -sS -u admin:password http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp \
+      | sed -n "s/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p" | head -n1)
+    mkdir -p /data/jenkins-agent
+    printf "#!/usr/bin/env bash\nset -e\ncd /data/jenkins-agent\nif [ ! -f agent.jar ]; then cp /opt/jenkins-agent.jar agent.jar 2>/dev/null || curl -sf -o agent.jar http://127.0.0.1:18080/jnlpJars/agent.jar; fi\nexec java -jar agent.jar -url http://127.0.0.1:18080 -secret %s -name mac-ui-tester -workDir /data/jenkins-agent\n" "$SECRET" > /data/jenkins-agent/run.sh
+    chmod +x /data/jenkins-agent/run.sh
+    ln -sfn /data/jenkins-agent/run.sh /opt/jenkins-agent-run.sh
+    supervisorctl restart jenkins-agent
+  '
+  sleep 5
+  docker exec dscore-qa supervisorctl status jenkins-agent   # RUNNING 확인
+  ```
+
+- **복구 C — Node 자체가 삭제됐거나 secret 무효**: `docker exec dscore-qa bash /opt/provision-apps.sh` (Node 재등록 + secret 재추출) → `docker restart dscore-qa`
 
 ### 2.7 프로비저닝 재실행
 
