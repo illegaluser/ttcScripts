@@ -113,26 +113,24 @@ trap _term SIGTERM SIGINT
 #    Jenkins REST Credentials/Job/Node (setup 5-2,5-4,5-5)
 # ────────────────────────────────────────────────────────────────────────────
 if [ ! -f "$DATA/.app_provisioned" ]; then
-  log "서비스 헬스 대기 (최대 5분)..."
+  log "서비스 헬스 대기 (dify-api/dify-web/jenkins 전부 HTTP 200, 최대 10분)..."
+  # NOTE: provision-apps.sh 의 curl 폭탄이 dify-api gunicorn 워커를 데드락시키지 않도록
+  # 반드시 dify-api (/console/api/setup) 까지 실제 200 응답하는 것을 확인한 뒤 진입한다.
+  # --max-time 3 으로 개별 curl hang 을 차단 (gunicorn 마스터만 뜨고 워커가 import 중이면
+  # connect 는 성공해도 응답은 지연됨).
   _waited=0
-  until curl -sf http://127.0.0.1:5001/health >/dev/null 2>&1 \
-     || curl -sf http://127.0.0.1:18081/install >/dev/null 2>&1; do
+  _limit=600
+  until curl -sf --max-time 3 -o /dev/null http://127.0.0.1:5001/console/api/setup \
+     && curl -sf --max-time 3 -o /dev/null http://127.0.0.1:18081/install \
+     && curl -sf --max-time 3 -o /dev/null -u admin:password http://127.0.0.1:18080/api/json; do
     sleep 5
     _waited=$((_waited + 5))
-    if [ $_waited -ge 300 ]; then
-      err "Dify/nginx 가 5분 내 준비되지 않았습니다. /data/logs 확인 필요."
+    if [ $_waited -ge $_limit ]; then
+      err "dify-api/dify-web/jenkins 중 일부가 10분 내 준비되지 않음. /data/logs 확인."
       break
     fi
   done
-
-  until curl -sf -u admin:password http://127.0.0.1:18080/api/json >/dev/null 2>&1; do
-    sleep 5
-    _waited=$((_waited + 5))
-    if [ $_waited -ge 600 ]; then
-      err "Jenkins 가 10분 내 준비되지 않았습니다. /data/logs/jenkins.err.log 확인 필요."
-      break
-    fi
-  done
+  log "헬스 대기 완료 (${_waited}s 경과)."
 
   log "앱 프로비저닝 시작 (provision-apps.sh)"
   export DIFY_URL="http://127.0.0.1:18081"
