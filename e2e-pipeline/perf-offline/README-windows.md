@@ -559,10 +559,11 @@ JMeter GUI:
 
 **Windows 호스트에서 특히 확인할 포인트**:
 
-1. JMeter GUI 상단 🪶 깃펜 아이콘 클릭 또는 트리 요소 우클릭 → `@AI`
-2. 챗에 한 줄 보내고 응답이 오면 성공:
+1. JMeter 좌측 트리에서 **Test Plan 우클릭 → Add → Non-Test Elements → Feather Wand**
+   (공식 설치 경로 — 메인 README [§5.8.4](README.md#584-챗-패널-열기--공식-메뉴-경로) 참조)
+2. 생성된 Feather Wand 노드의 챗 입력창에 한 줄 보내고 응답이 오면 성공:
    ```
-   안녕, 어떤 모델이야?
+   Hello, what model are you?
    ```
 3. **GPU 가속 관찰** — Windows 에서만 가능한 검증:
    ```powershell
