@@ -9,7 +9,8 @@ __pycache__/
 e2e-pipeline/.env
 e2e-pipeline/.dify-cookies.txt
 e2e-pipeline/setup.log
-e2e-pipeline/jenkins-init/
+e2e-pipeline/jenkins-init/*
+!e2e-pipeline/jenkins-init/*.groovy
 e2e-pipeline/docker-compose.override.yaml
 
 # Jenkins 에이전트 바이너리 (런타임에 다운로드)
