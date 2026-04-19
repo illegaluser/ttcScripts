@@ -1,0 +1,125 @@
+# ============================================================================
+# JMeter Performance All-in-One — 단일 이미지 (폐쇄망 배포용)
+# 이 Dockerfile 은 반드시 `build-allinone.sh` 로 빌드되어야 한다.
+#
+# Ollama / LLM 모델은 이 이미지에 들어 있지 않다.
+#   → 호스트(Mac/Windows)에 별도 설치한 Ollama (host.docker.internal:11434) 를 사용.
+#   → 호스트 GPU(Apple Metal/MLX, NVIDIA CUDA, AMD ROCm) 가속을 그대로 활용한다.
+#   설치/모델 반입 절차: README-mac.md / README-windows.md 참조.
+#
+# 결과 이미지 크기 예상: 2-3GB (압축 전).
+# 빌드 요구사항: 디스크 여유 10GB+, 네트워크(빌드 시점만), Docker buildx 권장.
+# 멀티 아키: 폐쇄망 타겟과 동일해야 함 (보통 linux/amd64 또는 linux/arm64).
+# ============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 단일 스테이지: Temurin JDK 21 (Ubuntu jammy) 기반
+# JMeter + JMeter Plugins + jmeter.ai + xvfb/x11vnc/noVNC + nginx
+# ─────────────────────────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jdk-jammy
+
+USER root
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Seoul
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# -- OS 패키지 (GUI 가상 디스플레이 + 웹뷰어 + supervisord + nginx + 한글 폰트) --
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget unzip jq tini sudo gosu \
+    supervisor nginx \
+    xvfb x11vnc fluxbox xterm \
+    python3 python3-pip python3-numpy \
+    fonts-noto-cjk fonts-dejavu-core \
+    libxext6 libxrender1 libxtst6 libxi6 libxrandr2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -- websockify (noVNC 백엔드) --
+RUN pip3 install --no-cache-dir --break-system-packages 2>/dev/null \
+    websockify==0.12.0 || pip3 install --no-cache-dir websockify==0.12.0
+
+# -- noVNC 정적 자산 --
+# 공식 stable: v1.6.0 (2025-03-12). v1.7.0-beta 는 베타라 stable 채택.
+ARG NOVNC_VERSION=1.6.0
+RUN mkdir -p /opt/novnc && \
+    curl -fL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
+      -o /tmp/novnc.tar.gz && \
+    tar xzf /tmp/novnc.tar.gz -C /opt/novnc --strip-components=1 && \
+    rm /tmp/novnc.tar.gz && \
+    ln -sf /opt/novnc/vnc.html /opt/novnc/index.html
+
+# -- Apache JMeter --
+ARG JMETER_VERSION=5.6.3
+ENV JMETER_HOME=/opt/apache-jmeter
+ENV PATH=${JMETER_HOME}/bin:${PATH}
+RUN curl -fL "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz" \
+      -o /tmp/jmeter.tgz && \
+    mkdir -p "${JMETER_HOME}" && \
+    tar xzf /tmp/jmeter.tgz -C "${JMETER_HOME}" --strip-components=1 && \
+    rm /tmp/jmeter.tgz && \
+    "${JMETER_HOME}/bin/jmeter" --version
+
+# -- JMeter Plugins Manager + cmdrunner (플러그인 설치 도구) --
+# 좌표 출처: jmeter-plugins.org/wiki/PluginsManagerAutomated/
+# Maven Central: kg.apc:jmeter-plugins-manager (현 최신 1.12), kg.apc:cmdrunner
+ARG JMETER_PM_VERSION=1.12
+ARG CMDRUNNER_VERSION=2.3
+RUN curl -fL "https://repo1.maven.org/maven2/kg/apc/jmeter-plugins-manager/${JMETER_PM_VERSION}/jmeter-plugins-manager-${JMETER_PM_VERSION}.jar" \
+      -o "${JMETER_HOME}/lib/ext/jmeter-plugins-manager.jar" && \
+    curl -fL "https://repo1.maven.org/maven2/kg/apc/cmdrunner/${CMDRUNNER_VERSION}/cmdrunner-${CMDRUNNER_VERSION}.jar" \
+      -o "${JMETER_HOME}/lib/cmdrunner.jar" && \
+    java -cp "${JMETER_HOME}/lib/ext/jmeter-plugins-manager.jar" \
+      org.jmeterplugins.repository.PluginManagerCMDInstaller && \
+    chmod +x "${JMETER_HOME}/bin/PluginsManagerCMD.sh"
+
+# -- 플러그인 일괄 설치 (일반 성능시험 + WebSocket + jmeter.ai 포함) --
+# jmeter-plugin-list.txt 의 ID 들은 jmeter-plugins.org 공식 카탈로그 기준.
+# 특히 'feather-wand-jmeter-ai-agent' (jmeter.ai) 도 카탈로그 등록되어 있어
+# Plugins Manager 가 jar 다운로드/배치까지 알아서 처리한다.
+COPY perf-offline/jmeter-plugin-list.txt /tmp/jmeter-plugin-list.txt
+RUN PLUGIN_IDS=$(grep -v '^#' /tmp/jmeter-plugin-list.txt | sed 's/[[:space:]]*#.*$//' | grep -v '^[[:space:]]*$' | tr '\n' ',' | sed 's/,$//') && \
+    echo "Installing JMeter plugins: ${PLUGIN_IDS}" && \
+    "${JMETER_HOME}/bin/PluginsManagerCMD.sh" install "${PLUGIN_IDS}" && \
+    echo "lib/ext jar count:" && ls -1 "${JMETER_HOME}/lib/ext/" | wc -l
+
+# -- JMeter user.properties — Feather Wand (jmeter.ai) 호스트 Ollama 기본값 --
+# 키 출처: github.com/QAInsights/jmeter-ai/blob/main/jmeter-ai-sample.properties
+# 호스트: host.docker.internal (Docker Desktop 이 호스트로 매핑)
+#         Linux 호스트는 docker run 시 --add-host=host.docker.internal:host-gateway 필요.
+# 모델: gemma4:e2b 기본. 다른 모델은 호스트 ollama pull 후 user.properties 수정.
+RUN cat >> "${JMETER_HOME}/bin/user.properties" <<'EOF'
+
+# === Feather Wand (jmeter.ai) — 호스트 Ollama 기본값 ===
+# 컨테이너 내부에서 호스트의 Ollama (port 11434) 를 호출한다.
+# Docker Desktop (Mac/Windows) 에서는 host.docker.internal 이 자동 동작.
+ollama.host=http://host.docker.internal
+ollama.port=11434
+ollama.default.model=gemma4:e2b
+ollama.temperature=0.5
+ollama.max.history.size=10
+ollama.thinking.mode=DISABLED
+ollama.thinking.level=MEDIUM
+ollama.request.timeout.seconds=300
+ollama.system.prompt=You are a JMeter performance testing assistant. Answer in concise Korean unless asked otherwise.
+EOF
+
+# -- 시나리오 seed (.jmx 샘플) --
+COPY perf-offline/scenarios-seed/ /opt/seed/jmeter/scenarios/
+
+# -- supervisord / nginx / entrypoint --
+COPY perf-offline/supervisord.conf      /etc/supervisor/supervisord.conf
+COPY perf-offline/nginx-perf.conf       /etc/nginx/nginx.conf
+COPY perf-offline/entrypoint-allinone.sh /entrypoint.sh
+
+# -- nginx default 비활성화 + entrypoint 실행 권한 --
+RUN rm -f /etc/nginx/sites-enabled/default && \
+    chmod +x /entrypoint.sh
+
+# -- 포트: 18090 = 통합 HTTP (noVNC + 호스트 Ollama proxy) --
+# Ollama 는 호스트에서 동작하므로 컨테이너 11434 노출 없음.
+EXPOSE 18090
+
+# -- 볼륨 (영속 데이터: JMeter 시나리오/결과/리포트/사용자 .jar) --
+VOLUME ["/data"]
+
+# -- PID 1 은 tini --
+ENTRYPOINT ["/usr/bin/tini","--","/entrypoint.sh"]

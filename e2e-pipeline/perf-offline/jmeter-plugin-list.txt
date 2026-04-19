@@ -1,0 +1,47 @@
+# JMeter Plugins Manager 가 인식하는 플러그인 ID 목록.
+# Dockerfile.allinone 의 PluginsManagerCMD.sh install 단계에서 일괄 설치된다.
+# 한 줄에 하나, '#' 으로 시작하면 주석.
+#
+# 카탈로그: https://jmeter-plugins.org/wiki/Start/
+# Plugins Manager 동작: https://jmeter-plugins.org/wiki/PluginsManagerAutomated/
+
+# ─── 부하 모델링 / 스레드 그룹 ─────────────────────────────────────────────
+jpgc-casutg              # Custom Thread Groups (Concurrency / Stepping / Ultimate)
+jpgc-tst                 # Throughput Shaping Timer
+
+# ─── 함수 / 컨트롤러 ───────────────────────────────────────────────────────
+jpgc-functions           # Custom JMeter Functions
+jpgc-prmctl              # Parameterized Controller & Set Variables Action
+
+# ─── 결과 시각화 / 리포팅 ──────────────────────────────────────────────────
+jpgc-graphs-basic        # 3 Basic Graphs (Hits/sec, Active Threads, Response Times)
+jpgc-graphs-additional   # 5 Additional Graphs
+jpgc-graphs-composite    # Composite Timeline Graph
+jpgc-graphs-dist         # Distribution / Percentile Graphs
+jpgc-perfmon             # PerfMon (Servers Performance Monitoring) listener
+jpgc-mergeresults        # Merge Results
+jpgc-synthesis           # Synthesis Report
+
+# ─── 샘플러 / 리스너 / 유틸 ───────────────────────────────────────────────
+jpgc-cmd                 # Command-Line Graph Plotting Tool
+jpgc-dummy               # Dummy Sampler (디버깅)
+jpgc-ffw                 # Flexible File Writer
+jpgc-fifo                # Inter-Thread Communication (FIFO Queue)
+jpgc-csl                 # Console Status Logger
+jpgc-autostop            # Auto-Stop Listener (조건 충족 시 테스트 자동 종료)
+jpgc-csvars              # Variables From CSV File
+jpgc-plancheck           # Test Plan Check Tool
+jpgc-filterresults       # Filter Results Tool
+
+# ─── WebSocket 샘플러 (Peter Doornbosch) ───────────────────────────────────
+# 주의: jpgc-wsc 는 WebSocket 이 아니라 Weighted Switch Controller 다.
+# WebSocket 부하시험은 아래 ID 사용.
+websocket-samplers       # WebSocket Samplers by Peter Doornbosch
+
+# ─── jmeter.ai (Feather Wand) — 로컬 LLM(Ollama) 연동 어시스턴트 ─────────
+# 공식 카탈로그 ID. user.properties 의 ollama.* 키를 읽어 동작.
+feather-wand-jmeter-ai-agent
+
+# ─── Standard Set (메타) ──────────────────────────────────────────────────
+# 위 개별 ID 와 일부 중복되지만 install 단계는 멱등. 향후 누락 방지용 안전망.
+jpgc-standard            # Standard Set 묶음
