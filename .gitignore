@@ -25,3 +25,4 @@ e2e-pipeline/offline/.plugins.txt
 e2e-pipeline/offline/jenkins-plugin-manager.jar
 e2e-pipeline/offline/jenkins-plugins/
 e2e-pipeline/offline/dify-plugins/
+e2e-pipeline/jenkins-init/01-security.groovy
