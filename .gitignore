@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # Python 바이트코드
 __pycache__/
 *.pyc
@@ -15,3 +18,4 @@ e2e-pipeline/docker-compose.override.yaml
 # Jenkins 에이전트 바이너리 (런타임에 다운로드)
 e2e-pipeline/agent.jar
 e2e-pipeline/*.jar
+.DS_Store
