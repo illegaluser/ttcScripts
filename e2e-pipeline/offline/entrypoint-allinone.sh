@@ -170,6 +170,18 @@ if [ -f "$DATA/.app_provisioned" ]; then
     fi
   done
 
+  # Jenkins 워크스페이스 스켈레톤 — Pipeline Stage 1 이 .qa_home/venv/bin/activate 를
+  # 요구하지만 워크스페이스는 첫 빌드 시에만 생긴다. 미리 생성하고 전역 venv 를
+  # 심볼릭 링크해둬 첫 빌드도 바로 venv 를 찾게 한다. (멱등)
+  JENKINS_WS=/data/jenkins-agent/workspace/DSCORE-ZeroTouch-QA-Docker
+  mkdir -p "$JENKINS_WS/.qa_home/artifacts"
+  if [ -d /opt/qa-venv ]; then
+    ln -sfn /opt/qa-venv "$JENKINS_WS/.qa_home/venv"
+    log "  워크스페이스 .qa_home/venv → /opt/qa-venv 링크 완료"
+  else
+    warn "  /opt/qa-venv 미존재 — Pipeline 실행 시 venv 에러 가능 (이미지 재빌드 필요)"
+  fi
+
   SECRET=$(curl -sS -u admin:password \
     "http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp" 2>/dev/null \
     | sed -n 's/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p' | head -n1 || true)

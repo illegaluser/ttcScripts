@@ -532,30 +532,31 @@ import hudson.slaves.*
 
 def instance = Jenkins.getInstance()
 def existingNode = instance.getNode('mac-ui-tester')
+def node
 if (existingNode != null) {
-    println "[node] mac-ui-tester 이미 존재 — 건너뜀"
-    return
+    node = existingNode
+    println "[node] mac-ui-tester 기존 노드 발견 — 환경변수 갱신"
+} else {
+    def launcher = new JNLPLauncher(true)
+    def strategy = new RetentionStrategy.Always()
+    node = new DumbSlave('mac-ui-tester', '/data/jenkins-agent', launcher)
+    node.setNodeDescription('All-in-One 내부 loopback JNLP Agent')
+    node.setNumExecutors(1)
+    node.setLabelString('mac-ui-tester')
+    node.setMode(Node.Mode.EXCLUSIVE)
+    node.setRetentionStrategy(strategy)
+    instance.addNode(node)
+    println "[node] mac-ui-tester 생성 완료"
 }
-def launcher = new JNLPLauncher(true)
-def strategy = new RetentionStrategy.Always()
-def node = new DumbSlave(
-    'mac-ui-tester',
-    '/data/jenkins-agent',
-    launcher
-)
-node.setNodeDescription('All-in-One 내부 loopback JNLP Agent')
-node.setNumExecutors(1)
-node.setLabelString('mac-ui-tester')
-node.setMode(Node.Mode.EXCLUSIVE)
-node.setRetentionStrategy(strategy)
 
+// 환경변수 갱신 — 기존 EnvironmentVariablesNodeProperty 는 제거 후 재추가 (멱등)
+node.getNodeProperties().removeAll { it instanceof hudson.slaves.EnvironmentVariablesNodeProperty }
 def envList = new hudson.slaves.EnvironmentVariablesNodeProperty([
-    new hudson.slaves.EnvironmentVariablesNodeProperty.Entry('SCRIPTS_HOME','/data/jenkins-agent/workspace/DSCORE-ZeroTouch-QA-Docker')
+    new hudson.slaves.EnvironmentVariablesNodeProperty.Entry('SCRIPTS_HOME','/opt/scripts-home')
 ])
 node.getNodeProperties().add(envList)
-instance.addNode(node)
 instance.save()
-println "[node] mac-ui-tester 생성 완료"
+println "[node] SCRIPTS_HOME=/opt/scripts-home"
 GROOVY_EOF
 )
 NODE_RESP=$(jkpost --max-time 30 -X POST "${JENKINS_URL}/scriptText" \

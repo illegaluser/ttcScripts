@@ -1118,6 +1118,51 @@ docker logs dscore-qa | tail -50
     dscore-qa:allinone
   ```
 
+### Pipeline 첫 스테이지에서 `[ERROR] venv 가 존재하지 않거나 손상되었습니다`
+
+- **증상**: Jenkins Pipeline Stage 1 에서 `${WORKSPACE}/.qa_home/venv/bin/activate` 없음 에러 → 전체 빌드 FAILURE. setup.sh 재실행 안내가 나오지만 All-in-One 이미지엔 setup.sh 가 없음.
+- **원인**: 구버전 이미지 (2026-04-19 이전) 는 전역 venv 를 사전 생성하지 않고 Jenkins Node 의 `SCRIPTS_HOME` 이 비어있는 워크스페이스를 가리키고 있어 venv/`zero_touch_qa` 패키지 모두 빠져 있음.
+- **원리 (최신 빌드)**:
+  - 이미지 빌드 시 [Dockerfile.allinone](Dockerfile.allinone) 가 `/opt/qa-venv` (Python 3.13 + system-site-packages) 와 `/opt/scripts-home/zero_touch_qa` (심볼릭 링크) 를 생성
+  - [provision-apps.sh:552-554](provision-apps.sh#L552-L554) 이 Node 환경변수 `SCRIPTS_HOME=/opt/scripts-home` 설정
+  - [entrypoint-allinone.sh](entrypoint-allinone.sh) 가 매 기동마다 `${WORKSPACE}/.qa_home/venv → /opt/qa-venv` 심볼릭 링크를 만듦
+- **영구 해결**: 최신 커밋으로 이미지 재빌드 후 동일 볼륨으로 재기동.
+- **응급 복구 (구버전 이미지를 당장 써야 할 때)**:
+
+  ```bash
+  docker exec dscore-qa bash -c '
+    # 1) 전역 venv (3.13 deps 상속)
+    /usr/bin/python3 -m venv --system-site-packages /opt/qa-venv
+    /opt/qa-venv/bin/python -c "import requests, playwright, PIL" && echo "deps OK"
+
+    # 2) SCRIPTS_HOME 디렉토리
+    mkdir -p /opt/scripts-home
+    ln -sfn /opt/zero_touch_qa /opt/scripts-home/zero_touch_qa
+
+    # 3) 워크스페이스 스켈레톤
+    WS=/data/jenkins-agent/workspace/DSCORE-ZeroTouch-QA-Docker
+    mkdir -p "$WS/.qa_home/artifacts"
+    ln -sfn /opt/qa-venv "$WS/.qa_home/venv"
+
+    # 4) Jenkins Node 의 SCRIPTS_HOME 환경변수 덮어쓰기 (Groovy)
+    GROOVY="import jenkins.model.*; import hudson.slaves.*;
+      def n = Jenkins.getInstance().getNode(\"mac-ui-tester\");
+      n.getNodeProperties().removeAll { it instanceof EnvironmentVariablesNodeProperty };
+      n.getNodeProperties().add(new EnvironmentVariablesNodeProperty([
+        new EnvironmentVariablesNodeProperty.Entry(\"SCRIPTS_HOME\",\"/opt/scripts-home\")]));
+      Jenkins.getInstance().save(); println \"OK\""
+
+    CRUMB=$(curl -sS -u admin:password "http://127.0.0.1:18080/crumbIssuer/api/json" \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[\"crumbRequestField\"]+\":\"+d[\"crumb\"])")
+
+    curl -sS -u admin:password -H "$CRUMB" \
+      --data-urlencode "script=$GROOVY" \
+      http://127.0.0.1:18080/scriptText
+  '
+
+  # 5) Jenkins Pipeline 재빌드 (Dashboard → Build with Parameters)
+  ```
+
 ### Dify 웹 UI 502 Bad Gateway
 
 - dify-api 프로세스 미기동: `docker exec dscore-qa supervisorctl status dify-api`

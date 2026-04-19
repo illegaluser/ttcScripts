@@ -134,6 +134,24 @@ RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
 # -- Playwright 브라우저 엔진 (Chromium) — base 의 python3(=3.13) 에 설치 --
 RUN python3 -m playwright install --with-deps chromium
 
+# -- Zero-Touch QA 전용 venv (Jenkins Pipeline 이 참조) --
+# Jenkins Pipeline(DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline Stage 1) 은
+# ${WORKSPACE}/.qa_home/venv/bin/activate 를 요구한다. 워크스페이스는 런타임에만
+# 생기므로, 이미지 빌드 시에는 전역 venv 를 /opt/qa-venv 에 만들고 provision-apps.sh
+# 가 워크스페이스의 .qa_home/venv 를 이 경로로 심볼릭 링크한다.
+#
+# --system-site-packages 로 위 pip install 결과(requests/playwright/pillow 등)를
+# 그대로 상속. 반드시 /usr/bin/python3 (=3.13) 명시 — /usr/local 은 곧 3.12 로
+# 재연결되므로 venv 가 3.12 를 바라보면 deps 를 못 찾는다.
+RUN /usr/bin/python3 -m venv --system-site-packages /opt/qa-venv && \
+    /opt/qa-venv/bin/python -c "import requests, playwright, PIL; print('qa-venv deps OK')"
+
+# -- Jenkins Pipeline 용 SCRIPTS_HOME 디렉토리 --
+# Pipeline 의 PYTHONPATH=SCRIPTS_HOME 로 동작. 이 경로 아래에 zero_touch_qa/ 만
+# 노출해 Pipeline 의 `find ... __pycache__ -exec rm -rf` 가 다른 /opt 자산을 건드리지 않게 한다.
+RUN mkdir -p /opt/scripts-home && \
+    ln -sfn /opt/zero_touch_qa /opt/scripts-home/zero_touch_qa
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dify 서비스 런타임 보강 — pip / playwright 설치 후에 수행해야 한다.
 # (아래 단계가 pip 가 사용하는 /usr/bin/python3.13 과 별도로 /usr/local/bin/python3.12
