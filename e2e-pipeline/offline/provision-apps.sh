@@ -261,22 +261,22 @@ except Exception: sys.exit(1)
 fi
 
 # 2-3b. Ollama 모델 공급자 등록
+#
+# Dify 1.13.3 의 credential 저장 구조 (실측 2026-04-19):
+#   provider_models.credential_id ─▶ provider_model_credentials.id
+#   "Add Model credentials" POST 는 **새 credential 레코드** 추가만 할 뿐
+#   provider_models 의 credential_id 포인터를 바꾸지 않는다. 또한 Redis 에
+#   provider_model_credentials:tenant_id:...:id:<uuid> 키로 값을 캐시한다.
+#   OLLAMA_BASE_URL 을 변경한 뒤 이 두 가지를 직접 처리하지 않으면 Dify 는
+#   계속 옛 base_url 로 요청을 보내 ConnectionError 가 난다.
+#
+# 대응:
+#   1) POST credentials 로 새 레코드 등록 (upsert 가 아님 — 항상 추가)
+#   2) DB UPDATE 로 provider_models.credential_id 를 가장 최근 레코드로 swap
+#   3) Redis FLUSH — provider_model_credentials:* 및 model 다이제스트 캐시 삭제
 if [ "$DIFY_OLLAMA_INSTALLED" = "true" ]; then
-  log "2-3b. 모델 공급자 등록: ${OLLAMA_MODEL}"
-  MODELS_RESP=$(curl -sS -b "$DIFY_COOKIES" \
-      "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models" \
-      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-  if echo "$MODELS_RESP" | $PY -c "
-import json,sys
-target='''${OLLAMA_MODEL}'''
-try:
-    d=json.load(sys.stdin)
-    sys.exit(0 if any(m.get('model')==target for m in d.get('data',[])) else 1)
-except Exception: sys.exit(1)
-" 2>/dev/null; then
-    ok "  ${OLLAMA_MODEL} 이미 등록됨"
-  else
-    REG_BODY=$($PY - << PYEOF
+  log "2-3b. 모델 공급자 등록: ${OLLAMA_MODEL} (base_url=${OLLAMA_BASE_URL})"
+  REG_BODY=$($PY - << PYEOF
 import json
 print(json.dumps({
     "model": "${OLLAMA_MODEL}",
@@ -292,17 +292,77 @@ print(json.dumps({
 }))
 PYEOF
 )
-    REG_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
-        -X POST "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials" \
-        -H "Content-Type: application/json" \
-        -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
-        -d "$REG_BODY" 2>&1 || echo "HTTP:000")
-    debug "model register response: $REG_RESP"
-    if echo "$REG_RESP" | grep -qE 'HTTP:(200|201)'; then
-      ok "  ${OLLAMA_MODEL} 등록 완료"
-    else
-      warn "  등록 실패: $REG_RESP"
-    fi
+  REG_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
+      -X POST "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials" \
+      -H "Content-Type: application/json" \
+      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
+      -d "$REG_BODY" 2>&1 || echo "HTTP:000")
+  debug "model register response: $REG_RESP"
+  if echo "$REG_RESP" | grep -qE 'HTTP:(200|201)'; then
+    ok "  credentials POST 완료 (새 레코드 추가됨)"
+  elif echo "$REG_RESP" | grep -q 'already_exist'; then
+    ok "  credentials 이미 동일 구성 존재"
+  else
+    warn "  credentials POST 이상 응답: $REG_RESP"
+  fi
+
+  # 2-3c. credential_id swap: 가장 최근 추가된 host URL 레코드를 활성화
+  log "2-3c. credential_id swap (base_url=${OLLAMA_BASE_URL} 레코드 활성화)"
+  SWAP_TARGET_PATTERN=$(echo "${OLLAMA_BASE_URL}" | sed "s|'|''|g")
+  SWAP_SQL=$(cat <<SQL
+UPDATE provider_models pm
+   SET credential_id = (
+         SELECT id FROM provider_model_credentials
+          WHERE provider_name = pm.provider_name
+            AND model_name    = pm.model_name
+            AND model_type    = pm.model_type
+            AND encrypted_config LIKE '%${SWAP_TARGET_PATTERN}%'
+          ORDER BY updated_at DESC LIMIT 1
+       ),
+       updated_at = now()
+ WHERE provider_name LIKE '%ollama%'
+   AND model_name = '${OLLAMA_MODEL}'
+   AND EXISTS (
+         SELECT 1 FROM provider_model_credentials pmc
+          WHERE pmc.provider_name = pm.provider_name
+            AND pmc.model_name    = pm.model_name
+            AND pmc.model_type    = pm.model_type
+            AND pmc.encrypted_config LIKE '%${SWAP_TARGET_PATTERN}%'
+       );
+-- 중복된 구 credential 정리 (동일 모델 × 다른 base_url)
+DELETE FROM provider_model_credentials pmc
+ WHERE pmc.provider_name LIKE '%ollama%'
+   AND pmc.model_name = '${OLLAMA_MODEL}'
+   AND pmc.encrypted_config NOT LIKE '%${SWAP_TARGET_PATTERN}%'
+   AND NOT EXISTS (SELECT 1 FROM provider_models pm WHERE pm.credential_id = pmc.id);
+SQL
+)
+  SWAP_OUT=$(PGPASSWORD=difyai123456 psql -h 127.0.0.1 -U postgres -d dify -tAc "$SWAP_SQL" 2>&1 || echo "psql-error")
+  debug "swap result: $SWAP_OUT"
+  ok "  credential_id 스왑 + 잔존 레코드 정리 완료"
+
+  # 2-3d. Redis 캐시 FLUSH — Dify 는 provider_model_credentials:* 키에 base_url 포함
+  # JSON 을 캐시한다. DB 를 바꿔도 재기동 전까지 옛 값이 서빙되므로 명시 삭제.
+  log "2-3d. Redis provider_model_credentials 캐시 FLUSH"
+  # scan + del 을 bash 루프로 (Redis 는 비동기 unlink 가 없는 경우 DEL 로 대체)
+  redis-cli -h 127.0.0.1 --scan --pattern 'provider_model_credentials:*' 2>/dev/null \
+    | while read k; do redis-cli -h 127.0.0.1 DEL "$k" >/dev/null 2>&1; done
+  # 모델 다이제스트 키 (tenant:langgenius/ollama:... 형태)
+  redis-cli -h 127.0.0.1 --scan --pattern "*:langgenius/ollama:ollama:llm:${OLLAMA_MODEL}*" 2>/dev/null \
+    | while read k; do redis-cli -h 127.0.0.1 DEL "$k" >/dev/null 2>&1; done
+  ok "  Redis 캐시 삭제 완료"
+
+  # 2-3e. 반영 위해 dify-api + dify-plugin-daemon 재기동
+  if command -v supervisorctl >/dev/null 2>&1; then
+    log "2-3e. dify-api + dify-plugin-daemon 재기동 (credential cache 리로드)"
+    supervisorctl -c /etc/supervisor/supervisord.conf restart dify-api dify-plugin-daemon >/dev/null 2>&1 || true
+    # 재기동 후 dify-api /console/api/setup 이 다시 200 뜰 때까지 60s 대기
+    _w=0
+    until curl -sf --max-time 3 -o /dev/null http://127.0.0.1:5001/console/api/setup; do
+      sleep 3; _w=$((_w+3))
+      [ $_w -ge 60 ] && break
+    done
+    ok "  재기동 완료 (${_w}s)"
   fi
 fi
 
@@ -565,8 +625,11 @@ def envList = new hudson.slaves.EnvironmentVariablesNodeProperty([
     new hudson.slaves.EnvironmentVariablesNodeProperty.Entry('SCRIPTS_HOME','/opt/scripts-home')
 ])
 node.getNodeProperties().add(envList)
-instance.save()
-println "[node] SCRIPTS_HOME=/opt/scripts-home"
+// Jenkins 2.479+ 는 instance.save() 만으로 Node config.xml 에 디스크 flush 가
+// 되지 않는다. updateNode() 가 명시적으로 nodes/<name>/config.xml 을 재작성한다.
+// (과거 버전은 save() 만으로도 기록됐으나 현재는 무효 → 컨테이너 재기동 시 원복)
+instance.updateNode(node)
+println "[node] SCRIPTS_HOME=/opt/scripts-home (updateNode 로 디스크 flush)"
 GROOVY_EOF
 )
 NODE_RESP=$(jkpost --max-time 30 -X POST "${JENKINS_URL}/scriptText" \

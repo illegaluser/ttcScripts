@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Zero-Touch QA All-in-One — 번들 빌드 스크립트 (온라인 머신 전용)
+# Zero-Touch QA All-in-One — Mac 전용 이미지 빌드 스크립트 (온라인 머신)
+#
+# 본 스크립트는 `feat/allinone-mac-host-ollama` 브랜치 이미지를 만든다.
+# 원본 브랜치와의 차이:
+#   - 컨테이너 내부 Ollama 제거 (바이너리·모델 seed·supervisord 프로그램 없음)
+#   - 사전 `ollama pull` 단계 없음 → 빌드 빠름 (4GB 모델 다운로드 스킵)
+#   - 결과 이미지 5-7GB (원본 All-in-One 10-12GB 대비 4-5GB 절감)
 #
 # 동작:
 #   1) Jenkins 플러그인 hpi 다운로드 (jenkins-plugin-manager.jar 로 의존성 포함)
@@ -11,9 +17,14 @@
 # 출력: dscore-qa-allinone-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
 #
 # 요구:
-#   - Docker 26+ (buildx 활성), 디스크 40GB+ 여유
+#   - Docker 26+ (buildx 활성), 디스크 20GB+ 여유
 #   - 온라인 (Docker Hub + PyPI + github.com + marketplace.dify.ai + updates.jenkins.io 접근)
-#   - 빌드 소요: 30-90 분 (네트워크 속도 의존)
+#   - 빌드 소요: 10-30 분 (ollama pull 단계 없어 원본보다 크게 단축)
+#
+# 런타임 전제:
+#   - Mac 호스트에 Ollama 가 이미 설치·기동되어 있어야 함
+#   - docker run 에 `--add-host host.docker.internal:host-gateway` 필수
+#   - 자세한 가이드: README §4.8
 # ============================================================================
 set -euo pipefail
 
@@ -24,6 +35,9 @@ cd "$ROOT_DIR"
 # ── 설정값 ────────────────────────────────────────────────────────────────
 IMAGE_TAG="${IMAGE_TAG:-dscore-qa:allinone}"
 TARGET_PLATFORM="${TARGET_PLATFORM:-linux/amd64}"
+# OLLAMA_MODEL: 이미지에 사전 pull 되지 않음 (Mac 브랜치는 호스트 Ollama 사용).
+# 이 값은 docker buildx 가 Dockerfile ARG 로 받아두긴 하지만 실질적 효과는 없음.
+# 실제 런타임 모델 지정은 docker run 의 `-e OLLAMA_MODEL=...` 로 Dify provider 에 등록됨.
 OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
 OUTPUT_TAR="${OUTPUT_TAR:-dscore-qa-allinone-$(date +%Y%m%d-%H%M%S).tar.gz}"
 
@@ -155,17 +169,29 @@ log "  최종 파일: $ROOT_DIR/$OUTPUT_TAR ($(du -h "$ROOT_DIR/$OUTPUT_TAR" | c
 
 log ""
 log "=========================================================================="
-log "빌드 완료"
+log "빌드 완료 (Mac 전용 이미지 — 컨테이너 내부 Ollama 없음)"
 log ""
-log "폐쇄망으로 $OUTPUT_TAR 를 이동한 뒤 아래 명령으로 기동하세요:"
+log "사전 준비 (Mac 호스트):"
+log "  1. brew install ollama && brew services start ollama"
+log "  2. ollama pull ${OLLAMA_MODEL}"
+log "  3. curl http://127.0.0.1:11434/api/tags   # 응답 확인"
+log ""
+log "이미지 로드 및 기동:"
 log ""
 log "  docker load -i $OUTPUT_TAR"
 log "  docker run -d --name dscore-qa \\"
 log "    -p 18080:18080 -p 18081:18081 -p 50001:50001 \\"
 log "    -v dscore-data:/data \\"
+log "    --add-host host.docker.internal:host-gateway \\"
+log "    -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \\"
+log "    -e OLLAMA_MODEL=${OLLAMA_MODEL} \\"
+log "    --restart unless-stopped \\"
 log "    $IMAGE_TAG"
 log ""
-log "초기 기동 후 5-10분 지나면 다음이 가용합니다:"
+log "초기 기동 후 3-5분 (ollama seed 가 없으므로 원본 대비 빠름) 지나면 가용합니다:"
 log "  - Jenkins:  http://<host>:18080  (admin / password)"
-log "  - Dify:     http://<host>:18081  (admin@example.com / difyai123456)"
+log "  - Dify:     http://<host>:18081  (admin@example.com / Admin1234!)"
+log ""
+log "⚠️  호스트 Ollama 가 미기동 / 모델 불일치 시 Jenkins Pipeline Stage 3 가 실패한다."
+log "   자세한 가이드: e2e-pipeline/offline/README.md §4.8"
 log "=========================================================================="

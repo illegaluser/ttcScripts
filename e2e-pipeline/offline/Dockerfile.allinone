@@ -1,30 +1,27 @@
 # ============================================================================
-# Zero-Touch QA All-in-One — 단일 이미지 (폐쇄망 배포용)
-# 이 Dockerfile 은 반드시 `build-allinone.sh` 로 빌드되어야 한다.
-# 빌드 스크립트가 offline/jenkins-plugins/ 및 offline/dify-plugins/ 에 사전 파일을 채운다.
+# Zero-Touch QA All-in-One — Apple Silicon Mac 전용 이미지 (Host-local Ollama)
 #
-# 결과 이미지 크기 예상: 9-12GB (압축 전).
-# 빌드 요구사항: 디스크 여유 30GB+, 네트워크(마지막 단계까지), Docker buildx 권장.
-# 멀티 아키: 폐쇄망 타겟과 동일해야 함 (보통 linux/amd64).
-#   docker buildx build --platform linux/amd64 -f offline/Dockerfile.allinone .
+# 본 Dockerfile 은 `feat/allinone-mac-host-ollama` 브랜치 전용이다. 이유:
+#   Docker Desktop on Mac 은 Linux 컨테이너에 Metal GPU passthrough 를 지원하지
+#   않아 컨테이너 내 Ollama 가 CPU 모드로 떨어진다 (gemma4:e4b 기준 1-2 tok/s).
+#   실용 속도가 안 나오므로 Mac 환경에서는 **호스트에 Ollama 를 직접 설치**하고
+#   컨테이너의 Dify 가 host.docker.internal:11434 경유로 호출하게 한다.
+#
+#   이 설계 하에서 컨테이너 내부의 Ollama 바이너리 + gemma4:e4b 모델 파일
+#   (~4.5GB) 은 순수 데드웨이트 → 본 브랜치 이미지에서 **완전 제거**.
+#
+# ⚠️ 본 이미지는 Mac 호스트에 Ollama 데몬이 설치·기동된 상태에서만 동작한다.
+#   docker run -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+#              -e OLLAMA_MODEL=gemma4:e4b (또는 호스트에 pull 된 모델) ... 필수.
+#   자세한 가이드: README §4.8.
+#
+# 결과 이미지 크기 예상: 5-7GB (압축 전). 기본 All-in-One 대비 4-5GB 절감.
+# 빌드 요구사항: 디스크 여유 20GB+, 네트워크(마지막 단계까지), Docker buildx 권장.
+# 멀티 아키: docker buildx build --platform linux/<arm64|amd64> -f offline/Dockerfile.allinone .
 # ============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 1: Ollama 모델 사전 pull — gemma4:e4b (~4GB)
-# ollama serve 를 백그라운드 기동 → pull → 종료 → 모델 디렉토리만 추출.
-# ─────────────────────────────────────────────────────────────────────────────
-FROM ollama/ollama:latest AS ollama-src
-ARG OLLAMA_MODEL=gemma4:e4b
-RUN ollama serve >/tmp/ollama.log 2>&1 & \
-    ollama_pid=$! && \
-    for i in $(seq 1 30); do \
-      curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break || sleep 1; \
-    done && \
-    ollama pull "${OLLAMA_MODEL}" && \
-    kill "$ollama_pid" || true
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2: Dify 서비스 이미지에서 애플리케이션 파일 확보
+# Stage 1: Dify 서비스 이미지에서 애플리케이션 파일 확보
 # 각 공식 이미지를 참조만 해서 필요한 디렉토리를 복사한다.
 # ─────────────────────────────────────────────────────────────────────────────
 FROM langgenius/dify-api:1.13.3           AS dify-api-src
@@ -70,9 +67,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         || apt-get install -y --no-install-recommends libasound2) \
     && rm -rf /var/lib/apt/lists/*
 
-# -- Ollama 바이너리 + 모델 seed --
-COPY --from=ollama-src /bin/ollama  /usr/bin/ollama
-COPY --from=ollama-src /root/.ollama /opt/seed/ollama
+# -- Ollama 바이너리 / 모델 seed: 제거됨 (Mac 전용 브랜치) --
+# 컨테이너 내부에서 Ollama 를 실행하지 않으므로 바이너리도 모델도 포함하지 않는다.
+# 호스트 Ollama 데몬 (Mac Metal 가속) 을 OLLAMA_BASE_URL env 로 가리키는 것이 전제.
+# 디버깅 목적의 `docker exec dscore-qa ollama list` 같은 명령도 **동작하지 않는다**.
+# 호스트에서 `ollama list` / `ollama pull` 을 직접 사용.
 
 # -- Qdrant 바이너리 (공식 릴리스 tar) --
 # TARGETARCH 는 buildx 가 `--platform linux/<arch>` 에 맞춰 자동 주입.

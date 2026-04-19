@@ -34,15 +34,13 @@ fi
 if [ ! -f "$DATA/.initialized" ]; then
   log "최초 seed: /opt/seed → /data"
   mkdir -p \
-    "$DATA/pg" "$DATA/redis" "$DATA/qdrant" "$DATA/ollama/models" \
+    "$DATA/pg" "$DATA/redis" "$DATA/qdrant" \
     "$DATA/jenkins/plugins" \
     "$DATA/dify/storage" "$DATA/dify/plugins/cwd" \
     "$DATA/logs" "$DATA/jenkins-agent"
 
-  # Ollama 모델 (Dockerfile stage 에서 /opt/seed/ollama 에 모델만 남긴 형태)
-  if [ -d "$SEED/ollama" ]; then
-    cp -a "$SEED/ollama/." "$DATA/ollama/"
-  fi
+  # Ollama 모델 seed 제거됨 (Mac 브랜치) — 호스트 Ollama 를 사용하므로 컨테이너에
+  # 모델 파일이 포함되지 않는다. 연결 경로는 OLLAMA_BASE_URL env 로 지정.
 
   # Jenkins 플러그인 (hpi 파일)
   if [ -d "$SEED/jenkins-plugins" ]; then
@@ -87,8 +85,8 @@ fi
 # [program:jenkins] 환경변수 JENKINS_HOME="/data/jenkins" 로만 리다이렉트한다.
 # /var/jenkins_home 익명 볼륨은 사용되지 않은 채 남지만 런타임 영향은 없다.
 #
-# Ollama 모델 경로는 OLLAMA_MODELS, Dify storage 는 OPENDAL_FS_ROOT 환경변수로
-# supervisord.conf 에서 리다이렉트된다.
+# Dify storage 는 OPENDAL_FS_ROOT 환경변수로 supervisord.conf 에서 리다이렉트된다.
+# (내부 Ollama 는 Mac 브랜치에서 제거됐으므로 OLLAMA_MODELS 는 불필요.)
 
 # ────────────────────────────────────────────────────────────────────────────
 # 3. supervisord 백그라운드 기동
@@ -106,22 +104,6 @@ _term() {
   exit 0
 }
 trap _term SIGTERM SIGINT
-
-# ────────────────────────────────────────────────────────────────────────────
-# 3-1. (선택) 호스트 Ollama 모드 — 내부 Ollama 데몬 정지
-#
-# Mac (Apple Silicon) 는 Docker Desktop 이 Metal GPU passthrough 를 영구 미지원
-# 하므로, 컨테이너 내 Ollama 는 CPU 모드로 떨어져 실용 속도가 안 나온다. 호스트에
-# Ollama 를 설치한 뒤 `docker run -e OLLAMA_BASE_URL=http://host.docker.internal:11434`
-# 으로 Dify 의 호출 경로를 돌릴 수 있다. 이때 내부 데몬은 유휴 상태로 돌지만
-# 4GB+ 모델이 메모리에 계속 상주하므로 SKIP_INTERNAL_OLLAMA=true 로 정지시키는 것을
-# 권장한다. 자세한 가이드는 README §4.8.
-# ────────────────────────────────────────────────────────────────────────────
-if [ "${SKIP_INTERNAL_OLLAMA:-false}" = "true" ]; then
-  log "SKIP_INTERNAL_OLLAMA=true — 내부 Ollama 데몬 정지 (호스트 Ollama 모드 가정)"
-  sleep 5  # supervisord 가 모든 program 을 로드할 시간 확보
-  supervisorctl -c /etc/supervisor/supervisord.conf stop ollama 2>/dev/null || true
-fi
 
 # ────────────────────────────────────────────────────────────────────────────
 # 4. 최초 앱 프로비저닝 (volume 최초 생성 후 1회만)
@@ -151,11 +133,19 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
   log "앱 프로비저닝 시작 (provision-apps.sh)"
   export DIFY_URL="http://127.0.0.1:18081"
   export JENKINS_URL="http://127.0.0.1:18080"
-  # OLLAMA_BASE_URL: docker run -e 로 주어지면 그대로 전파. 기본은 컨테이너 내부 Ollama.
-  # 호스트 Ollama 모드 (Mac Metal / Linux GPU host) 에서는 사용자가
-  # `-e OLLAMA_BASE_URL=http://host.docker.internal:11434` 로 재정의한다. 이 값은
-  # provision-apps.sh 가 Dify 의 Ollama 프로바이더 credentials.base_url 로 등록한다.
-  export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
+  # OLLAMA_BASE_URL: Mac 브랜치 이미지는 내부 Ollama 가 없으므로 **항상 호스트 Ollama**
+  # 로 라우팅되어야 한다. 기본값은 `host.docker.internal:11434` 이며 docker run 시
+  # `--add-host host.docker.internal:host-gateway` 가 반드시 포함되어야 해석된다
+  # (Docker Desktop Mac 은 자동 해석, Linux 는 host-gateway 매핑 필수).
+  # 사용자가 다른 경로 (예: 사내 Ollama 게이트웨이) 를 쓴다면 docker run -e 로 덮어쓴다.
+  export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+  log "  → Ollama 라우팅: ${OLLAMA_BASE_URL}"
+  if [[ "${OLLAMA_BASE_URL}" != *"host.docker.internal"* ]] && \
+     [[ "${OLLAMA_BASE_URL}" == *"127.0.0.1"* || "${OLLAMA_BASE_URL}" == *"localhost"* ]]; then
+    warn "  Mac 브랜치 이미지에는 내부 Ollama 가 없습니다. localhost 로 설정된"
+    warn "  OLLAMA_BASE_URL 은 ConnectionError 로 이어질 가능성이 큽니다."
+    warn "  의도한 설정이 아니라면 -e OLLAMA_BASE_URL=http://host.docker.internal:11434 권장."
+  fi
   export OFFLINE_DIFY_PLUGIN_DIR="$SEED/dify-plugins"
   export OFFLINE_DIFY_CHATFLOW_YAML="/opt/dify-chatflow.yaml"
   export OFFLINE_JENKINS_PIPELINE="/opt/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline"
