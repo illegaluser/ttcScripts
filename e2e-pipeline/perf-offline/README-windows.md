@@ -48,6 +48,52 @@ cd C:\perf-allinone-bundle-20260420-103000
 
 ---
 
+## 📦 Windows 폐쇄망 반입 준비물 체크리스트
+
+반입 **전**(온라인 빌드 머신) 준비해야 할 것과, 반입 **후**(폐쇄망 Windows) 호스트에 갖춰야 할 것.
+
+### ① USB 로 들고 갈 자산 (온라인 빌드 머신에서 준비)
+
+| # | 품목 | 용도 | 크기 | `prepare-bundle.sh` 자동 수집 |
+|---|---|---|---|---|
+| 1 | `dscore-qa-perf-allinone-amd64-*.tar.gz` | x64 Windows 용 JMeter 컨테이너 이미지 | ~1.2 GB | ✅ |
+| 2 | `dscore-qa-perf-allinone-arm64-*.tar.gz` | ARM64 (Surface/Copilot+) 용, 해당 없으면 생략 | ~1.2 GB | ✅ |
+| 3 | `ollama-windows-amd64.zip` | Windows 용 Ollama standalone ZIP (**EXE 인스톨러 대신 권장** — 자동 업데이트 없음) | ~300 MB | ✅ |
+| 4 | `nssm-2.24.zip` | Windows 서비스 등록 도구 (Ollama 를 백그라운드 서비스화) | ~400 KB | ✅ |
+| 5 | `ollama-models-<tag>-*.tgz` | 폐쇄망 Ollama 가 로드할 모델 archive | 4-20 GB/모델 | ✅ |
+| 6 | `install-windows.ps1` | 자동 설치 진입점 | 수 KB | ✅ |
+| 7 | `README.md` / `README-windows.md` | 사용 가이드 | 수 KB | ✅ |
+| 8 | `SHA256SUMS` | 무결성 검증 | 수 KB | ✅ |
+| 9 | NVIDIA 드라이버 `.exe` (GPU 사용 시) | CUDA 추론 활성화 | ~700 MB | ❌ 수동 — nvidia.com 에서 GPU 모델별로 |
+
+> 전체 번들 구조는 메인 문서 [§D USB 반입 번들 예시 구조](README.md#d-usb-반입-번들-예시-구조) 참조.
+> ⑨ NVIDIA 드라이버는 번들에 포함되지 않으므로 별도 반입이 필요합니다 — 폐쇄망에 이미
+> 최신 Game Ready / Studio 드라이버가 있다면 생략 가능.
+
+### ② 폐쇄망 Windows 호스트에 이미 있어야 할 것
+
+| 품목 | 기준 | 비고 |
+|---|---|---|
+| **Windows** | 10 (Build 19041+) 또는 11 x64 | ARM64 는 CPU 추론만 |
+| **WSL2** | 활성화 + `wsl --update` 완료 | `wsl --status` 로 확인 |
+| **Docker Desktop** | 4.x 이상 + WSL2 백엔드 | 번들에 포함 안 됨 — 별도 사내 배포 채널로 사전 반입 |
+| **디스크 여유** | 30 GB 이상 | 이미지(1.2GB) + 모델(7GB+) + WSL2 vhdx 증가분 + 결과 |
+| **RAM** | 16 GB 이상 권장 | `.wslconfig` 로 Docker 에 4-6GB 할당 필요 |
+| **GPU (선택)** | NVIDIA CUDA 11.8+ 지원 RTX/GTX | `nvidia-smi` 로 확인. 없으면 CPU 추론 (느림) |
+| **관리자 권한** | `install-windows.ps1` 전체·NSSM 서비스 등록 필수 | |
+
+### ③ 외부망 화이트리스트 (온라인 빌드 머신에서만 — 폐쇄망 Windows 는 전부 차단되어도 OK)
+
+빌드 머신에서 번들을 만들기 위해 아래 도메인 outbound 가 필요합니다.
+전체 목록은 [메인 README §C](README.md#c-외부망-화이트리스트-온라인-빌드-머신-전용) 참조.
+
+**Windows 쪽에서 추가로 확인할 것**:
+- `ollama.com/download/ollama-windows-amd64.zip`
+- `nssm.cc/release/nssm-2.24.zip`
+- `www.nvidia.com/Download/*` (GPU 드라이버)
+
+---
+
 ## 목차 (수동 설치 / 트러블슈팅)
 
 0. [내 Windows 확인](#0-내-windows-확인)
@@ -509,17 +555,33 @@ JMeter GUI:
 
 ### 6.2 jmeter.ai (Feather Wand) 첫 사용 — 호스트 Ollama 호출
 
-1. 우측 패널 또는 메뉴에서 **Feather Wand** 클릭
-2. 한국어로 요청:
-   ```
-   localhost:18090 의 /vnc.html 경로에 30초 동안 10명이 동시 GET 요청하는
-   시나리오를 만들어줘. 응답 코드 200 검증 포함.
-   ```
-3. Feather Wand → **호스트 Ollama** → `gemma4:e2b` 호출
-4. Windows 작업관리자에서 NVIDIA GPU 사용률 치솟는 것 확인 가능
-5. 시나리오 트리에 자동 추가 → ▶ 실행
+사용법·프롬프트 예시·설정 키 전체 레퍼런스는 **[메인 README §5.8 jmeter.ai 심화 가이드](README.md#58-jmeterai-feather-wand-심화-가이드)** 를 참조하세요.
 
-> NVIDIA RTX 4070 기준 `gemma4:e2b` 약 100 토큰/초.
+**Windows 호스트에서 특히 확인할 포인트**:
+
+1. JMeter GUI 상단 🪶 깃펜 아이콘 클릭 또는 트리 요소 우클릭 → `@AI`
+2. 챗에 한 줄 보내고 응답이 오면 성공:
+   ```
+   안녕, 어떤 모델이야?
+   ```
+3. **GPU 가속 관찰** — Windows 에서만 가능한 검증:
+   ```powershell
+   # 작업관리자 → 성능 → GPU → "3D" 또는 "Cuda" 그래프
+   #   → 챗 응답 생성 중 GPU 사용률이 치솟으면 CUDA 가속 정상
+
+   # 또는 CLI 로 (NVIDIA 만)
+   nvidia-smi -l 1
+   # GPU-Util 컬럼 + Memory-Usage 컬럼이 움직이는지 관찰
+   ```
+4. **속도 기준** (`gemma4:e2b`):
+   - 첫 호출 모델 로딩: 5-15초
+   - NVIDIA RTX 4070 (12GB): ~100 토큰/초
+   - NVIDIA RTX 3060 (6GB): ~60 토큰/초 (일부 RAM 오프로드)
+   - CPU only (8C/16T): ~5-10 토큰/초 (실용 한계)
+
+> 응답이 오지 않으면 메인 README [§5.8.7 트러블슈팅](README.md#587-트러블슈팅) 또는
+> 이 문서 [§9.5 컨테이너에서 호스트 Ollama 도달 불가](#95-컨테이너에서-호스트-ollama-도달-불가) 확인.
+> Windows 방화벽이 11434 를 막을 수 있으니 [§9.6](#96-windows-방화벽이-11434-차단) 도 함께 참고.
 
 ---
 
@@ -790,7 +852,9 @@ Remove-Item -Recurse -Force "$env:UserProfile\.ollama"        # 모델까지
 
 ## 다음 단계
 
-- 더 깊은 JMeter 사용법 → **[README.md 5장 — JMeter 사용법 (심화)](README.md#5-jmeter-사용법-심화)**
-- 모델 권장 표 / 모델 변경 절차 → **[README.md 2장 — LLM 모델 권장 가이드](README.md#2-llm-모델-권장-가이드)**
-- 빌드 옵션 / 외부 자산 출처 → **[README.md 4장 — 빌드](README.md#4-빌드-온라인-머신-전용)**
+- **jmeter.ai (Feather Wand) 심화** — UI 위치, 스모크 테스트, 5가지 사용 시나리오, 설정 키, 트러블슈팅 → **[README.md §5.8](README.md#58-jmeterai-feather-wand-심화-가이드)**
+- 더 깊은 JMeter 사용법 → **[README.md §5](README.md#5-jmeter-사용법-심화)**
+- 모델 권장 표 / 모델 변경 절차 → **[README.md §2](README.md#2-llm-모델-권장-가이드)**
+- 빌드 옵션 / 외부 자산 출처 → **[README.md §4](README.md#4--번들-제작-온라인-머신-전용)**
+- 폐쇄망 반입 사전 준비물 전체 체크리스트 → **[README.md 상단](README.md#-폐쇄망-반영-사전-준비물)**
 - Mac 호스트 운영자에게 같은 환경 전달 → **[README-mac.md](README-mac.md)**
