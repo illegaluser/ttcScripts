@@ -76,13 +76,16 @@ COPY --from=ollama-src /root/.ollama /opt/seed/ollama
 
 # -- Qdrant 바이너리 (공식 릴리스 tar) --
 # TARGETARCH 는 buildx 가 `--platform linux/<arch>` 에 맞춰 자동 주입.
-# amd64 → x86_64-unknown-linux-gnu, arm64 → aarch64-unknown-linux-gnu.
+# Qdrant release matrix (2026-04-19 확인):
+#   amd64 → x86_64-unknown-linux-gnu  (동적 링크 glibc 빌드)
+#   arm64 → aarch64-unknown-linux-musl (static musl 빌드 — arm64 gnu 는 미발매.
+#           static 이므로 Debian(glibc) 런타임에도 그대로 실행됨)
 ARG QDRANT_VERSION=v1.8.3
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) QDRANT_ARCH=x86_64-unknown-linux-gnu ;; \
-      arm64) QDRANT_ARCH=aarch64-unknown-linux-gnu ;; \
+      arm64) QDRANT_ARCH=aarch64-unknown-linux-musl ;; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     curl -fL -o /tmp/qdrant.tar.gz \
