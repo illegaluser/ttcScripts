@@ -108,6 +108,22 @@ _term() {
 trap _term SIGTERM SIGINT
 
 # ────────────────────────────────────────────────────────────────────────────
+# 3-1. (선택) 호스트 Ollama 모드 — 내부 Ollama 데몬 정지
+#
+# Mac (Apple Silicon) 는 Docker Desktop 이 Metal GPU passthrough 를 영구 미지원
+# 하므로, 컨테이너 내 Ollama 는 CPU 모드로 떨어져 실용 속도가 안 나온다. 호스트에
+# Ollama 를 설치한 뒤 `docker run -e OLLAMA_BASE_URL=http://host.docker.internal:11434`
+# 으로 Dify 의 호출 경로를 돌릴 수 있다. 이때 내부 데몬은 유휴 상태로 돌지만
+# 4GB+ 모델이 메모리에 계속 상주하므로 SKIP_INTERNAL_OLLAMA=true 로 정지시키는 것을
+# 권장한다. 자세한 가이드는 README §4.8.
+# ────────────────────────────────────────────────────────────────────────────
+if [ "${SKIP_INTERNAL_OLLAMA:-false}" = "true" ]; then
+  log "SKIP_INTERNAL_OLLAMA=true — 내부 Ollama 데몬 정지 (호스트 Ollama 모드 가정)"
+  sleep 5  # supervisord 가 모든 program 을 로드할 시간 확보
+  supervisorctl -c /etc/supervisor/supervisord.conf stop ollama 2>/dev/null || true
+fi
+
+# ────────────────────────────────────────────────────────────────────────────
 # 4. 최초 앱 프로비저닝 (volume 최초 생성 후 1회만)
 #    Dify API 설정 (setup 4-1,4-2,4-3b,4-3c,4-3d,4-3e) +
 #    Jenkins REST Credentials/Job/Node (setup 5-2,5-4,5-5)
@@ -135,7 +151,11 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
   log "앱 프로비저닝 시작 (provision-apps.sh)"
   export DIFY_URL="http://127.0.0.1:18081"
   export JENKINS_URL="http://127.0.0.1:18080"
-  export OLLAMA_BASE_URL="http://127.0.0.1:11434"
+  # OLLAMA_BASE_URL: docker run -e 로 주어지면 그대로 전파. 기본은 컨테이너 내부 Ollama.
+  # 호스트 Ollama 모드 (Mac Metal / Linux GPU host) 에서는 사용자가
+  # `-e OLLAMA_BASE_URL=http://host.docker.internal:11434` 로 재정의한다. 이 값은
+  # provision-apps.sh 가 Dify 의 Ollama 프로바이더 credentials.base_url 로 등록한다.
+  export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
   export OFFLINE_DIFY_PLUGIN_DIR="$SEED/dify-plugins"
   export OFFLINE_DIFY_CHATFLOW_YAML="/opt/dify-chatflow.yaml"
   export OFFLINE_JENKINS_PIPELINE="/opt/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline"

@@ -1033,6 +1033,137 @@ docker exec dscore-qa bash -c '
 
 Dify 쪽 `context_size` / `max_tokens` 는 [provision-apps.sh:49-50](provision-apps.sh#L49-L50) 의 `OLLAMA_CONTEXT_SIZE`, `OLLAMA_MAX_TOKENS` 환경변수로 — 첫 기동 `docker run` 에 `-e OLLAMA_CONTEXT_SIZE=16384` 형태로 주입하거나, UI (4.4(a)) 에서 해당 모델 행을 열어 수정.
 
+### 4.8 Apple Silicon Mac 호스트 — Host-local Ollama 모드
+
+#### 왜 필요한가
+
+Docker Desktop on Mac 은 Linux 컨테이너에 Metal GPU passthrough 를 **영구 미지원** 한다 (VM 아키텍처 제약). 결과적으로 컨테이너 내 Ollama 는 CPU 모드로 떨어지고, 본 이미지의 기본 모델 `gemma4:e4b` (4B 파라미터, 9.4GB) 기준 2분에 10 토큰 수준으로 Planner LLM 호출이 Dify Chatflow 기본 타임아웃 (5분) 을 초과해 Jenkins Pipeline Stage 3 가 계속 실패한다.
+
+유일한 실용 경로는 **Mac 호스트에 Ollama 를 직접 설치**하여 Metal GPU 가속을 사용하고, 컨테이너 안 Dify 가 `host.docker.internal:11434` 경유로 그 Ollama 를 호출하게 만드는 것이다.
+
+폐쇄망이 아닌 PoC / 데모 / 개발 Mac 환경에서는 사실상 의무 단계이며, Linux GPU 서버로 배포하기 전의 로컬 검증에도 유효하다.
+
+#### 전제조건
+
+| 항목 | 최소 |
+| ---- | ---- |
+| macOS | 13 (Ventura) 이상 |
+| 칩 | Apple Silicon (M1/M2/M3/M4) 권장. Intel Mac 은 Metal 성능 제한적 |
+| Docker Desktop | 4.30 이상 (`host.docker.internal:host-gateway` 자동 해석) |
+| 호스트 RAM | 16GB (gemma4:e4b) / 32GB 이상 (llama3.1:8b 이상) |
+| 디스크 | 모델 크기 + 10GB 여유 |
+
+#### 단계 1 — Mac 호스트에 Ollama 설치
+
+**(a) Homebrew (백그라운드 데몬)**
+
+```bash
+brew install ollama
+brew services start ollama   # 부팅 시 자동 기동
+```
+
+**(b) 공식 설치파일 (메뉴바 GUI)**
+
+<https://ollama.com/download/Mac> 에서 `Ollama-darwin.zip` 내려받아 Applications 폴더로 이동 후 실행. 상태바 아이콘으로 동작.
+
+**바인드 주소 확인** — 기본은 `127.0.0.1:11434`. Docker Desktop Mac 은 `host.docker.internal:host-gateway` 경유로 127.0.0.1 까지 닿기 때문에 별도 변경 **불필요** (Linux 서버에서는 `OLLAMA_HOST=0.0.0.0 ollama serve` 가 필요).
+
+```bash
+curl -fsS http://127.0.0.1:11434/api/tags
+# 예상 (초기): {"models":[]}
+```
+
+#### 단계 2 — 모델 pull (Metal 가속)
+
+```bash
+ollama pull gemma4:e4b   # ~4GB, Apple Silicon 에서 1-3분
+ollama list              # gemma4:e4b 확인
+```
+
+**동작 검증 (호스트에서 1회 시험 호출)**:
+
+```bash
+ollama run gemma4:e4b "간단히 소개해줘"
+```
+
+Metal 가속이면 ~10-50 토큰/초. CPU 로 잘못 떨어지면 수 토큰/초. Activity Monitor > GPU 탭에서 GPU 사용률이 치솟으면 정상.
+
+#### 단계 3 — 컨테이너 기동 시 redirect
+
+```bash
+docker run -d --name dscore-qa \
+  -p 18080:18080 -p 18081:18081 -p 50001:50001 \
+  -v dscore-data:/data \
+  --add-host host.docker.internal:host-gateway \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -e OLLAMA_MODEL=gemma4:e4b \
+  -e SKIP_INTERNAL_OLLAMA=true \
+  --restart unless-stopped \
+  dscore-qa:allinone
+```
+
+**env 역할**:
+
+| 변수 | 효과 |
+| ---- | ---- |
+| `OLLAMA_BASE_URL=http://host.docker.internal:11434` | **핵심**. provision-apps.sh 가 Dify 의 Ollama 프로바이더 `credentials.base_url` 로 이 값을 등록 → Dify Chatflow 가 호스트 Ollama 호출. |
+| `OLLAMA_MODEL=gemma4:e4b` | Dify 에 등록할 모델 id. 호스트에 실제로 pull 된 이름과 정확히 일치해야 한다 (`ollama list` 결과 그대로). |
+| `SKIP_INTERNAL_OLLAMA=true` | 컨테이너 내부 Ollama 데몬 정지 ([entrypoint-allinone.sh:112-122](entrypoint-allinone.sh#L112-L122)). 4-10GB 메모리/CPU 절약. 생략 시 내부 데몬은 유휴 상태로 남음 (기능적 문제 없음). |
+
+**주의** — 볼륨 (`dscore-data`) 에 이전 `.app_provisioned` 플래그가 있으면 provision-apps.sh 가 자동 재실행되지 않아 Dify 의 프로바이더 base_url 이 옛 값 (`127.0.0.1`) 으로 남는다. 첫 기동이 아닌 경우 아래 "단계 5 — 프로비저닝 재실행" 절차로 강제 재등록.
+
+#### 단계 4 — 동작 검증
+
+```bash
+# 4-1. 컨테이너에서 호스트 Ollama 도달
+docker exec dscore-qa curl -fsS http://host.docker.internal:11434/api/tags
+# 예상: {"models":[{"name":"gemma4:e4b",...}]}
+
+# 4-2. 내부 Ollama 가 중지됐는지 (SKIP_INTERNAL_OLLAMA=true 일 때)
+docker exec dscore-qa supervisorctl status ollama
+# 예상: ollama  STOPPED ...
+
+# 4-3. Dify 프로바이더에 등록된 base_url
+docker exec dscore-qa bash -c '
+  curl -sS -b /tmp/dify-cookies.txt \
+    http://127.0.0.1:18081/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models \
+  | python3 -m json.tool | grep -E "\"model\"|\"base_url\""
+'
+# 예상: "base_url": "http://host.docker.internal:11434"
+
+# 4-4. 호스트 Ollama 직접 실행 지연 측정 (Jenkins Pipeline 실제 상황 재현)
+time curl -fsS http://127.0.0.1:11434/api/generate \
+  -d '{"model":"gemma4:e4b","prompt":"hi","stream":false,"options":{"num_predict":50}}' \
+  > /dev/null
+# Apple Silicon: 1-5초 내에 응답되어야 정상 (CPU 모드면 30초+)
+```
+
+#### 단계 5 — 프로비저닝 재실행 (기존 볼륨 사용 시)
+
+볼륨을 그대로 두고 호스트 모드로 전환한 경우 Dify 프로바이더가 옛 `127.0.0.1` 을 쓰고 있다. 재등록:
+
+```bash
+docker exec dscore-qa bash /opt/provision-apps.sh
+# 또는 전체 재프로비저닝:
+docker exec dscore-qa rm -f /data/.app_provisioned
+docker restart dscore-qa
+```
+
+그 후 단계 4-3 의 base_url 확인으로 `host.docker.internal` 로 갱신됐는지 검증.
+
+#### 단계 6 — Jenkins Pipeline 실행
+
+Dashboard → `DSCORE-ZeroTouch-QA-Docker` → Build with Parameters → Build.
+Stage 3 가 10-30초 내 Plan 완료되면 성공. 이전 컨테이너-CPU 모드 대비 5-20배 빠르다.
+
+#### 자주 하는 실수
+
+- **`--add-host host.docker.internal:host-gateway` 누락** — Docker Desktop Mac 은 생략해도 자동 해석되지만 습관적으로 포함해 Linux 서버 이식성을 유지하자.
+- **호스트 Ollama 바인드 주소** — Homebrew 기본은 `127.0.0.1` 이며 Docker Desktop Mac 의 `host-gateway` 로 닿는다. Linux 서버에 배포할 땐 `OLLAMA_HOST=0.0.0.0 ollama serve` 필요.
+- **모델 이름 불일치** — `OLLAMA_MODEL=gemma4:e4b` 이라 설정했는데 호스트에 `gemma4:latest` 만 있으면 Dify provider 등록 시 "model not found". `ollama list` 의 **NAME 컬럼** 그대로 복사.
+- **볼륨의 `.app_provisioned` 로 재provision 스킵** — OLLAMA_BASE_URL 을 바꿨는데도 Dify 가 여전히 옛 값 호출. 단계 5 로 수동 재실행.
+- **호스트 Ollama 데몬 안 뜸** — `brew services list` 로 `ollama started` 확인. 안 뜨면 `brew services restart ollama`.
+
 ---
 
 ## 5. 트러블슈팅
@@ -1172,6 +1303,13 @@ docker logs dscore-qa | tail -50
 ### Jenkins 에이전트 offline / Ollama 모델 이슈
 
 프로비저닝 단계의 부분 실패인 경우가 대부분 — [2.6 부분 실패 진단](#26-부분-실패-진단) 의 `(B) Ollama 모델 등록 실패`, `(E) Node offline` 참조.
+
+### Pipeline Stage 3 가 Dify `/v1/chat-messages` 400 또는 timeout (Apple Silicon Mac)
+
+- **증상**: Jenkins Pipeline `Stage 3. Zero-Touch QA 엔진 가동` 에서 Dify 응답 대기 중 5분 timeout. Ollama 로그 (`/data/logs/ollama.log`) 에 `aborting completion request due to client closing the connection` 반복.
+- **원인 (Mac 호스트의 사실상 유일한 원인)**: Docker Desktop Mac 이 Metal GPU passthrough 를 지원하지 않아 컨테이너 내 Ollama 가 CPU 모드로 떨어짐. `gemma4:e4b` 기준 2분에 10 토큰 → Planner LLM 호출이 timeout.
+- **해결**: 섹션 [4.8 Apple Silicon Mac 호스트 — Host-local Ollama 모드](#48-apple-silicon-mac-호스트--host-local-ollama-모드) 전체 단계 수행. 호스트에 Ollama 설치 후 `-e OLLAMA_BASE_URL=http://host.docker.internal:11434 -e SKIP_INTERNAL_OLLAMA=true` 주입.
+- **즉시 판정**: `docker exec dscore-qa bash -c 'ls /dev/nvidia* /dev/dri 2>&1'` 가 "No such file" 이고 호스트가 Mac 이면 본 항목 확정.
 
 ### 이미지 크기가 너무 커서 USB 이전 곤란
 - 여러 조각으로 분할:
