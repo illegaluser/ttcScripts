@@ -116,15 +116,36 @@ JENKINS_COOKIES="/tmp/jenkins-cookies.txt"
 JENKINS_CRUMB_HEADER=""
 rm -f "$JENKINS_COOKIES"
 
-JENKINS_CRUMB_RAW=$(curl -sS -c "$JENKINS_COOKIES" \
+# PoC 2026-04-20: 이전 버전은 /crumbIssuer/api/xml?xpath=... 로 받아 ':' 포함 여부만
+# 체크했는데, Jenkins 2.555 이 인증/세션 상태에 따라 200 + HTML 페이지를 내려주는
+# 경우가 관찰됐다. HTML 에는 ':' 이 흔하므로 조건을 통과하고 쓰레기 HTML 전체가
+# crumb 헤더로 주입 → 이후 모든 POST 가 403 (HTML 로그인 페이지) 반환 → Pipeline
+# Job/Credentials/Node 생성이 전부 실패하는 연쇄가 발생했다.
+# 해결: JSON 엔드포인트로 받아 파이썬 파서로 명시적 검증. 파싱 실패 시 empty 로 두면
+# ${JENKINS_CRUMB_HEADER:+-H ...} 패턴이 자동으로 헤더를 빼기 때문에 basic auth 만으로
+# POST 가 진행된다 (Jenkins 2.555 은 basic auth 요청에 대해 crumb 를 요구하지 않음).
+JENKINS_CRUMB_JSON=$(curl -sS -c "$JENKINS_COOKIES" \
     -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
-    "${JENKINS_URL}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)" \
+    -H "Accept: application/json" \
+    "${JENKINS_URL}/crumbIssuer/api/json" \
     2>/dev/null || echo "")
-if [ -n "$JENKINS_CRUMB_RAW" ] && [ "${JENKINS_CRUMB_RAW#*:}" != "$JENKINS_CRUMB_RAW" ]; then
-  JENKINS_CRUMB_HEADER="$JENKINS_CRUMB_RAW"
-  ok "Jenkins crumb 획득: ${JENKINS_CRUMB_HEADER%%:*}=${JENKINS_CRUMB_HEADER#*:} (${#JENKINS_CRUMB_HEADER}자)"
+JENKINS_CRUMB_HEADER=$(echo "$JENKINS_CRUMB_JSON" | $PY -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    f = d.get('crumbRequestField','')
+    c = d.get('crumb','')
+    if f and c and all(ch.isalnum() or ch == '-' for ch in f):
+        print(f'{f}:{c}')
+    else:
+        print('')
+except Exception:
+    print('')
+")
+if [ -n "$JENKINS_CRUMB_HEADER" ]; then
+  ok "Jenkins crumb 획득: ${JENKINS_CRUMB_HEADER%%:*} (${#JENKINS_CRUMB_HEADER}자)"
 else
-  warn "Jenkins crumb 발급 실패 — POST 호출이 403 으로 실패할 수 있음"
+  warn "Jenkins crumb 파싱 실패 — basic auth 로만 진행 (Jenkins 2.555+ 는 crumb 없이도 POST 허용)"
 fi
 
 # Jenkins POST 요청용 헬퍼 — -u 인증 + crumb 헤더 + 쿠키 jar 자동 부착
