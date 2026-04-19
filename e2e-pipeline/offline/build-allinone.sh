@@ -8,7 +8,7 @@
 #   3) docker buildx build 로 단일 이미지 제작
 #   4) docker save | gzip 으로 배포용 tar.gz 산출
 #
-# 출력: dscore-qa-allinone-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
+# 출력: dscore.ttc.playwright-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
 #
 # 요구:
 #   - Docker 26+ (buildx 활성), 디스크 40GB+ 여유
@@ -22,10 +22,10 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 # ── 설정값 ────────────────────────────────────────────────────────────────
-IMAGE_TAG="${IMAGE_TAG:-dscore-qa:allinone}"
+IMAGE_TAG="${IMAGE_TAG:-dscore.ttc.playwright:latest}"
 TARGET_PLATFORM="${TARGET_PLATFORM:-linux/amd64}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
-OUTPUT_TAR="${OUTPUT_TAR:-dscore-qa-allinone-$(date +%Y%m%d-%H%M%S).tar.gz}"
+OUTPUT_TAR="${OUTPUT_TAR:-dscore.ttc.playwright-$(date +%Y%m%d-%H%M%S).tar.gz}"
 
 JENKINS_PLUGINS=(
   workflow-aggregator
@@ -166,7 +166,7 @@ log ""
 log "──────────────────────────────────────────────────────────────────────────"
 log "[A] 일반 Linux 서버 (GPU 없음 / 온프레미스 폐쇄망)"
 log "──────────────────────────────────────────────────────────────────────────"
-log "  docker run -d --name dscore-qa \\"
+log "  docker run -d --name dscore.ttc.playwright \\"
 log "    -p 18080:18080 -p 18081:18081 -p 50001:50001 \\"
 log "    -v dscore-data:/data \\"
 log "    --add-host host.docker.internal:host-gateway \\"
@@ -179,7 +179,7 @@ log "[B] Windows 11 WSL2 + NVIDIA GPU"
 log "──────────────────────────────────────────────────────────────────────────"
 log "  사전: docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi  → 성공 확인"
 log ""
-log "  docker run -d --name dscore-qa \\"
+log "  docker run -d --name dscore.ttc.playwright \\"
 log "    -p 18080:18080 -p 18081:18081 -p 50001:50001 \\"
 log "    -v dscore-data:/data \\"
 log "    --add-host host.docker.internal:host-gateway \\"

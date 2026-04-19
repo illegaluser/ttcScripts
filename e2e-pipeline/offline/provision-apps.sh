@@ -2,7 +2,7 @@
 # ============================================================================
 # provision-apps.sh — All-in-One 컨테이너 내부 전용 앱 프로비저닝
 #
-# 이 스크립트는 오프라인 단일 이미지(dscore-qa:allinone) 의 entrypoint 에서
+# 이 스크립트는 오프라인 단일 이미지(dscore.ttc.playwright:latest) 의 entrypoint 에서
 # 최초 1회 호출된다. 기존 setup.sh 의 Phase 4 (Dify REST 설정) 와 Phase 5
 # (Jenkins REST Credentials/Job/Node) 에 해당하는 동작을 수행하되, 다음을 전제한다:
 #
