@@ -619,11 +619,32 @@ PG 마이그레이션이 있으면 Dify api 기동 시 자동 수행 (Alembic).
 ## 4. 트러블슈팅
 
 ### 컨테이너가 기동 직후 죽는다
+
 ```bash
 docker logs dscore-qa | tail -50
 ```
+
 - 메모리 부족: 호스트 RAM 16GB+ 필요. `docker stats` 로 모니터링.
 - PostgreSQL 초기화 실패: `/data/logs/postgresql.err.log` 확인. 볼륨 권한 문제라면 `docker volume rm dscore-data` 후 재기동 (주의: 모든 데이터 소실).
+
+### crash loop — `rm: cannot remove '/var/jenkins_home': Device or resource busy`
+
+- **증상**: 로그에 `[entrypoint-allinone] 기존 볼륨 감지 — seed 건너뜀.` 뒤로 위 메시지가 무한 반복되고 Jenkins/Dify 모두 접속 불가
+- **원인**: `jenkins/jenkins` base 이미지가 선언한 `VOLUME /var/jenkins_home` 때문에 Docker 가 해당 경로에 익명 볼륨을 자동 마운트 → 마운트 포인트는 `rm` 할 수 없어 구버전 entrypoint 의 symlink 시도가 실패 → `set -e` 로 엔트리포인트 즉사 → `--restart unless-stopped` 로 반복 기동
+- **해결**: `c61cc52` 이후 이미지는 symlink 를 쓰지 않고 `JENKINS_HOME=/data/jenkins` env 로 직접 리다이렉트하므로 이 증상이 발생하지 않는다. 구버전 tar.gz 를 사용 중이면 **이미지 재빌드 필수**:
+
+  ```bash
+  # 빌드 머신에서
+  cd e2e-pipeline
+  ./offline/build-allinone.sh    # buildx 캐시 덕분에 2-3분 (ollama pull, pip 등은 재사용)
+
+  # 폐쇄망에서
+  docker rm -f dscore-qa                      # 볼륨은 살려둠 (seed 재활용)
+  docker load -i dscore-qa-allinone-new.tar.gz
+  docker run -d --name dscore-qa \
+    -p 18080:18080 -p 18081:18081 -p 50001:50001 \
+    -v dscore-data:/data dscore-qa:allinone
+  ```
 
 ### Dify 웹 UI 502 Bad Gateway
 
