@@ -90,6 +90,20 @@ COPY --from=dify-api-src    /app              /opt/dify-api
 COPY --from=dify-web-src    /app              /opt/dify-web
 COPY --from=dify-plugin-src /app              /opt/dify-plugin-daemon
 
+# -- Python 플러그인 런타임용 uv 바이너리 --
+# plugin-daemon 이 Dify 플러그인 (Ollama 등) 을 실행할 때 각 플러그인의 Python
+# 가상환경을 uv 로 생성한다. allinone base 에는 uv 가 없어 플러그인 install 이
+# "failed to find uv path" 에러로 실패하므로, plugin-daemon 이미지에서 직접 복사.
+COPY --from=dify-plugin-src /usr/local/bin/uv  /usr/local/bin/uv
+COPY --from=dify-plugin-src /usr/local/bin/uvx /usr/local/bin/uvx
+
+# -- dify-api plugin.py 패치: plugin-daemon 0.5.3-local 은 query param binding 이
+# PascalCase(`PluginUniqueIdentifier`) 만 받는 Go struct tag 누락이 있다. upstream
+# dify-api 는 snake_case 로 보내 decode/from_identifier 가 400 이 되는 이슈를 우회.
+RUN sed -i 's|"plugin_unique_identifier": plugin_unique_identifier|"PluginUniqueIdentifier": plugin_unique_identifier|g' \
+    /opt/dify-api/api/core/plugin/impl/plugin.py && \
+    grep -c 'PluginUniqueIdentifier' /opt/dify-api/api/core/plugin/impl/plugin.py
+
 # -- Python 의존성 (Jenkins pipeline + 문서 처리 + Playwright) --
 # PoC 2026-04-19: Debian trixie base 는 python3-typing-extensions 같은 일부
 # Python 패키지를 apt 로 설치한다. 이들은 RECORD 파일이 없어 pip 가 uninstall
