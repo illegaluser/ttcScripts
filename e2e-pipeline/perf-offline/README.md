@@ -30,6 +30,73 @@
 
 ---
 
+## 📦 폐쇄망 반영 사전 준비물
+
+폐쇄망 호스트에 반입하기 **전**, 온라인 빌드 머신에서 아래 자산들을 확보해야 합니다.
+`prepare-bundle.sh` 가 자동으로 패키징해 주지만, 수동 반입 시 체크리스트로 활용하세요.
+
+### A. 온라인 빌드 머신에서 준비할 것
+
+| # | 품목 | 용도 | 획득 방법 | 대략 크기 |
+|---|---|---|---|---|
+| 1 | **컨테이너 이미지 tar.gz** (amd64 / arm64) | JMeter + Feather Wand 본체 | `./perf-offline/build-allinone.sh` | 1.0-1.5 GB/아키 |
+| 2 | **Ollama 설치본 (Mac)** — `Ollama.dmg` | Mac 호스트용 LLM 런타임 | https://ollama.com/download/mac | ~200 MB |
+| 3 | **Ollama 설치본 (Windows)** — `ollama-windows-amd64.zip` | Windows 호스트용 LLM 런타임 | https://ollama.com/download/windows | ~300 MB |
+| 4 | **NSSM** — `nssm-2.24.zip` | Windows 서비스 등록 도구 | https://nssm.cc/download | ~400 KB |
+| 5 | **LLM 모델 archive** — `ollama-models-*.tgz` | 폐쇄망 Ollama 가 로드할 모델 | `ollama pull <model>` → `~/.ollama/models/` 압축 | 4-20 GB/모델 |
+| 6 | **install-mac.sh / install-windows.ps1** | 자동 설치 진입점 | 이 저장소 | 수 KB |
+| 7 | **README*.md** | 사용 가이드 | 이 저장소 | 수 KB |
+| 8 | **SHA256SUMS** | 무결성 검증 | `prepare-bundle.sh` 가 자동 생성 | 수 KB |
+
+### B. 폐쇄망 호스트에 이미 있어야 할 것
+
+| 품목 | 용도 | 비고 |
+|---|---|---|
+| **Docker Desktop** | 컨테이너 런타임 | 사전 설치 필수 — 반입 번들에 포함 안 됨 (라이선스/OS 이슈) |
+| **호스트 OS** | Mac 12+ / Windows 11 + WSL2 | Docker Desktop 요구사항과 동일 |
+| **디스크 여유** | 이미지 + 모델 + 결과 저장 | 20 GB 이상 권장 |
+| **RAM** | JMeter + Ollama 동시 가동 | 16 GB 이상 권장 |
+| **GPU (선택)** | LLM 추론 가속 | Apple Silicon (Metal/MLX) 또는 NVIDIA (CUDA) |
+
+### C. 외부망 화이트리스트 (온라인 빌드 머신 전용)
+
+방화벽이 있는 빌드 환경에서는 아래 도메인을 outbound 허용해야 합니다.
+
+| 도메인 | 용도 |
+|---|---|
+| `registry-1.docker.io` | base 이미지 (eclipse-temurin) |
+| `archive.apache.org` | Apache JMeter 바이너리 |
+| `repo1.maven.org` | jmeter-plugins-manager.jar, cmdrunner.jar |
+| `jmeter-plugins.org` | Plugins Manager 카탈로그 + JAR (jpgc-* + feather-wand-*) |
+| `github.com` / `objects.githubusercontent.com` | noVNC release tarball |
+| `*.ubuntu.com` | apt (xvfb, fluxbox, nginx 등) |
+| `pypi.org` / `files.pythonhosted.org` | websockify |
+| `ollama.com` / `registry.ollama.ai` | Ollama 설치본 + 모델 `pull` |
+
+> 폐쇄망 호스트에서는 위 도메인이 **차단되어 있어도 정상 동작** 해야 합니다.
+> 특히 `ollama.com` 은 자동 업데이트 체크를 유발하므로 **반입 후에도 차단 유지 권장**.
+
+### D. USB 반입 번들 예시 구조
+
+`PACK_TGZ=1 ./perf-offline/prepare-bundle.sh` 실행 결과:
+
+```
+perf-allinone-bundle-<TS>.tar.gz  (혹은 디렉토리)
+├── install-mac.sh / install-windows.ps1   ← ⑥
+├── README.md / README-mac.md / README-windows.md   ← ⑦
+├── BUNDLE_INFO.txt                        ← 빌드 메타
+└── assets/
+    ├── dscore-qa-perf-allinone-amd64-*.tar.gz   ← ①
+    ├── dscore-qa-perf-allinone-arm64-*.tar.gz   ← ①
+    ├── Ollama.dmg                               ← ②
+    ├── ollama-windows-amd64.zip                 ← ③
+    ├── nssm-2.24.zip                            ← ④
+    ├── ollama-models-<tag>-*.tgz                ← ⑤
+    └── SHA256SUMS                               ← ⑧
+```
+
+---
+
 ## ⚡ TL;DR — 폐쇄망 자동 설치
 
 **번들 디렉토리 (USB)** 를 받았다면, 호스트에서:
@@ -227,15 +294,7 @@ bash install-mac.sh
 
 ### 4.2 외부 네트워크 도메인 (방화벽 화이트리스트)
 
-| 도메인 | 용도 |
-|---|---|
-| `registry-1.docker.io` | base 이미지 (eclipse-temurin) |
-| `archive.apache.org` | Apache JMeter 바이너리 |
-| `repo1.maven.org` | jmeter-plugins-manager.jar, cmdrunner.jar |
-| `jmeter-plugins.org` | Plugins Manager 카탈로그 + JAR (jpgc-* + feather-wand-*) |
-| `github.com` / `objects.githubusercontent.com` | noVNC release tarball |
-| `*.ubuntu.com` | apt (xvfb, fluxbox, nginx 등) |
-| `pypi.org` / `files.pythonhosted.org` | websockify |
+문서 상단 [§C 외부망 화이트리스트](#c-외부망-화이트리스트-온라인-빌드-머신-전용) 참조.
 
 ### 4.3 번들 제작 (권장 — 자동 설치 스크립트와 함께 패키징)
 
@@ -329,17 +388,8 @@ TARGET_PLATFORMS=linux/amd64,linux/arm64 ./perf-offline/build-allinone.sh
 
 #### 🪶 Feather Wand (jmeter.ai) 활용
 
-JMeter GUI의 우측 패널 또는 우클릭 메뉴에서 **Feather Wand** 호출:
-
-| 기능 | 설명 | 예시 프롬프트 |
-|---|---|---|
-| **Generate** | 자연어로 시나리오 요청 | "5분 동안 100명 사용자가 https://example.com/api/login 에 1초마다 POST" |
-| **Explain** | 선택한 요소 설명 | (HTTP Request 우클릭 → Explain) |
-| **Optimize** | 시나리오 최적화 제안 | "이 테스트에서 메모리 사용을 줄여줘" |
-| **Debug** | 실패 원인 분석 | "왜 401 에러가 50% 나는지 분석해줘" |
-
-기본 LLM은 **호스트 Ollama** 의 `gemma4:e2b` — **호스트 GPU 가속** 사용.
-다른 모델로 교체는 [§2.4 모델 변경 절차](#24-모델-변경-절차) 참조.
+상세 사용법은 [§5.8 jmeter.ai (Feather Wand) 심화 가이드](#58-jmeterai-feather-wand-심화-가이드) 참조.
+**기본 LLM: 호스트 Ollama 의 `gemma4:e2b` (호스트 GPU 가속)**.
 
 ### 5.2 변수와 파라미터화
 
@@ -457,29 +507,188 @@ jmeter.reportgenerator.apdex_tolerated_threshold=1500
 #### Auto-Stop Listener (`jpgc-autostop`)
 조건 만족 시 테스트 자동 종료 (예: 에러율 5% 초과, 평균 응답시간 5초 초과).
 
-### 5.7 jmeter.ai (Feather Wand) 설정 키
+### 5.8 jmeter.ai (Feather Wand) 심화 가이드
+
+Feather Wand 는 JMeter GUI 안에 내장되는 **LLM 기반 시나리오 어시스턴트** 입니다.
+자연어로 시나리오를 생성하고, 선택한 요소를 설명받고, 실패 원인을 분석할 수 있습니다.
+모든 요청은 **컨테이너 → host.docker.internal:11434 → 호스트 Ollama** 로 전달되며,
+외부로 나가지 않으므로 **폐쇄망에서 그대로 사용 가능** 합니다.
+
+#### 5.8.1 화면 찾기 — Feather Wand UI 위치
+
+JMeter 설치 후 처음 기동하면 다음 두 곳에서 Feather Wand 에 접근할 수 있습니다.
+
+| 위치 | 어떻게 열까 | 언제 쓰나 |
+|---|---|---|
+| **상단 툴바의 🪶 깃펜 아이콘** | JMeter 창 오른쪽 위, 도움말 아이콘 근처 클릭 | 챗 패널 토글 (채팅 시작) |
+| **트리 요소 우클릭 → `@AI`** | Test Plan / Thread Group / HTTP Request 등 어떤 요소든 우클릭 | 선택 요소에 대한 설명·최적화·어설션 추천 |
+
+> 아이콘이 보이지 않으면 JMeter 가 플러그인을 인식하지 못한 것입니다.
+> `docker exec perf-allinone ls /opt/apache-jmeter/lib/ext/ | grep -i feather` 로
+> `feather-wand-*.jar` 존재를 확인하세요.
+
+#### 5.8.2 최초 사용 — 3단계 스모크 테스트
+
+폐쇄망 반입 후 Feather Wand 가 제대로 LLM과 통신하는지 1분 만에 확인하는 절차.
+
+**① 호스트 Ollama 살아있는지 확인** (호스트 터미널에서)
+```bash
+curl -s http://localhost:11434/api/tags | head
+# → {"models":[{"name":"gemma4:e2b",...}]}  이면 OK
+```
+
+**② 컨테이너에서 호스트 Ollama 가 보이는지 확인**
+```bash
+docker exec perf-allinone curl -s http://host.docker.internal:11434/api/tags | head
+# → 위와 동일한 JSON 이 나와야 함
+```
+
+**③ JMeter GUI 에서 챗 한 번 쏘기**
+1. 브라우저 → `http://localhost:18090`
+2. 상단 🪶 아이콘 클릭 → 챗 패널 열림
+3. 입력창에 `안녕, 모델 이름이 뭐야?` 입력 → Enter
+4. 2-5초 후 모델이 한국어로 응답하면 **정상**
+
+> ③에서 응답이 30초 넘게 안 오면 §5.8.7 트러블슈팅 참조.
+
+#### 5.8.3 5가지 핵심 사용 시나리오
+
+실제 업무에서 가장 자주 쓰는 다섯 가지 패턴.
+
+##### (A) 자연어로 시나리오 뼈대 생성
+
+**상황**: 빈 Test Plan에서 시작, 대략적인 부하 시험을 빠르게 세우고 싶다.
+
+**방법**:
+1. Test Plan 우클릭 → `@AI` → 챗 패널 열림
+2. 다음처럼 **대상/부하/시간**을 포함해 작성:
+   ```
+   https://api.example.com/v1/users 에 대해
+   50명 동시 사용자로 5분간 GET 부하 시험.
+   응답시간 95%ile 500ms 어설션 포함, TPS 그래프 리스너 붙여줘.
+   ```
+3. 응답에 나타난 **"Apply"** 또는 **"Insert"** 버튼 클릭 → 트리에 요소 자동 삽입
+4. `Ctrl+S` 로 `/data/jmeter/scenarios/api-users-smoke.jmx` 저장
+
+**팁**: 프롬프트에 들어가면 품질이 올라가는 정보 — 대상 URL, 메서드, 인증 방식,
+동시 사용자 수, 총 실행 시간, ramp-up 패턴, 어설션 기준(코드/응답시간/본문).
+
+##### (B) 선택한 요소 설명받기 (`Explain`)
+
+**상황**: 기존 시나리오를 물려받았는데 어떤 요소가 왜 있는지 모르겠다.
+
+**방법**:
+- 트리에서 이해가 안 되는 요소(예: `Constant Throughput Timer`) 우클릭 → `@AI` → `Explain this element`
+- 챗 패널에 **요소의 역할 / 주요 파라미터 / 주의점** 이 한국어로 설명됨
+
+##### (C) 시나리오 최적화 제안 (`Optimize`)
+
+**상황**: 테스트를 돌려봤는데 Heap OOM 이 나거나, 결과가 불안정하다.
+
+**방법**:
+- Thread Group 또는 Test Plan 우클릭 → `@AI` → `Optimize this`
+- 프롬프트에 현상을 덧붙이면 질 좋은 답을 얻음:
+  ```
+  이 시나리오를 실행하면 10분쯤에 Heap OutOfMemoryError 가 난다.
+  리스너 구성·샘플러 설정을 어떻게 조정해야 할까?
+  ```
+
+##### (D) 실패 원인 분석 (`Debug`)
+
+**상황**: CLI 결과를 돌려봤는데 에러율이 이상하다.
+
+**방법**: 최근 JTL 의 요약을 복사해 챗에 붙여 분석 요청.
+```
+아래 JTL 요약에서 401 이 전체의 40% 발생했다. 가장 가능성 높은 원인 3가지와
+시나리오에서 확인해야 할 체크포인트를 알려줘.
+
+samples=12500, errors=5004, mean=320ms, 90%=620ms, 99%=1.8s
+error_codes: 401=5000, 500=4
+```
+
+##### (E) 어설션/코릴레이션 추천
+
+**상황**: 응답 JSON 에서 토큰을 뽑아 다음 요청에 써야 한다.
+
+**방법**: HTTP Request 우클릭 → `@AI` → 챗에 이어서:
+```
+이 응답 JSON 에서 $.data.access_token 값을 추출해 TOKEN 변수에 저장하고
+다음 HTTP Request 의 Authorization 헤더에 Bearer 로 붙이는 설정을 만들어줘.
+```
+→ JSON Extractor + Header Manager 설정이 자동 제안됨.
+
+#### 5.8.4 프롬프트 작성 팁 (답변 품질 올리는 법)
+
+| 나쁜 예 | 좋은 예 | 왜 |
+|---|---|---|
+| "부하 시험 만들어줘" | "GET https://api.example.com/users, 동시 50, 5분, p95 500ms 어설션" | 대상·부하·SLO 가 명시됨 |
+| "왜 에러나?" | "401이 40%, 나머지는 200. 헤더에 `Authorization: Bearer ${TOKEN}` 사용 중" | 현상·관련 설정이 같이 있음 |
+| "최적화해줘" | "10분에 Heap OOM. 리스너는 View Results Tree + Summary Report 사용 중" | 증상·의심 영역이 명시됨 |
+
+**한 가지 더**: Feather Wand 는 **대화 히스토리를 `ollama.max.history.size` (기본 10턴) 까지 기억** 합니다.
+한 세션 안에서 "방금 만든 시나리오에 어설션 추가해줘" 같은 후속 지시가 통합니다.
+새 시나리오로 넘어갈 때는 챗 패널의 **Clear** 버튼으로 맥락을 비우세요.
+
+#### 5.8.5 설정 키 레퍼런스
 
 `/opt/apache-jmeter/bin/user.properties` 에 사전 등록된 키 (모두 `ollama.*` 네임스페이스):
 
-| 키 | 기본값 | 설명 |
-|---|---|---|
-| `ollama.host` | `http://host.docker.internal` | **호스트 Ollama** (Docker Desktop 자동 매핑) |
-| `ollama.port` | `11434` | Ollama 포트 |
-| `ollama.default.model` | `gemma4:e2b` | 기본 모델 태그 |
-| `ollama.temperature` | `0.5` | 창의성 (0.0–1.0) |
-| `ollama.max.history.size` | `10` | 대화 히스토리 길이 |
-| `ollama.thinking.mode` | `DISABLED` | `ENABLED` \| `DISABLED` (지원 모델만) |
-| `ollama.thinking.level` | `MEDIUM` | `LOW` \| `MEDIUM` \| `HIGH` |
-| `ollama.request.timeout.seconds` | `300` | 요청 타임아웃 |
-| `ollama.system.prompt` | (한국어 어시스턴트 프롬프트) | 시스템 프롬프트 |
+| 키 | 기본값 | 설명 | 언제 바꾸나 |
+|---|---|---|---|
+| `ollama.host` | `http://host.docker.internal` | 호스트 Ollama 주소 | 거의 바꿀 일 없음 (Docker Desktop 자동 매핑) |
+| `ollama.port` | `11434` | Ollama 포트 | Ollama 를 다른 포트로 띄운 경우 |
+| `ollama.default.model` | `gemma4:e2b` | 기본 모델 태그 | 모델 교체 시 (§2.4 참조) |
+| `ollama.temperature` | `0.5` | 창의성 (0.0–1.0) | 정확성 우선 `0.2`, 다양한 제안 원할 때 `0.8` |
+| `ollama.max.history.size` | `10` | 대화 히스토리 턴 수 | 긴 대화 문맥이 필요하면 늘림 (RAM 더 씀) |
+| `ollama.thinking.mode` | `DISABLED` | `ENABLED` \| `DISABLED` | `deepseek-r1:*` 등 thinking 지원 모델 쓸 때만 `ENABLED` |
+| `ollama.thinking.level` | `MEDIUM` | `LOW` \| `MEDIUM` \| `HIGH` | thinking 모드에서만 유효, HIGH 는 응답 시간 크게 늘어남 |
+| `ollama.request.timeout.seconds` | `300` | 요청 타임아웃(초) | 큰 모델(14B+) + HIGH thinking 사용 시 `600` 권장 |
+| `ollama.system.prompt` | (한국어 어시스턴트 프롬프트) | 시스템 프롬프트 | 팀 표준 가이드라인(명명 규칙, 필수 리스너 등) 주입 시 |
 
 > 출처: [jmeter-ai-sample.properties](https://github.com/QAInsights/jmeter-ai/blob/main/jmeter-ai-sample.properties)
 
-운영 중 변경:
+#### 5.8.6 설정 변경 절차
+
+**일시적 확인 (재시작 없음 불가)** — jmeter.ai 는 기동 시 properties 를 읽으므로 반드시 재시작 필요.
+
 ```bash
+# 1) 편집
 docker exec -it perf-allinone vi /opt/apache-jmeter/bin/user.properties
+
+# 2) JMeter GUI 재시작 (컨테이너 자체는 재시작 불필요)
+docker exec perf-allinone supervisorctl restart jmeter-gui
+
+# 3) 브라우저에서 noVNC 세션 새로고침 → 새 설정으로 기동된 JMeter 노출
+```
+
+**자주 쓰는 일괄 변경 예시**:
+```bash
+# 모델을 qwen2.5:7b 로, 타임아웃을 600초로
+docker exec perf-allinone sh -c "
+  sed -i 's|^ollama.default.model=.*|ollama.default.model=qwen2.5:7b|' /opt/apache-jmeter/bin/user.properties
+  sed -i 's|^ollama.request.timeout.seconds=.*|ollama.request.timeout.seconds=600|' /opt/apache-jmeter/bin/user.properties
+"
 docker exec perf-allinone supervisorctl restart jmeter-gui
 ```
+
+#### 5.8.7 트러블슈팅
+
+| 증상 | 원인 후보 | 조치 |
+|---|---|---|
+| 🪶 아이콘이 안 보임 | feather-wand JAR 이 `lib/ext/` 에 없음 | `docker exec perf-allinone ls /opt/apache-jmeter/lib/ext/ \| grep feather` 로 확인 → 없으면 이미지 재빌드 |
+| 챗 입력해도 응답 없음 (무한 로딩) | 호스트 Ollama 미기동 / 포트 충돌 | §5.8.2 ① ② 스모크 테스트로 양방향 연결 확인 |
+| `connection refused` 에러 | `host.docker.internal` 미해석 (Linux 호스트) | Docker Desktop 사용 (Mac/Win) 또는 `--add-host=host.docker.internal:host-gateway` 로 기동 |
+| `model "xxx" not found` | 호스트 Ollama 에 해당 모델이 없음 | 호스트에서 `ollama pull xxx` 또는 `ollama.default.model` 을 설치된 모델로 변경 |
+| 응답이 중간에 잘림 | `ollama.request.timeout.seconds` 초과 | 300 → 600 으로 증가 후 재시작 |
+| 응답이 엉뚱한 언어 (영어/중국어 등) | 모델의 한국어 품질 한계 | `qwen2.5:7b` 이상 권장, 또는 `ollama.system.prompt` 에 "반드시 한국어로 응답" 추가 |
+| thinking 모드에서 응답이 길어지기만 함 | 모델이 thinking 미지원 | `ollama.thinking.mode=DISABLED` 로 되돌림 (7B 미만 일반 모델은 대부분 미지원) |
+
+#### 5.8.8 프라이버시 체크리스트 (폐쇄망 배포 시)
+
+- [ ] `ollama.system.prompt` 에 **사내 민감 정보·고객 데이터 금지** (평문으로 user.properties 에 남음)
+- [ ] 챗에서 **실제 프로덕션 인증 토큰 붙여 넣기 금지** — 더미 값으로 대체
+- [ ] `ollama.com` outbound 차단 확인 — Ollama 가 자동 업데이트 시 모델 메타가 외부로 노출될 수 있음
+- [ ] 대화 로그는 `/data/logs/` 에 저장되지 않지만, JMeter `jmeter.log` 에 에러가 남을 수 있음 — 공유 전 확인
 
 ---
 
