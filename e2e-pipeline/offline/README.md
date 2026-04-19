@@ -176,7 +176,7 @@ docker buildx ls
 
 | 변수 | 기본값 | 언제 바꾸나 |
 | --- | --- | --- |
-| `TARGET_PLATFORM` | `linux/amd64` | Apple Silicon 네이티브 = `linux/arm64`, Linux 배포 대상은 기본값 유지 |
+| `TARGET_PLATFORM` | (호스트 아키텍처 자동 감지 — Apple Silicon = `linux/arm64`, Intel/AMD = `linux/amd64`) | Linux x86 서버로 배포할 때 Apple Silicon 에서 빌드한다면 `linux/amd64` 명시 override (qemu 크로스 빌드, 느리지만 가능) |
 | `OLLAMA_MODEL` | `gemma4:e4b` | Dify provider 에 등록할 모델 id. **호스트에 실제로 pull 된 이름과 일치해야 함** |
 | `IMAGE_TAG` | `dscore-qa:allinone` | 여러 버전을 구분해 둘 때 |
 | `OUTPUT_TAR` | `dscore-qa-allinone-<timestamp>.tar.gz` | 출력 파일명 고정 시 |

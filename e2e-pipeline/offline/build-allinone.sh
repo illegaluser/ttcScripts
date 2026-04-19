@@ -34,7 +34,20 @@ cd "$ROOT_DIR"
 
 # ── 설정값 ────────────────────────────────────────────────────────────────
 IMAGE_TAG="${IMAGE_TAG:-dscore-qa:allinone}"
-TARGET_PLATFORM="${TARGET_PLATFORM:-linux/amd64}"
+
+# TARGET_PLATFORM: 호스트 아키텍처를 자동 감지하되, env 로 override 가능.
+# Mac 브랜치의 주된 use case 는 "Mac 에서 빌드해 Mac 에서 실행" 이므로 Apple
+# Silicon 에선 linux/arm64 로 네이티브 빌드한다 (qemu 에뮬레이션 회피).
+#   - qemu 크로스 빌드는 playwright chromium 설치가 silent-fail 하는 등 결함이 잦음
+#   - Linux x86 서버로 배포하려면 TARGET_PLATFORM=linux/amd64 로 명시 override
+if [ -z "${TARGET_PLATFORM:-}" ]; then
+  case "$(uname -m)" in
+    arm64|aarch64) TARGET_PLATFORM="linux/arm64" ;;
+    x86_64|amd64)  TARGET_PLATFORM="linux/amd64" ;;
+    *)             TARGET_PLATFORM="linux/amd64" ;;  # fallback
+  esac
+fi
+
 # OLLAMA_MODEL: 이미지에 사전 pull 되지 않음 (Mac 브랜치는 호스트 Ollama 사용).
 # 이 값은 docker buildx 가 Dockerfile ARG 로 받아두긴 하지만 실질적 효과는 없음.
 # 실제 런타임 모델 지정은 docker run 의 `-e OLLAMA_MODEL=...` 로 Dify provider 에 등록됨.
