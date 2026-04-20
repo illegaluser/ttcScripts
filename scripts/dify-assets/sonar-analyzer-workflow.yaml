@@ -1,0 +1,257 @@
+# =============================================================================
+# TTC 4-Pipeline — Sonar Issue Analyzer Workflow (Dify DSL v0.1.3)
+#
+# 파이프라인 3 (DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록) 이 호출하는
+# Dify Workflow 정의. provision.allinone.sh 가 이 YAML 을 /console/api/apps/imports
+# 로 자동 import 한다.
+#
+# 입력 (dify_sonar_issue_analyzer.py 가 POST 하는 body):
+#   sonar_issue_key       SonarQube Issue Key (예: ABC-123)
+#   sonar_project_key     SonarQube Project Key
+#   code_snippet          '>>' 마커 포함 50줄 코드 스니펫
+#   sonar_issue_url       SonarQube 이슈 상세 URL
+#   kb_query              RAG 검색용 쿼리 (rule_key + message)
+#   sonar_issue_json      JSON 원본 문자열
+#   sonar_rule_json       Rule 정의 JSON 문자열
+#
+# 출력 (GitLab Issue 로 매핑):
+#   title                 한줄 요약 제목
+#   description_markdown  본문 markdown
+#   labels                라벨 배열
+#
+# 모델: 호스트 Ollama gemma4:e4b (기본). 다른 모델은 llm/extractor 노드의
+# model.name 을 일괄 치환.
+# =============================================================================
+
+kind: app
+version: 0.1.3
+app:
+  description: 'SonarQube 이슈를 GitLab Issue 형식으로 변환하는 Workflow'
+  icon: robot
+  icon_background: '#FFEAD5'
+  mode: workflow
+  name: Sonar Issue Analyzer
+  use_icon_as_answer_icon: false
+
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      enabled: false
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+
+  graph:
+    edges:
+      - id: edge-start-to-llm
+        source: start
+        sourceHandle: source
+        target: llm_analyzer
+        targetHandle: target
+        type: custom
+        data:
+          sourceType: start
+          targetType: llm
+
+      - id: edge-llm-to-extractor
+        source: llm_analyzer
+        sourceHandle: source
+        target: extractor
+        targetHandle: target
+        type: custom
+        data:
+          sourceType: llm
+          targetType: parameter-extractor
+
+      - id: edge-extractor-to-end
+        source: extractor
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+        data:
+          sourceType: parameter-extractor
+          targetType: end
+
+    nodes:
+      # ────────────────────────────────────────────────────────────────────
+      # Start — 7개 입력 변수
+      # ────────────────────────────────────────────────────────────────────
+      - id: start
+        type: custom
+        position:
+          x: 80
+          y: 200
+        data:
+          type: start
+          title: Start
+          variables:
+            - variable: sonar_issue_key
+              label: Issue Key
+              type: text-input
+              required: true
+              max_length: 128
+            - variable: sonar_project_key
+              label: Project Key
+              type: text-input
+              required: true
+              max_length: 256
+            - variable: code_snippet
+              label: Code Snippet
+              type: paragraph
+              required: true
+              max_length: 8000
+            - variable: sonar_issue_url
+              label: Issue URL
+              type: text-input
+              required: false
+              max_length: 1024
+            - variable: kb_query
+              label: RAG Query
+              type: text-input
+              required: false
+              max_length: 1024
+            - variable: sonar_issue_json
+              label: Raw Issue JSON
+              type: paragraph
+              required: true
+              max_length: 8000
+            - variable: sonar_rule_json
+              label: Raw Rule JSON
+              type: paragraph
+              required: false
+              max_length: 8000
+
+      # ────────────────────────────────────────────────────────────────────
+      # LLM — 이슈 분석 및 구조화 응답 생성
+      # ────────────────────────────────────────────────────────────────────
+      - id: llm_analyzer
+        type: custom
+        position:
+          x: 480
+          y: 200
+        data:
+          type: llm
+          title: 이슈 분석 LLM
+          model:
+            provider: ollama
+            name: gemma4:e4b
+            mode: chat
+            completion_params:
+              temperature: 0.1
+              max_tokens: 2048
+          prompt_template:
+            - role: system
+              text: |
+                당신은 SonarQube 정적분석 결과를 GitLab Issue 로 변환하는 시니어 엔지니어입니다.
+                응답은 반드시 하나의 JSON 객체로만 출력하세요. 코드펜스(```)나 다른 설명 금지.
+
+                JSON 스키마:
+                {
+                  "title": "<한줄 요약 제목, 80자 이내. 예: '[BUG] NullPointerException in UserService.login()'>",
+                  "description_markdown": "<markdown 본문. 아래 섹션 순서: ## 요약 / ## 영향 / ## 재현 / ## 수정 제안 / ## 참조>",
+                  "labels": ["<Severity>", "<Type>", "<추가 태그...>"]
+                }
+
+                규칙:
+                - description_markdown 에는 반드시 코드 블록으로 해당 라인(>>) 포함
+                - description_markdown 마지막 '## 참조' 에 SonarQube 이슈 URL 명시
+                - labels 는 최소 2개 (severity, type), 추가 도메인 태그 자유
+            - role: user
+              text: |
+                ## 입력
+                - issue key       : {{#start.sonar_issue_key#}}
+                - project key     : {{#start.sonar_project_key#}}
+                - sonar URL       : {{#start.sonar_issue_url#}}
+                - RAG query (참고): {{#start.kb_query#}}
+
+                ## Sonar Issue JSON
+                ```json
+                {{#start.sonar_issue_json#}}
+                ```
+
+                ## Sonar Rule JSON
+                ```json
+                {{#start.sonar_rule_json#}}
+                ```
+
+                ## Code Snippet (>> 는 해당 라인)
+                ```
+                {{#start.code_snippet#}}
+                ```
+
+                위 정보를 바탕으로 JSON 응답만 생성하세요.
+          context:
+            enabled: false
+          vision:
+            enabled: false
+
+      # ────────────────────────────────────────────────────────────────────
+      # Parameter Extractor — LLM 응답에서 3개 필드 추출
+      # ────────────────────────────────────────────────────────────────────
+      - id: extractor
+        type: custom
+        position:
+          x: 880
+          y: 200
+        data:
+          type: parameter-extractor
+          title: GitLab Issue 필드 추출
+          model:
+            provider: ollama
+            name: gemma4:e4b
+            mode: chat
+            completion_params:
+              temperature: 0.0
+              max_tokens: 2048
+          query:
+            - llm_analyzer
+            - text
+          parameters:
+            - name: title
+              type: string
+              required: true
+              description: '한줄 요약 제목 (80자 이내)'
+            - name: description_markdown
+              type: string
+              required: true
+              description: 'markdown 본문 (## 요약 / ## 영향 / ## 재현 / ## 수정 제안 / ## 참조)'
+            - name: labels
+              type: array[string]
+              required: true
+              description: 'GitLab 라벨 배열 (최소 severity + type)'
+          reasoning_mode: prompt
+          instruction: |
+            위 LLM 응답에서 title, description_markdown, labels 3개 필드를 추출하여
+            구조화된 파라미터로 반환하세요. 원본 값을 가공하지 말 것.
+
+      # ────────────────────────────────────────────────────────────────────
+      # End — 3개 출력
+      # ────────────────────────────────────────────────────────────────────
+      - id: end
+        type: custom
+        position:
+          x: 1280
+          y: 200
+        data:
+          type: end
+          title: End
+          outputs:
+            - variable: title
+              value_selector:
+                - extractor
+                - title
+              value_type: string
+            - variable: description_markdown
+              value_selector:
+                - extractor
+                - description_markdown
+              value_type: string
+            - variable: labels
+              value_selector:
+                - extractor
+                - labels
+              value_type: array[string]

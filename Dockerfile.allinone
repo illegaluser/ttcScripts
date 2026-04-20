@@ -271,6 +271,11 @@ RUN mkdir -p /opt/seed/jenkins-home/init.groovy.d && \
     cp /opt/jenkins-init/*.groovy /opt/seed/jenkins-home/init.groovy.d/ 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dify 자산 (Workflow DSL, Dataset 정의) — provision.allinone.sh 가 자동 import
+# ─────────────────────────────────────────────────────────────────────────────
+COPY scripts/dify-assets/ /opt/dify-assets/
+
+# ─────────────────────────────────────────────────────────────────────────────
 # entrypoint + provisioner
 # ─────────────────────────────────────────────────────────────────────────────
 COPY scripts/entrypoint.allinone.sh /entrypoint.sh
