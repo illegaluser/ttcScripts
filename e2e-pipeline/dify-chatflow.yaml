@@ -129,7 +129,11 @@ workflow:
               type: select
               variable: run_mode
             - label: srs_text
-              max_length: 2000
+              # 20000 chars 확장: 클라이언트가 PDF 텍스트를 추출해 srs_text 에 prepend 하는
+              # 경로 ([첨부 문서 내용] ... [추가 요구사항]) 를 지원하기 위함. pymupdf 가
+              # 뽑은 30-스텝 PDF 가 ~2.1KB 이고, DIFY_DOC_MAX_CHARS 기본 12000 과 사용자
+              # SRS 여유를 합쳐 안전 마진.
+              max_length: 20000
               options: []
               required: false
               type: paragraph

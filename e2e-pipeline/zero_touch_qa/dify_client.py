@@ -120,6 +120,60 @@ class DifyClient:
         log.info("[Doc] 문서 업로드 완료 (ID: %s)", file_id)
         return file_id
 
+    # ── Doc 모드: 파일을 LLM 입력용 텍스트로 추출 ──
+    def extract_text_from_file(self, file_path: str) -> str:
+        """업로드 파일을 LLM 이 바로 읽을 수 있는 **plain/markdown 텍스트**로 변환한다.
+
+        Dify Chatflow 의 Planner 노드가 ``context.enabled: false`` 로 묶여 있어
+        업로드된 파일의 내용을 LLM 이 입력으로 받지 못한다. 이 함수는 클라이언트
+        측에서 텍스트를 추출해 ``srs_text`` 에 병합하도록 설계됐다 — Chatflow
+        구조를 건드리지 않고도 LLM 이 문서 내용을 직접 보게 된다.
+
+        파일 타입은 **magic bytes 로 감지** — Jenkins Pipeline 이 DOC_FILE 을
+        항상 ``upload.pdf`` 로 저장하더라도 실제 내용이 markdown / 일반 텍스트면
+        그 경로로 처리된다:
+
+        - PDF (``%PDF-`` 시작): ``pymupdf`` 로 페이지별 텍스트 추출 후 ``## Page N``
+          구분자로 결합 (markdown 스타일)
+        - 그 외: UTF-8 로 직접 read (``errors="replace"`` — 비정상 바이트 내성)
+
+        상한 (``DIFY_DOC_MAX_CHARS`` env, 기본 12000 자) 초과 시 앞부분만 +
+        ``[... truncated at N chars ...]`` 주석. ``OLLAMA_CONTEXT_SIZE=16384``
+        가정 하에서 토큰 예산 (~12k chars → ~3k tokens) 안전 범위.
+
+        Args:
+            file_path: 추출할 파일 경로 (보통 Pipeline 이 저장한
+                ``$AGENT_HOME/upload.pdf``).
+
+        Returns:
+            추출된 텍스트 (UTF-8 문자열). 파일이 비어있으면 빈 문자열.
+
+        Raises:
+            FileNotFoundError: 파일이 존재하지 않을 때.
+            ImportError: PDF 파일인데 ``pymupdf`` 패키지가 설치되지 않았을 때.
+        """
+        max_chars = int(os.getenv("DIFY_DOC_MAX_CHARS", "12000"))
+        with open(file_path, "rb") as f:
+            head = f.read(8)
+        if head.startswith(b"%PDF-"):
+            import pymupdf  # 지연 import — PDF 가 아닐 때 의존성 불필요
+            doc = pymupdf.open(file_path)
+            parts = []
+            for i, page in enumerate(doc, 1):
+                page_text = page.get_text().strip()
+                if page_text:
+                    parts.append(f"## Page {i}\n\n{page_text}")
+            text = "\n\n".join(parts)
+            doc.close()
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n\n[... truncated at {max_chars} chars ...]"
+        log.info("[Doc] 문서 텍스트 추출: %d 자 (%s)", len(text), os.path.basename(file_path))
+        return text
+
     # ── 시나리오 생성 (chat / doc 모드) ──
     def generate_scenario(
         self,

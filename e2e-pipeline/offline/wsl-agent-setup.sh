@@ -373,7 +373,7 @@ fi
 
 VENV_PY="$VENV_DIR/bin/python3"
 "$VENV_PY" -m pip install --upgrade pip >/dev/null 2>&1
-REQ_PKGS=(requests playwright pillow)
+REQ_PKGS=(requests playwright pillow pymupdf)
 log "  pip install: ${REQ_PKGS[*]}"
 "$VENV_PY" -m pip install --quiet "${REQ_PKGS[@]}"
 

@@ -134,7 +134,28 @@ def _prepare_scenario(
         if not args.file:
             log.warning("[Doc] --file 인자가 없습니다. SRS_TEXT로 대체합니다.")
         else:
-            file_id = dify.upload_file(args.file)
+            # 클라이언트 측 파일 → 텍스트 추출 후 srs_text 에 prepend.
+            # Dify Chatflow 의 Planner 노드가 context.enabled=false 상태라 파일 업로드
+            # 경로로는 LLM 이 내용을 못 읽는다. 텍스트로 직접 넣어야 gemma4:e4b 가
+            # 문서를 보면서 시나리오를 생성할 수 있다.
+            try:
+                doc_text = dify.extract_text_from_file(args.file)
+                if doc_text:
+                    if srs_text:
+                        srs_text = (
+                            f"[첨부 문서 내용]\n{doc_text}\n\n"
+                            f"[추가 요구사항]\n{srs_text}"
+                        )
+                    else:
+                        srs_text = f"[첨부 문서 내용]\n{doc_text}"
+                    log.info("[Doc] 문서에서 %d 자 추출, srs_text 에 병합", len(doc_text))
+                else:
+                    log.warning("[Doc] 문서에서 추출된 텍스트가 비어있습니다.")
+            except Exception as e:
+                log.warning(
+                    "[Doc] 파일 추출 실패 (%s) — 기존 upload_file 경로로 폴백", e
+                )
+                file_id = dify.upload_file(args.file)
 
     scenario = dify.generate_scenario(
         run_mode=args.mode,
