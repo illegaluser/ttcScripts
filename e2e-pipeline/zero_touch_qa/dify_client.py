@@ -30,6 +30,8 @@ class DifyClient:
         self.headers = {"Authorization": f"Bearer {config.dify_api_key}"}
         self.heal_timeout_sec = getattr(config, "heal_timeout_sec", 60)
         self.scenario_timeout_sec = getattr(config, "scenario_timeout_sec", 300)
+        # 파싱 실패 시 raw 응답 덤프 경로 (사후 진단)
+        self.artifacts_dir = getattr(config, "artifacts_dir", None)
 
     def _request_with_retry(
         self,
@@ -119,6 +121,27 @@ class DifyClient:
         file_id = res.json().get("id")
         log.info("[Doc] 문서 업로드 완료 (ID: %s)", file_id)
         return file_id
+
+    # ── 파싱 실패 시 raw 응답 덤프 ──
+    def _dump_raw_response(self, answer: str) -> str | None:
+        """파싱 실패한 Dify 원본 응답을 artifacts 디렉토리에 타임스탬프와 함께 저장.
+
+        사후 진단용. artifacts_dir 가 설정돼 있지 않으면 None 반환.
+        파일명: ``dify-raw-response-YYYYMMDDTHHMMSS.txt``.
+        """
+        if not self.artifacts_dir:
+            return None
+        try:
+            os.makedirs(self.artifacts_dir, exist_ok=True)
+            fname = f"dify-raw-response-{time.strftime('%Y%m%dT%H%M%S')}.txt"
+            path = os.path.join(self.artifacts_dir, fname)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(answer)
+            log.warning("[Dify] raw 응답을 덤프했습니다: %s (%d자)", path, len(answer))
+            return path
+        except OSError as e:
+            log.warning("[Dify] raw 응답 덤프 실패: %s", e)
+            return None
 
     # ── Doc 모드: 파일을 LLM 입력용 텍스트로 추출 ──
     def extract_text_from_file(self, file_path: str) -> str:
@@ -226,16 +249,19 @@ class DifyClient:
         log.info("Dify 응답 길이: %d자, <think> 포함: %s", len(answer), "<think>" in answer)
         scenario = extract_json_safely(answer)
         if not scenario or not isinstance(scenario, list):
-            # <think> 블록 제거 후 실제 내용이 있는지 표시
-            cleaned = answer
-            if "<think>" in cleaned:
-                import re
-                cleaned = re.sub(r"<think>.*?</think>", "[THINK_BLOCK_REMOVED]", cleaned, flags=re.S)
-                cleaned = re.sub(r"<think>.*", "[UNCLOSED_THINK_REMOVED]", cleaned, flags=re.S)
+            # 실패 시 raw 응답을 artifacts 에 덤프 (사후 진단). 이미 extract_json_safely 가
+            # <think> 제거 + 3차 복구 + 개별 object 추출까지 시도하므로 여기 도달했다면
+            # LLM 출력이 구조적으로 깨져 있다는 뜻.
+            dump_path = self._dump_raw_response(answer)
+            import re
+            cleaned = re.sub(r"<think>.*?</think>", "[THINK_BLOCK_REMOVED]", answer, flags=re.S)
+            cleaned = re.sub(r"<think>.*", "[UNCLOSED_THINK_REMOVED]", cleaned, flags=re.S)
+            dump_msg = f"\n  raw 응답 덤프: {dump_path}" if dump_path else ""
             raise DifyConnectionError(
                 f"시나리오 파싱 실패.\n"
                 f"  응답 길이: {len(answer)}자\n"
-                f"  <think> 블록 제거 후 내용:\n{cleaned[:500]}"
+                f"  <think> 블록 제거 후 내용(앞 500자):\n{cleaned[:500]}"
+                + dump_msg
             )
         return scenario
 
