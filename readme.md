@@ -19,6 +19,19 @@
 | 터미널 | Terminal.app 기본 사용법 숙지 |
 | 하드웨어 | 최소 16 GB RAM, 50 GB 여유 디스크 공간 권장 (GitLab이 메모리를 많이 사용한다) |
 
+---
+
+### 배포 옵션 분기
+
+본 문서는 **기존 docker-compose 기반 full QAOps 스택** (Jenkins + SonarQube + GitLab + Dify + ...) 을 macOS 호스트에서 구축하는 가이드이다. 다른 배포 형태가 필요하면 아래 경로를 사용한다.
+
+| 목표 | 참조 문서 | 비고 |
+|------|-----------|------|
+| **macOS 로컬 full QAOps 스택** | 이 문서 (README.md) + [e2e-pipeline/GUIDE.md](e2e-pipeline/GUIDE.md) (setup.sh 자동설치) | docker-compose, 다중 컨테이너 |
+| **Zero-Touch QA (E2E 테스트) 만 단일 이미지로 오프라인 배포** — Mac 또는 Windows 11 (WSL2) | [e2e-pipeline/offline/README.md](e2e-pipeline/offline/README.md) | 단일 Docker 이미지 + 호스트 Ollama + 호스트 agent 하이브리드. 폐쇄망 환경 지원 |
+
+오프라인 올인원은 Section 5.8 의 `DSCORE-ZeroTouch-QA` 파이프라인만 단일 이미지로 묶은 배포본으로, Jenkins master + Dify + PG/Redis/Qdrant/nginx 를 한 컨테이너에 담고 Ollama + Jenkins agent 는 호스트에서 실행한다. Mac 은 macOS 가 호스트, Windows 11 은 Ollama 가 Windows 네이티브 / agent 가 WSL2 Ubuntu (WSLg 로 headed Chromium 을 Windows 데스크탑에 표시).
+
 ### 시스템 구성
 
 아래 5개 Phase를 순서대로 진행한다. 
