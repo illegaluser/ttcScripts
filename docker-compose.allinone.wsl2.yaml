@@ -1,19 +1,29 @@
 # ============================================================================
 # TTC 4-Pipeline All-in-One — WSL2 (Windows) 기동 컴포즈
 #
+# 구성:
+#   ttc-allinone : 통합 이미지 (Jenkins + Dify + SonarQube + PG/Redis/Qdrant)
+#   gitlab       : GitLab CE 공식 이미지 (분리 서비스, 파이프라인 2/3 대상)
+#
 # 전제:
 #   - Docker Desktop + WSL2 백엔드
 #   - 호스트(WSL2 또는 Windows) 에 Ollama 데몬 실행 중 (11434 포트)
-#   - 이미지는 scripts/build-wsl2.sh 로 선빌드 (ttc-allinone:wsl2-<tag>)
+#   - 이미지 사전 빌드 (ttc-allinone:wsl2-<tag>)
 #
-# 포트 매핑 — 기존 Playwright 컨테이너(18080/18081/50001) 와 루트 스택(8080/9000
-# /8929/3000/50000) 과 겹치지 않도록 28xxx / 50002 대역:
+# 포트 매핑 — 기존 Playwright 컨테이너(18080/18081/50001) 와 루트 스택(8080
+# /9000/8929/3000/50000) 과 겹치지 않도록 28xxx / 50002 대역:
 #   28080  Jenkins
 #   28081  Dify gateway
 #   29000  SonarQube
 #   50002  Jenkins agent (JNLP)
+#   28090  GitLab HTTP
+#   28022  GitLab SSH
 #
-# 데이터 볼륨: ${HOME}/ttc-allinone-data (WSL2 네이티브 FS)
+# e2e-pipeline(Playwright) 스택과 연동하려면:
+#   docker compose -f docker-compose.allinone.wsl2.yaml \
+#                  -f docker-compose.allinone.e2e-bridge.yaml up -d
+#
+# 데이터 볼륨: ${HOME}/ttc-allinone-data
 # ============================================================================
 
 services:
@@ -21,8 +31,6 @@ services:
     image: ${IMAGE:-ttc-allinone:wsl2-dev}
     container_name: ttc-allinone
     restart: unless-stopped
-    # Docker Desktop 은 host.docker.internal 을 자동 제공하지만, 순수 Linux 도커에서는
-    # --add-host 가 필요. WSL2 Docker Desktop 환경에서는 아래 extra_hosts 가 no-op.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -33,14 +41,16 @@ services:
       JENKINS_AGENT_PORT: "50002"
       DIFY_GATEWAY_PORT: "28081"
       SONARQUBE_PORT: "29000"
+      # provision.allinone.sh 가 GitLab root 비밀번호 설정 + PAT 발급에 사용
+      GITLAB_URL_INTERNAL: "http://gitlab:80"
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:-ChangeMe!Pass}
     ports:
       - "28080:28080"
       - "28081:28081"
       - "29000:9000"
       - "50002:50002"
     volumes:
-      - ${HOME}/ttc-allinone-data:/data
-    # SonarQube Elasticsearch 가 mmap 을 쓰므로 호스트 커널 제약 상향
+      - ${HOME}/ttc-allinone-data/allinone:/data
     ulimits:
       memlock:
         soft: -1
@@ -48,8 +58,66 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    # SonarQube 는 최소 2GB 힙 필요. 컨테이너 전체 메모리 한도 6GB 권장.
     deploy:
       resources:
         limits:
           memory: 6g
+    networks:
+      - ttc-net
+    depends_on:
+      gitlab:
+        condition: service_started
+
+  gitlab:
+    image: ${GITLAB_IMAGE:-gitlab/gitlab-ce:17.4.2-ce.0}
+    container_name: ttc-gitlab
+    restart: unless-stopped
+    hostname: gitlab
+    # GitLab 초기화는 5-10분 소요. healthcheck 로 준비 상태 노출.
+    environment:
+      TZ: Asia/Seoul
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:-ChangeMe!Pass}
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
+        gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
+        gitlab_rails['gitlab_signup_enabled'] = false
+        gitlab_rails['gitlab_default_can_create_group'] = true
+        # 리소스 절약 (팀 내부용 전제)
+        puma['worker_processes'] = 2
+        sidekiq['max_concurrency'] = 10
+        prometheus_monitoring['enable'] = false
+        gitlab_exporter['enable'] = false
+        node_exporter['enable'] = false
+        redis_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        alertmanager['enable'] = false
+        grafana['enable'] = false
+    ports:
+      - "28090:80"
+      - "28022:22"
+    volumes:
+      - ${HOME}/ttc-allinone-data/gitlab/config:/etc/gitlab
+      - ${HOME}/ttc-allinone-data/gitlab/logs:/var/log/gitlab
+      - ${HOME}/ttc-allinone-data/gitlab/data:/var/opt/gitlab
+    shm_size: 256m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://localhost/users/sign_in"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    networks:
+      - ttc-net
+
+networks:
+  ttc-net:
+    driver: bridge
+    name: ttc-net

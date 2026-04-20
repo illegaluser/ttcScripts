@@ -1,12 +1,21 @@
 # ============================================================================
 # TTC 4-Pipeline All-in-One — macOS 기동 컴포즈
 #
+# 구성:
+#   ttc-allinone : 통합 이미지 (Jenkins + Dify + SonarQube + PG/Redis/Qdrant)
+#   gitlab       : GitLab CE 공식 이미지 (분리 서비스)
+#
 # 전제:
 #   - Docker Desktop for Mac (Apple Silicon 기본)
 #   - 호스트 Mac 에 Ollama 데몬 실행 중 (Metal GPU, 11434 포트)
-#   - 이미지는 scripts/build-mac.sh 로 선빌드 (ttc-allinone:mac-<tag>)
+#   - 이미지 사전 빌드 (ttc-allinone:mac-<tag>)
 #
-# 포트 매핑: 28080/28081/29000/50002 (WSL2 와 동일, 분리 이유는 docker-compose.allinone.wsl2.yaml 참고)
+# 포트 매핑: 28080 / 28081 / 29000 / 50002 / 28090 / 28022
+#   (상세는 docker-compose.allinone.wsl2.yaml 참고)
+#
+# e2e-pipeline(Playwright) 연동:
+#   docker compose -f docker-compose.allinone.mac.yaml \
+#                  -f docker-compose.allinone.e2e-bridge.yaml up -d
 #
 # 데이터 볼륨: ${HOME}/ttc-allinone-data
 # ============================================================================
@@ -16,7 +25,6 @@ services:
     image: ${IMAGE:-ttc-allinone:mac-dev}
     container_name: ttc-allinone
     restart: unless-stopped
-    # Mac Docker Desktop 은 host.docker.internal 을 기본 지원. extra_hosts 불필요.
     platform: linux/arm64
     environment:
       TZ: Asia/Seoul
@@ -26,13 +34,15 @@ services:
       JENKINS_AGENT_PORT: "50002"
       DIFY_GATEWAY_PORT: "28081"
       SONARQUBE_PORT: "29000"
+      GITLAB_URL_INTERNAL: "http://gitlab:80"
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:-ChangeMe!Pass}
     ports:
       - "28080:28080"
       - "28081:28081"
       - "29000:9000"
       - "50002:50002"
     volumes:
-      - ${HOME}/ttc-allinone-data:/data
+      - ${HOME}/ttc-allinone-data/allinone:/data
     ulimits:
       memlock:
         soft: -1
@@ -44,3 +54,63 @@ services:
       resources:
         limits:
           memory: 6g
+    networks:
+      - ttc-net
+    depends_on:
+      gitlab:
+        condition: service_started
+
+  gitlab:
+    image: ${GITLAB_IMAGE:-gitlab/gitlab-ce:17.4.2-ce.0}
+    container_name: ttc-gitlab
+    restart: unless-stopped
+    hostname: gitlab
+    # Apple Silicon: 공식 gitlab-ce 는 linux/amd64 (Rosetta 경유, 성능 감수).
+    # arm64 원한다면 대체 이미지 필요 (예: zengxs/gitlab). 기본은 공식.
+    platform: linux/amd64
+    environment:
+      TZ: Asia/Seoul
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:-ChangeMe!Pass}
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
+        gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
+        gitlab_rails['gitlab_signup_enabled'] = false
+        gitlab_rails['gitlab_default_can_create_group'] = true
+        puma['worker_processes'] = 2
+        sidekiq['max_concurrency'] = 10
+        prometheus_monitoring['enable'] = false
+        gitlab_exporter['enable'] = false
+        node_exporter['enable'] = false
+        redis_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        alertmanager['enable'] = false
+        grafana['enable'] = false
+    ports:
+      - "28090:80"
+      - "28022:22"
+    volumes:
+      - ${HOME}/ttc-allinone-data/gitlab/config:/etc/gitlab
+      - ${HOME}/ttc-allinone-data/gitlab/logs:/var/log/gitlab
+      - ${HOME}/ttc-allinone-data/gitlab/data:/var/opt/gitlab
+    shm_size: 256m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://localhost/users/sign_in"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    networks:
+      - ttc-net
+
+networks:
+  ttc-net:
+    driver: bridge
+    name: ttc-net
