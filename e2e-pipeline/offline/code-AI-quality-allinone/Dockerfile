@@ -115,7 +115,7 @@ RUN sed -i 's|"plugin_unique_identifier": plugin_unique_identifier|"PluginUnique
 # (requirements-allinone.txt 는 기존 자산 재사용: requests, playwright, deepeval 등)
 # ─────────────────────────────────────────────────────────────────────────────
 COPY e2e-pipeline/offline/requirements-allinone.txt /tmp/requirements-allinone.txt
-COPY scripts/requirements-pipelines.txt             /tmp/requirements-pipelines.txt
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/requirements-pipelines.txt             /tmp/requirements-pipelines.txt
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
         -r /tmp/requirements-allinone.txt && \
     pip3 install --no-cache-dir --break-system-packages --ignore-installed \
@@ -207,14 +207,14 @@ COPY e2e-pipeline/offline/dify-plugins/    /opt/seed/dify-plugins/
 # PostgreSQL initdb + Dify/SonarQube DB 생성
 # (기존 pg-init-allinone.sh 는 dify/dify_plugin 만 생성 → sonar 추가한 확장본 사용)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY scripts/pg-init.allinone.sh /opt/pg-init.allinone.sh
-RUN bash /opt/pg-init.allinone.sh
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/pg-init.sh /opt/pg-init.sh
+RUN bash /opt/pg-init.sh
 
 # ─────────────────────────────────────────────────────────────────────────────
 # supervisord / nginx 설정 — 통합 이미지 전용 (포트 28080/28081/29000/50002)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY scripts/supervisord.allinone.conf /etc/supervisor/supervisord.conf
-COPY scripts/nginx.allinone.conf       /etc/nginx/nginx.conf
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/supervisord.conf /etc/supervisor/supervisord.conf
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/nginx.conf       /etc/nginx/nginx.conf
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 파이프라인 1~3 Python 스크립트 + 파이프라인 4 eval_runner
@@ -247,7 +247,7 @@ COPY "DSCORE-TTC 코드 사전학습.jenkinsPipeline" \
      "DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록.jenkinsPipeline" \
      "DSCORE-TTC AI평가.jenkinsPipeline" \
      /opt/jenkinsfiles/
-COPY scripts/jenkins-seed/ /opt/seed/jenkins-home/
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/jenkins-seed/ /opt/seed/jenkins-home/
 
 RUN set -eux; \
     cd /opt/jenkinsfiles; \
@@ -273,14 +273,14 @@ RUN mkdir -p /opt/seed/jenkins-home/init.groovy.d && \
 # ─────────────────────────────────────────────────────────────────────────────
 # Dify 자산 (Workflow DSL, Dataset 정의) — provision.allinone.sh 가 자동 import
 # ─────────────────────────────────────────────────────────────────────────────
-COPY scripts/dify-assets/ /opt/dify-assets/
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/dify-assets/ /opt/dify-assets/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # entrypoint + provisioner
 # ─────────────────────────────────────────────────────────────────────────────
-COPY scripts/entrypoint.allinone.sh /entrypoint.sh
-COPY scripts/provision.allinone.sh  /opt/provision.allinone.sh
-RUN chmod +x /entrypoint.sh /opt/provision.allinone.sh
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/entrypoint.sh /entrypoint.sh
+COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/provision.sh  /opt/provision.sh
+RUN chmod +x /entrypoint.sh /opt/provision.sh
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 환경 변수 (런타임 기본값)

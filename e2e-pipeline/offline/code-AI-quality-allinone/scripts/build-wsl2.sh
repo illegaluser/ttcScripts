@@ -2,13 +2,16 @@
 # ============================================================================
 # TTC 4-Pipeline All-in-One — WSL2 (Windows) 빌드 스크립트
 #
-# 실행 위치: WSL2 Ubuntu 셸. 빌드 컨텍스트는 레포 루트.
+# 실행 위치: WSL2 Ubuntu 셸. 빌드 컨텍스트는 레포 루트(ttcScripts).
+# Dockerfile 위치: e2e-pipeline/offline/code-AI-quality-allinone/Dockerfile
 # 결과 이미지: ttc-allinone:wsl2-<tag>
 # ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# scripts/ → code-AI-quality-allinone/ → offline/ → e2e-pipeline/ → 레포 루트
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+DOCKERFILE_REL="e2e-pipeline/offline/code-AI-quality-allinone/Dockerfile"
 
 TAG="${TAG:-dev}"
 IMAGE="${IMAGE:-ttc-allinone:wsl2-${TAG}}"
@@ -22,9 +25,10 @@ if [[ "$(pwd)" == /mnt/* ]]; then
     echo "[build-wsl2]       ~/ttcScripts 등 WSL2 네이티브 경로로 clone 하는 것을 권장합니다." >&2
 fi
 
-echo "[build-wsl2] image: $IMAGE"
-echo "[build-wsl2] platform: $PLATFORM"
-echo "[build-wsl2] context: $REPO_ROOT"
+echo "[build-wsl2] image:      $IMAGE"
+echo "[build-wsl2] platform:   $PLATFORM"
+echo "[build-wsl2] context:    $REPO_ROOT"
+echo "[build-wsl2] Dockerfile: $DOCKERFILE_REL"
 
 docker buildx inspect ttc-allinone-builder >/dev/null 2>&1 || \
     docker buildx create --name ttc-allinone-builder --use
@@ -32,11 +36,11 @@ docker buildx inspect ttc-allinone-builder >/dev/null 2>&1 || \
 docker buildx build \
     --builder ttc-allinone-builder \
     --platform "$PLATFORM" \
-    -f Dockerfile.allinone \
+    -f "$DOCKERFILE_REL" \
     -t "$IMAGE" \
     --load \
     "$@" \
     .
 
 echo "[build-wsl2] 빌드 완료: $IMAGE"
-echo "[build-wsl2] 기동: bash scripts/run-wsl2.sh"
+echo "[build-wsl2] 기동: bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/run-wsl2.sh"

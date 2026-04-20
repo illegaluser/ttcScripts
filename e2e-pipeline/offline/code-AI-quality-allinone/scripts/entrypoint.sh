@@ -5,7 +5,7 @@
 # 기존 e2e-pipeline/offline/entrypoint-allinone.sh 를 베이스로:
 #   - 포트 28080/28081/50002/29000 적용
 #   - SonarQube 수동 start (PG 준비 후)
-#   - 파이프라인 1~3 용 Jenkins job seed 는 provision.allinone.sh 에서 처리
+#   - 파이프라인 1~3 용 Jenkins job seed 는 provision.sh 에서 처리
 # ============================================================================
 set -euo pipefail
 
@@ -140,7 +140,7 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
     done
     log "헬스 대기 완료 (${_waited}s)."
 
-    log "앱 프로비저닝 시작 (provision.allinone.sh)"
+    log "앱 프로비저닝 시작 (provision.sh)"
     export DIFY_URL="http://127.0.0.1:${DIFY_GATEWAY_PORT}"
     export JENKINS_URL="http://127.0.0.1:${JENKINS_PORT}"
     export SONAR_URL="http://127.0.0.1:9000"
@@ -148,12 +148,12 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
     export OFFLINE_DIFY_PLUGIN_DIR="$SEED/dify-plugins"
     export OFFLINE_JENKINSFILE_DIR="/opt/jenkinsfiles"
 
-    if bash /opt/provision.allinone.sh; then
+    if bash /opt/provision.sh; then
         touch "$DATA/.app_provisioned"
         log "앱 프로비저닝 완료."
     else
         warn "앱 프로비저닝 실패. 컨테이너는 계속 실행됩니다."
-        warn "재시도: docker exec <container> bash /opt/provision.allinone.sh"
+        warn "재시도: docker exec <container> bash /opt/provision.sh"
     fi
 fi
 

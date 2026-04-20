@@ -18,7 +18,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+DOCKERFILE_REL="e2e-pipeline/offline/code-AI-quality-allinone/Dockerfile"
 cd "$REPO_ROOT"
 
 ARCH="amd64"
@@ -39,7 +40,7 @@ case "$ARCH" in
 esac
 
 IMAGE="ttc-allinone:${ARCH}-${TAG}"
-OUT_DIR="offline-assets/${ARCH}"
+OUT_DIR="e2e-pipeline/offline/code-AI-quality-allinone/offline-assets/${ARCH}"
 OUT_FILE="${OUT_DIR}/ttc-allinone-${ARCH}-${TAG}.tar.gz"
 
 mkdir -p "$OUT_DIR"
@@ -53,7 +54,7 @@ docker buildx inspect ttc-allinone-builder >/dev/null 2>&1 || \
 docker buildx build \
     --builder ttc-allinone-builder \
     --platform "$PLATFORM" \
-    -f Dockerfile.allinone \
+    -f "$DOCKERFILE_REL" \
     -t "$IMAGE" \
     --load \
     .
