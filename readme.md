@@ -32,6 +32,8 @@
 
 오프라인 올인원은 Section 5.8 의 `DSCORE-ZeroTouch-QA` 파이프라인만 단일 이미지로 묶은 배포본으로, Jenkins master + Dify + PG/Redis/Qdrant/nginx 를 한 컨테이너에 담고 Ollama + Jenkins agent 는 호스트에서 실행한다. Mac 은 macOS 가 호스트, Windows 11 은 Ollama 가 Windows 네이티브 / agent 가 WSL2 Ubuntu (WSLg 로 headed Chromium 을 Windows 데스크탑에 표시).
 
+개발 루프에서 동일 호스트에 반복 배포하는 경우 **`./offline/build-allinone.sh --redeploy`** 한 명령으로 빌드 → 기존 컨테이너 재기동 → 호스트 agent 자동 재연결까지 수행한다 (`--fresh` 로 볼륨 초기화, `--no-agent` 로 agent 스킵 가능). 빌드/배포 흐름 전체 다이어그램과 각 파일의 역할은 [e2e-pipeline/offline/README.md](e2e-pipeline/offline/README.md) "전체 흐름 한눈에 보기" + "파일별 역할" 섹션 참조.
+
 ### 시스템 구성
 
 아래 5개 Phase를 순서대로 진행한다. 
