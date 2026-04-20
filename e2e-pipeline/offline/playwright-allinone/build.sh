@@ -18,7 +18,7 @@
 #   3) docker buildx build 로 단일 이미지 제작
 #   4) docker save | gzip 으로 배포용 tar.gz 산출
 #
-# 출력: dscore.ttc.playwright-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
+# 출력: dscore.ttc.playwright-<timestamp>.tar.gz (이 폴더 내부)
 #
 # 요구:
 #   - Docker 26+ (buildx 활성), 디스크 20GB+ 여유
@@ -34,8 +34,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$ROOT_DIR"
+# 빌드 컨텍스트 = 이 폴더 자체 (자체 완결). 폴더만 압축해서 다른 머신으로
+# 옮겨도 바로 빌드 가능하도록 설계.
+BUILD_CTX="$SCRIPT_DIR"
+cd "$SCRIPT_DIR"
 
 # ── 플래그 파싱 ────────────────────────────────────────────────────────────
 # --redeploy : 빌드 직후 같은 호스트에서 컨테이너 재기동 + agent 재연결까지 수행
@@ -51,7 +53,7 @@ while [ $# -gt 0 ]; do
     --no-agent) SKIP_AGENT=true; shift ;;
     -h|--help)
       cat <<'USAGE'
-사용법: ./offline/build-allinone.sh [옵션]
+사용법: ./e2e-pipeline/offline/playwright-allinone/build.sh [옵션]
 
   --redeploy   빌드 후 같은 호스트에서 컨테이너 재기동 + agent 재연결까지 수행
                (기존 dscore.ttc.playwright 컨테이너가 있으면 rm -f, 기존 agent.jar
@@ -67,10 +69,10 @@ while [ $# -gt 0 ]; do
   OUTPUT_TAR         dscore.ttc.playwright-<ts>.tar.gz
 
 예시:
-  ./offline/build-allinone.sh                           # 빌드만 (tar.gz 산출)
-  ./offline/build-allinone.sh --redeploy                # 빌드 + 기존 볼륨 재사용 재기동 + agent
-  ./offline/build-allinone.sh --redeploy --fresh        # 빌드 + 볼륨 초기화 + agent
-  ./offline/build-allinone.sh --redeploy --no-agent     # 빌드 + 컨테이너만 재기동
+  ./e2e-pipeline/offline/playwright-allinone/build.sh                           # 빌드만 (tar.gz 산출)
+  ./e2e-pipeline/offline/playwright-allinone/build.sh --redeploy                # 빌드 + 기존 볼륨 재사용 재기동 + agent
+  ./e2e-pipeline/offline/playwright-allinone/build.sh --redeploy --fresh        # 빌드 + 볼륨 초기화 + agent
+  ./e2e-pipeline/offline/playwright-allinone/build.sh --redeploy --no-agent     # 빌드 + 컨테이너만 재기동
 USAGE
       exit 0
       ;;
@@ -128,10 +130,12 @@ command -v curl   >/dev/null || err "curl 명령을 찾을 수 없습니다."
 command -v java   >/dev/null || err "java 명령을 찾을 수 없습니다 (JDK 11+ 필요)."
 docker buildx version >/dev/null 2>&1 || err "docker buildx 가 필요합니다 (Docker 26+)."
 
-[ -f "$ROOT_DIR/setup.sh" ]         || err "$ROOT_DIR/setup.sh 가 없습니다. e2e-pipeline 루트에서 실행하세요."
-[ -f "$ROOT_DIR/dify-chatflow.yaml" ] || err "dify-chatflow.yaml 이 없습니다."
-[ -d "$ROOT_DIR/zero_touch_qa" ]     || err "zero_touch_qa/ 디렉토리가 없습니다."
-[ -f "$ROOT_DIR/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline" ] || err "Pipeline 정의 파일 없음."
+# 자체 완결 폴더 전제: 의존 파일이 이 폴더에 복사되어 있어야 한다.
+[ -f "$SCRIPT_DIR/Dockerfile" ]         || err "Dockerfile 이 없습니다."
+[ -f "$SCRIPT_DIR/dify-chatflow.yaml" ] || err "dify-chatflow.yaml 이 없습니다."
+[ -d "$SCRIPT_DIR/zero_touch_qa" ]      || err "zero_touch_qa/ 디렉토리가 없습니다."
+[ -f "$SCRIPT_DIR/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline" ] || err "Pipeline 정의 파일 없음."
+[ -d "$SCRIPT_DIR/jenkins-init" ]       || err "jenkins-init/ 디렉토리가 없습니다."
 
 log "빌드 대상: $IMAGE_TAG (platform=$TARGET_PLATFORM)"
 log "출력 파일: $OUTPUT_TAR"
@@ -214,11 +218,11 @@ log "  (이 단계는 30-90분 소요될 수 있습니다)"
 
 docker buildx build \
   --platform "$TARGET_PLATFORM" \
-  --file "$SCRIPT_DIR/Dockerfile.allinone" \
+  --file "$SCRIPT_DIR/Dockerfile" \
   --tag "$IMAGE_TAG" \
   --build-arg "OLLAMA_MODEL=$OLLAMA_MODEL" \
   --load \
-  "$ROOT_DIR" \
+  "$BUILD_CTX" \
   || err "docker buildx build 실패"
 
 log "  이미지 크기:"
@@ -226,8 +230,8 @@ docker images "$IMAGE_TAG" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
 
 # ── 4. docker save + gzip 압축 ────────────────────────────────────────────
 log "[4/4] 이미지 save + 압축 → $OUTPUT_TAR"
-docker save "$IMAGE_TAG" | gzip -1 > "$ROOT_DIR/$OUTPUT_TAR"
-log "  최종 파일: $ROOT_DIR/$OUTPUT_TAR ($(du -h "$ROOT_DIR/$OUTPUT_TAR" | cut -f1))"
+docker save "$IMAGE_TAG" | gzip -1 > "$SCRIPT_DIR/$OUTPUT_TAR"
+log "  최종 파일: $SCRIPT_DIR/$OUTPUT_TAR ($(du -h "$SCRIPT_DIR/$OUTPUT_TAR" | cut -f1))"
 
 # ── 5. --redeploy: 같은 호스트에서 바로 컨테이너 재기동 + agent 재연결 ──────
 if [ "$REDEPLOY" = "true" ]; then

@@ -31,7 +31,7 @@
 #
 # 결과 이미지 크기 예상: 5-7GB (압축 전). 내부-Ollama 버전 대비 4-5GB 절감.
 # 빌드 요구사항: 디스크 여유 20GB+, 네트워크(마지막 단계까지), Docker buildx 권장.
-# 멀티 아키: docker buildx build --platform linux/<arm64|amd64> -f offline/Dockerfile.allinone .
+# 멀티 아키: docker buildx build --platform linux/<arm64|amd64> -f e2e-pipeline/offline/playwright-allinone/Dockerfile e2e-pipeline/offline/playwright-allinone
 # ============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ RUN sed -i 's|"plugin_unique_identifier": plugin_unique_identifier|"PluginUnique
 # 단계에서 실패한다 (`uninstall-no-record-file`). --ignore-installed 를 붙여
 # pip 이 기존 설치를 건드리지 않고 /usr/local 에 덮어쓰게 한다 (apt 관리 파일은
 # /usr/lib/python3/dist-packages 에 그대로 남고, pip 버전이 sys.path 우선순위).
-COPY offline/requirements-allinone.txt /tmp/requirements-allinone.txt
+COPY requirements.txt /tmp/requirements-allinone.txt
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
         -r /tmp/requirements-allinone.txt && \
     pip3 install --no-cache-dir --break-system-packages --ignore-installed \
@@ -150,7 +150,7 @@ RUN python3 -m playwright install --with-deps chromium
 # -- Zero-Touch QA 전용 venv (Jenkins Pipeline 이 참조) --
 # Jenkins Pipeline(DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline Stage 1) 은
 # ${WORKSPACE}/.qa_home/venv/bin/activate 를 요구한다. 워크스페이스는 런타임에만
-# 생기므로, 이미지 빌드 시에는 전역 venv 를 /opt/qa-venv 에 만들고 provision-apps.sh
+# 생기므로, 이미지 빌드 시에는 전역 venv 를 /opt/qa-venv 에 만들고 provision.sh
 # 가 워크스페이스의 .qa_home/venv 를 이 경로로 심볼릭 링크한다.
 #
 # --system-site-packages 로 위 pip install 결과(requests/playwright/pillow 등)를
@@ -212,26 +212,26 @@ RUN mkdir -p /app && \
     ln -sfn /opt/dify-plugin-daemon /app/plugin_daemon
 
 # -- Jenkins 플러그인 hpi 사전 배치 (build-allinone.sh 가 채움) --
-COPY offline/jenkins-plugins/ /opt/seed/jenkins-plugins/
+COPY jenkins-plugins/ /opt/seed/jenkins-plugins/
 
 # -- Dify 플러그인 .difypkg 사전 배치 --
-COPY offline/dify-plugins/ /opt/seed/dify-plugins/
+COPY dify-plugins/ /opt/seed/dify-plugins/
 
 # -- PostgreSQL initdb + Dify DB 생성 스냅샷 --
-COPY offline/pg-init-allinone.sh /opt/pg-init-allinone.sh
-RUN bash /opt/pg-init-allinone.sh
+COPY pg-init.sh /opt/pg-init.sh
+RUN bash /opt/pg-init.sh
 
 # -- supervisord 설정 --
-COPY offline/supervisord.conf /etc/supervisor/supervisord.conf
+COPY supervisord.conf /etc/supervisor/supervisord.conf
 
 # -- nginx 설정 (localhost upstream 버전) --
-COPY offline/nginx-allinone.conf /etc/nginx/nginx.conf
+COPY nginx.conf /etc/nginx/nginx.conf
 
 # -- entrypoint + 오프라인 전용 프로비저닝 스크립트 + 파이프라인 소스 --
-# 주의: 기존 setup.sh 는 이미지에 넣지 않는다. offline/provision-apps.sh 가
+# 주의: 기존 setup.sh 는 이미지에 넣지 않는다. provision.sh 가
 #       모든 오프라인 앱 프로비저닝 (Phase 4/5 해당) 을 독립적으로 수행한다.
-COPY offline/entrypoint-allinone.sh  /entrypoint.sh
-COPY offline/provision-apps.sh       /opt/provision-apps.sh
+COPY entrypoint.sh  /entrypoint.sh
+COPY provision.sh       /opt/provision.sh
 COPY zero_touch_qa                   /opt/zero_touch_qa
 COPY dify-chatflow.yaml              /opt/dify-chatflow.yaml
 COPY DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline /opt/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline
@@ -240,7 +240,7 @@ COPY jenkins-init                    /opt/jenkins-init
 # -- Jenkins 관리자 계정 그루비 스크립트를 seed 디렉토리에 배치 --
 RUN mkdir -p /opt/seed/jenkins-home/init.groovy.d && \
     cp /opt/jenkins-init/*.groovy /opt/seed/jenkins-home/init.groovy.d/ && \
-    chmod +x /entrypoint.sh /opt/provision-apps.sh
+    chmod +x /entrypoint.sh /opt/provision.sh
 
 # -- 포트 --
 EXPOSE 18080 18081 50001

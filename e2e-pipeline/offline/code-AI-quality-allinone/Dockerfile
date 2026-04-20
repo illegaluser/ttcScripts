@@ -114,7 +114,7 @@ RUN sed -i 's|"plugin_unique_identifier": plugin_unique_identifier|"PluginUnique
 # Python 의존성 — eval_runner / 파이프라인 1~3 공통
 # (requirements-allinone.txt 는 기존 자산 재사용: requests, playwright, deepeval 등)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/requirements-allinone.txt /tmp/requirements-allinone.txt
+COPY e2e-pipeline/offline/playwright-allinone/requirements.txt /tmp/requirements-allinone.txt
 COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/requirements-pipelines.txt             /tmp/requirements-pipelines.txt
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
         -r /tmp/requirements-allinone.txt && \
@@ -200,8 +200,8 @@ RUN set -eux; \
 # ─────────────────────────────────────────────────────────────────────────────
 # Jenkins 플러그인 seed + Dify 플러그인 seed (기존 offline 자산 재사용)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/jenkins-plugins/ /opt/seed/jenkins-plugins/
-COPY e2e-pipeline/offline/dify-plugins/    /opt/seed/dify-plugins/
+COPY e2e-pipeline/offline/playwright-allinone/jenkins-plugins/ /opt/seed/jenkins-plugins/
+COPY e2e-pipeline/offline/playwright-allinone/dify-plugins/    /opt/seed/dify-plugins/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PostgreSQL initdb + Dify/SonarQube DB 생성

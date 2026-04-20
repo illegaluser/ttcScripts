@@ -203,15 +203,30 @@ e2e-pipeline/offline/code-AI-quality-allinone/
 
 ## 10. 기존 자산 재사용 관계
 
-통합 이미지는 상위 디렉터리의 자산을 COPY만 하며 수정하지 않습니다:
+통합 이미지는 상위 디렉터리의 자산을 COPY 만 하며 수정하지 않습니다:
 
-- `../requirements-allinone.txt` — Python 기본 deps (playwright/deepeval 등)
-- `../jenkins-plugins/` — Jenkins .hpi seed
-- `../dify-plugins/` — Dify .difypkg seed
+- `../playwright-allinone/requirements.txt` — Python 기본 deps (playwright/deepeval 등)
+- `../playwright-allinone/jenkins-plugins/` — Jenkins .hpi seed (**빌드 전 Playwright 이미지의 build.sh [1/4] 가 선행되어야 채워짐**)
+- `../playwright-allinone/dify-plugins/` — Dify .difypkg seed (**build.sh [2/4] 선행**)
 - `../../jenkins-init/basic-security.groovy` — admin 계정 초기화
-- `../../../{각 Jenkinsfile}`, `../../../repo_context_builder.py` 등 — 레포 루트 원본
+- 레포 루트의 각 `*.jenkinsPipeline`, `repo_context_builder.py` 등 — 원본 직접 참조
 
-기존 **`e2e-pipeline/offline/Dockerfile.allinone`** (zero_touch_qa 전용) 과 **두 `docker-compose.yaml`** 은 **수정되지 않습니다**. 세 스택 병렬 공존 가능.
+### 임시 커플링 주의
+
+현재 이 이미지는 `playwright-allinone/` 의 플러그인 바이너리를 공유합니다. 따라서 빌드 순서:
+
+```bash
+# 1. Playwright 이미지 [1/4]-[2/4] 단계로 jenkins-plugins/, dify-plugins/ 채움
+bash e2e-pipeline/offline/playwright-allinone/build.sh --redeploy --no-agent
+# (또는 빌드만 수행: 플러그인 다운로드 단계만 완료되면 충분)
+
+# 2. Code & AI Quality 이미지 빌드
+bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-wsl2.sh
+```
+
+완전 격리(자체 플러그인 다운로드 스크립트 도입)는 후속 작업 예정.
+
+기존 **`docker-compose.yaml`** (루트 / e2e-pipeline) 은 **수정되지 않습니다**. 세 스택 병렬 공존 가능.
 
 ---
 

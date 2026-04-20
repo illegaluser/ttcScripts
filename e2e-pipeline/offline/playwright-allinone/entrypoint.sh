@@ -178,12 +178,12 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
   export OFFLINE_DIFY_CHATFLOW_YAML="/opt/dify-chatflow.yaml"
   export OFFLINE_JENKINS_PIPELINE="/opt/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline"
 
-  if bash /opt/provision-apps.sh; then
+  if bash /opt/provision.sh; then
     touch "$DATA/.app_provisioned"
     log "앱 프로비저닝 완료."
   else
     warn "앱 프로비저닝 실패. 컨테이너는 계속 실행됩니다."
-    warn "재시도: docker exec <container> bash /opt/provision-apps.sh"
+    warn "재시도: docker exec <container> bash /opt/provision.sh"
   fi
 fi
 
@@ -225,7 +225,7 @@ if [ -f "$DATA/.app_provisioned" ]; then
     log "(WSL2 는 WSLg 경유로 Windows 데스크탑에 창이 뜬다.)"
     log "=========================================================================="
   else
-    warn "Jenkins Node 'mac-ui-tester' 미등록 또는 응답 불가. 수동 복구: docker exec <container> bash /opt/provision-apps.sh"
+    warn "Jenkins Node 'mac-ui-tester' 미등록 또는 응답 불가. 수동 복구: docker exec <container> bash /opt/provision.sh"
   fi
 fi
 
