@@ -1,0 +1,26 @@
+# ============================================================================
+# TTC 4-Pipeline All-in-One — 파이프라인 1~4 추가 Python 의존성
+# requirements-allinone.txt (zero_touch_qa 기본) 뒤에 덧붙는 레이어.
+# ============================================================================
+
+# 파이프라인 1 (repo_context_builder / doc_processor): markdown 변환 + http 만
+# 사용 — 기존 requirements-allinone.txt 의 requests 로 충분. 추가 없음.
+
+# 파이프라인 2 (SonarScanner): Java/CLI 이므로 Python 의존성 없음.
+
+# 파이프라인 3 (sonar_issue_exporter / dify_sonar_issue_analyzer / gitlab_issue_creator):
+# requests 와 기본 stdlib 만 사용. 추가 없음.
+
+# 파이프라인 4 (eval_runner):
+langfuse<3
+ragas
+langchain
+langchain-openai
+pytest==8.0.0
+tqdm
+tabulate
+typer
+rich
+protobuf
+pydantic
+jsonschema

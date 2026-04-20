@@ -1,0 +1,46 @@
+# ============================================================================
+# TTC 4-Pipeline All-in-One — macOS 기동 컴포즈
+#
+# 전제:
+#   - Docker Desktop for Mac (Apple Silicon 기본)
+#   - 호스트 Mac 에 Ollama 데몬 실행 중 (Metal GPU, 11434 포트)
+#   - 이미지는 scripts/build-mac.sh 로 선빌드 (ttc-allinone:mac-<tag>)
+#
+# 포트 매핑: 28080/28081/29000/50002 (WSL2 와 동일, 분리 이유는 docker-compose.allinone.wsl2.yaml 참고)
+#
+# 데이터 볼륨: ${HOME}/ttc-allinone-data
+# ============================================================================
+
+services:
+  ttc-allinone:
+    image: ${IMAGE:-ttc-allinone:mac-dev}
+    container_name: ttc-allinone
+    restart: unless-stopped
+    # Mac Docker Desktop 은 host.docker.internal 을 기본 지원. extra_hosts 불필요.
+    platform: linux/arm64
+    environment:
+      TZ: Asia/Seoul
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:e4b}
+      JENKINS_PORT: "28080"
+      JENKINS_AGENT_PORT: "50002"
+      DIFY_GATEWAY_PORT: "28081"
+      SONARQUBE_PORT: "29000"
+    ports:
+      - "28080:28080"
+      - "28081:28081"
+      - "29000:9000"
+      - "50002:50002"
+    volumes:
+      - ${HOME}/ttc-allinone-data:/data
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          memory: 6g

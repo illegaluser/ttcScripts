@@ -1,0 +1,3 @@
+# JCasC (Jenkins Configuration as Code) seed 자산 배치 경로.
+# 현재는 provision.allinone.sh 가 REST API 로 Job 을 등록하므로 비어 있어도 된다.
+# 추후 JCasC YAML 로 이행 시 이 디렉터리에 config 를 두고 Dockerfile 이 그대로 복사.

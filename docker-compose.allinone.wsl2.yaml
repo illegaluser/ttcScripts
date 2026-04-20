@@ -1,0 +1,55 @@
+# ============================================================================
+# TTC 4-Pipeline All-in-One — WSL2 (Windows) 기동 컴포즈
+#
+# 전제:
+#   - Docker Desktop + WSL2 백엔드
+#   - 호스트(WSL2 또는 Windows) 에 Ollama 데몬 실행 중 (11434 포트)
+#   - 이미지는 scripts/build-wsl2.sh 로 선빌드 (ttc-allinone:wsl2-<tag>)
+#
+# 포트 매핑 — 기존 Playwright 컨테이너(18080/18081/50001) 와 루트 스택(8080/9000
+# /8929/3000/50000) 과 겹치지 않도록 28xxx / 50002 대역:
+#   28080  Jenkins
+#   28081  Dify gateway
+#   29000  SonarQube
+#   50002  Jenkins agent (JNLP)
+#
+# 데이터 볼륨: ${HOME}/ttc-allinone-data (WSL2 네이티브 FS)
+# ============================================================================
+
+services:
+  ttc-allinone:
+    image: ${IMAGE:-ttc-allinone:wsl2-dev}
+    container_name: ttc-allinone
+    restart: unless-stopped
+    # Docker Desktop 은 host.docker.internal 을 자동 제공하지만, 순수 Linux 도커에서는
+    # --add-host 가 필요. WSL2 Docker Desktop 환경에서는 아래 extra_hosts 가 no-op.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TZ: Asia/Seoul
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:e4b}
+      JENKINS_PORT: "28080"
+      JENKINS_AGENT_PORT: "50002"
+      DIFY_GATEWAY_PORT: "28081"
+      SONARQUBE_PORT: "29000"
+    ports:
+      - "28080:28080"
+      - "28081:28081"
+      - "29000:9000"
+      - "50002:50002"
+    volumes:
+      - ${HOME}/ttc-allinone-data:/data
+    # SonarQube Elasticsearch 가 mmap 을 쓰므로 호스트 커널 제약 상향
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    # SonarQube 는 최소 2GB 힙 필요. 컨테이너 전체 메모리 한도 6GB 권장.
+    deploy:
+      resources:
+        limits:
+          memory: 6g
