@@ -27,6 +27,8 @@ AGENT_NAME="${AGENT_NAME:-mac-ui-tester}"
 PY_VERSION_MIN="${PY_VERSION_MIN:-3.11}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-false}"
+# NODE_SECRET 자동 추출 시 읽을 컨테이너 이름 (env override 가능)
+CONTAINER_NAME="${CONTAINER_NAME:-dscore.ttc.playwright}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"     # e2e-pipeline/
@@ -38,20 +40,92 @@ warn() { printf '[mac-agent-setup] WARN:  %s\n' "$*" >&2; }
 # ── 0. 사전 검증 ────────────────────────────────────────────────────────────
 [[ "$(uname -s)" == "Darwin" ]] || err "macOS 전용 스크립트. 현재 OS: $(uname -s)"
 
+# ── 0-A. 기존 세션 정리 — "빌드/재배포 시마다 깨끗하게" 보장 ──────────────────
+# bash `$(...)` 서브셸이 부모 cmdline 을 상속해 pgrep -f 에 같이 잡히는 문제가
+# 있어 **session id (SID) 기준**으로 자기 세션을 제외. pkill -f 는 자기 자신까지
+# 죽일 수 있어 사용 금지 — 반드시 PID 지정 kill.
+MY_PID=$$
+MY_SID=$({ ps -o sid= -p "$MY_PID" 2>/dev/null || true; } | tr -d ' ')
+[ -z "$MY_SID" ] && MY_SID="$MY_PID"
+log "[0-A] 기존 agent / setup 프로세스 정리 (my_sid=$MY_SID)"
+
+EXISTING_AGENT_PIDS=$(pgrep -f "agent.jar.*-name $AGENT_NAME" 2>/dev/null || true)
+if [ -n "$EXISTING_AGENT_PIDS" ]; then
+  log "  기존 agent.jar 감지 (pid: $(echo "$EXISTING_AGENT_PIDS" | tr '\n' ' ')) — 종료"
+  kill $EXISTING_AGENT_PIDS 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    pgrep -f "agent.jar.*-name $AGENT_NAME" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  STILL=$(pgrep -f "agent.jar.*-name $AGENT_NAME" 2>/dev/null || true)
+  [ -n "$STILL" ] && kill -9 $STILL 2>/dev/null || true
+fi
+
+# 다른 mac-agent-setup.sh 인스턴스 (자기 세션 제외). set -e 회피용 || true 필수.
+OTHER_SETUP_PIDS=""
+_setup_pids=$(pgrep -f "mac-agent-setup.sh" 2>/dev/null || true)
+for _pid in $_setup_pids; do
+  _sid=$({ ps -o sid= -p "$_pid" 2>/dev/null || true; } | tr -d ' ')
+  if [ -n "$_sid" ] && [ "$_sid" != "$MY_SID" ]; then
+    OTHER_SETUP_PIDS="$OTHER_SETUP_PIDS $_pid"
+  fi
+done
+OTHER_SETUP_PIDS="${OTHER_SETUP_PIDS# }"
+OTHER_SETUP_PIDS="${OTHER_SETUP_PIDS% }"
+if [ -n "$OTHER_SETUP_PIDS" ]; then
+  log "  이전 mac-agent-setup.sh 인스턴스 감지 (pid: $OTHER_SETUP_PIDS) — 종료"
+  kill $OTHER_SETUP_PIDS 2>/dev/null || true
+  sleep 1
+  for _pid in $OTHER_SETUP_PIDS; do
+    kill -0 "$_pid" 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
+  done
+fi
+
+# Jenkins 가 기존 연결을 disconnect 로 인지할 때까지 대기 — **kill 한 게 있을 때만**
+if [ -n "$EXISTING_AGENT_PIDS" ] || [ -n "$OTHER_SETUP_PIDS" ]; then
+  log "  Jenkins 가 disconnect 를 인지할 때까지 대기 (최대 15s)"
+  for _ in 1 2 3 4 5; do
+    if curl -fsS --max-time 2 -u admin:password "$JENKINS_URL/computer/$AGENT_NAME/api/json" 2>/dev/null \
+        | grep -q '"offline":true'; then
+      break
+    fi
+    sleep 1
+  done
+fi
+log "  정리 완료"
+
+# ── 0-B. NODE_SECRET 자동 추출 (env 미지정 시 docker logs 에서) ──────────────
 if [ -z "${NODE_SECRET:-}" ]; then
-  cat >&2 <<'EOT'
-[mac-agent-setup] ERROR: NODE_SECRET 환경변수가 필요합니다.
+  log "[0-B] NODE_SECRET 미지정 — docker logs '$CONTAINER_NAME' 에서 자동 추출 시도"
+  if command -v docker >/dev/null 2>&1 && \
+     docker ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Names}}' | grep -q .; then
+    NODE_SECRET=$(docker logs "$CONTAINER_NAME" 2>&1 \
+      | grep -oE 'NODE_SECRET: [a-f0-9]{64}' \
+      | tail -n1 \
+      | awk '{print $2}' || true)
+  fi
+  if [ -z "${NODE_SECRET:-}" ]; then
+    cat >&2 <<EOT
+[mac-agent-setup] ERROR: NODE_SECRET 을 찾을 수 없습니다.
 
-  컨테이너 로그에서 "NODE_SECRET: <64자 hex>" 줄을 찾아 아래처럼 실행하세요:
-    NODE_SECRET=abcdef0123... ./offline/mac-agent-setup.sh
+  자동 추출 실패 원인:
+    - 컨테이너 '$CONTAINER_NAME' 이 기동되어 있지 않음
+    - 프로비저닝이 아직 완료되지 않음 (NODE_SECRET 로그 라인이 아직 안 찍힘)
+    - 컨테이너 이름이 다름 — CONTAINER_NAME env 로 override
 
-  또는 docker exec 로 직접 추출:
-    NODE_SECRET=$(docker exec dscore.ttc.playwright curl -sS -u admin:password \
-      http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp \
-      | sed -n 's/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p' | head -n1)
-    NODE_SECRET=$NODE_SECRET ./offline/mac-agent-setup.sh
+  수동 지정:
+    NODE_SECRET=<64자 hex> ./offline/mac-agent-setup.sh
+
+  또는 Jenkins REST 로 직접 추출:
+    NODE_SECRET=\$(curl -sS -u admin:password \\
+      "$JENKINS_URL/computer/$AGENT_NAME/slave-agent.jnlp" \\
+      | sed -n 's/.*<argument>\\([a-f0-9]\\{64\\}\\)<\\/argument>.*/\\1/p' | head -n1)
+    NODE_SECRET=\$NODE_SECRET ./offline/mac-agent-setup.sh
 EOT
-  exit 1
+    exit 1
+  fi
+  export NODE_SECRET
+  log "  NODE_SECRET 자동 추출 완료: ${NODE_SECRET:0:16}..."
 fi
 
 command -v curl >/dev/null || err "curl 필요"
@@ -299,37 +373,8 @@ else
 fi
 
 # ── 7. 기동 스크립트 생성 + agent 연결 ─────────────────────────────────────
-#
-# 이전 run 에서 띄운 java agent.jar 프로세스가 살아있으면 Jenkins controller 가
-# 동일 Node 의 새 연결을 "already connected" 로 거부한다 (ConnectionRefusalException).
-# 재실행 시에는 기존 프로세스를 먼저 정리해야 깨끗하게 재연결된다.
-AGENT_MATCH="agent.jar.*-name $AGENT_NAME"
-EXISTING_AGENT_PIDS=$(pgrep -f "$AGENT_MATCH" 2>/dev/null || true)
-if [ -n "$EXISTING_AGENT_PIDS" ]; then
-  log "기존 agent 프로세스 감지 — 종료 후 재연결 (pid: $(echo "$EXISTING_AGENT_PIDS" | tr '\n' ' '))"
-  # SIGTERM → 최대 5초 대기 → SIGKILL
-  kill $EXISTING_AGENT_PIDS 2>/dev/null || true
-  for _ in 1 2 3 4 5; do
-    pgrep -f "$AGENT_MATCH" >/dev/null 2>&1 || break
-    sleep 1
-  done
-  if pgrep -f "$AGENT_MATCH" >/dev/null 2>&1; then
-    log "  SIGTERM 무응답 — SIGKILL"
-    pkill -9 -f "$AGENT_MATCH" 2>/dev/null || true
-    sleep 1
-  fi
-  # Jenkins 가 disconnect 를 인지할 때까지 잠깐 대기 (최대 10초).
-  # 인지 전에 새 연결 시도하면 다시 "already connected" 로 거부됨.
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -fsS -u admin:password "$JENKINS_URL/computer/$AGENT_NAME/api/json" 2>/dev/null \
-        | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('offline') else 1)" 2>/dev/null
-    then
-      break
-    fi
-    sleep 1
-  done
-  log "  기존 프로세스 정리 완료 — Jenkins disconnect 인지됨"
-fi
+# 기존 agent.jar 프로세스 정리는 이미 step 0-A 에서 수행됨. 여기선 run-agent.sh
+# 스크립트를 써 두고 foreground 로 agent 를 기동한다.
 
 RUN_SCRIPT="$AGENT_DIR/run-agent.sh"
 cat > "$RUN_SCRIPT" <<RUN_EOF

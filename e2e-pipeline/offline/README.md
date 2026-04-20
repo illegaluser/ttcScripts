@@ -199,6 +199,28 @@ git clone <이 저장소> && cd dscore-ttc/e2e-pipeline
 
 종료 시 `e2e-pipeline/dscore.ttc.playwright-<timestamp>.tar.gz` (2-3GB) 생성.
 
+#### 3단계 단축 — `--redeploy`: 빌드 + 재기동 + agent 한 방에
+
+개발 루프에서 "소스 수정 → 빌드 → 기존 컨테이너 정리 → 새 컨테이너 run → agent 재연결" 을 한 명령으로:
+
+```bash
+# 기존 dscore-data 볼륨 유지 (provision 재사용 — 60초 내 준비 완료)
+./offline/build-allinone.sh --redeploy
+
+# 제로베이스로 완전 초기화 (볼륨 삭제 → provision 재수행, 2-3분 소요)
+./offline/build-allinone.sh --redeploy --fresh
+
+# 컨테이너만 재기동, agent 는 수동으로 띄우고 싶을 때
+./offline/build-allinone.sh --redeploy --no-agent
+```
+
+- `--redeploy` 는 기존 `dscore.ttc.playwright` 컨테이너를 `docker rm -f` 후 새 이미지로 run
+- 기존 `agent.jar` 프로세스 정리는 **agent-setup 스크립트가 스크립트 맨 앞 (step 0-A) 에서 자동 수행** — `NODE_SECRET` 도 `docker logs` 에서 자동 추출
+- `--fresh` 는 `docker volume rm dscore-data` 까지 수행해 Dify DB + Jenkins config 를 완전 리셋
+- 폐쇄망 타겟은 빌드 머신과 런타임 머신이 분리되므로 `--redeploy` 를 쓰지 않는다 — 빌드 머신에서 tar.gz 만 만들고 폐쇄망 타겟에서 `docker load + docker run + agent-setup` 을 각각 실행
+
+전체 옵션: `./offline/build-allinone.sh --help`
+
 ### 4단계 — 컨테이너 기동 (Mac / WSL2 공통)
 
 ```bash
@@ -222,31 +244,28 @@ docker logs -f dscore.ttc.playwright
 
 ### 5단계 — 호스트 Jenkins agent 연결
 
-컨테이너 로그에서 `NODE_SECRET: abcdef...` 줄을 찾아 그 값으로 setup 스크립트 실행:
+`NODE_SECRET` 은 **스크립트가 자동으로 `docker logs` 에서 추출**하므로 명시 지정 없이 그냥 실행해도 된다. 기존에 돌고 있던 `agent.jar` / 중복 setup 프로세스도 스크립트 시작 시점 (step 0-A) 에서 자동 정리된다.
 
 **Mac**:
 
 ```bash
-export NODE_SECRET=$(docker logs dscore.ttc.playwright 2>&1 | grep -oE 'NODE_SECRET: [a-f0-9]{64}' | tail -1 | awk '{print $2}')
-echo "NODE_SECRET: ${NODE_SECRET:0:16}..."
-
-# 호스트 Mac agent 시작 (foreground — 이 터미널은 agent 전용으로 열어둠)
+# 자동 실행 (권장) — NODE_SECRET 자동 추출 + 기존 agent 정리 + 재연결
 ./offline/mac-agent-setup.sh
 
-# 또는 1-2단계를 건너뛰고 이 스크립트가 의존성까지 전부 설치:
+# 의존성까지 한 번에 자동 설치 (brew 필요)
 AUTO_INSTALL_DEPS=true ./offline/mac-agent-setup.sh
+
+# 명시 지정이 필요한 경우 (다른 컨테이너 이름 / 외부 Jenkins 등)
+NODE_SECRET=<64자> CONTAINER_NAME=other-name JENKINS_URL=http://... ./offline/mac-agent-setup.sh
 ```
 
 **Windows 11 / WSL2 Ubuntu**:
 
 ```bash
-export NODE_SECRET=$(docker logs dscore.ttc.playwright 2>&1 | grep -oE 'NODE_SECRET: [a-f0-9]{64}' | tail -1 | awk '{print $2}')
-echo "NODE_SECRET: ${NODE_SECRET:0:16}..."
-
-# 호스트 WSL2 agent 시작 (foreground — 이 WSL 터미널은 agent 전용)
+# 자동 실행
 ./offline/wsl-agent-setup.sh
 
-# 또는 의존성까지 한 번에 자동 설치:
+# 의존성까지 한 번에 자동 설치 (sudo 필요)
 AUTO_INSTALL_DEPS=true ./offline/wsl-agent-setup.sh
 ```
 

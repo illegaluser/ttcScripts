@@ -45,6 +45,8 @@ AGENT_NAME="${AGENT_NAME:-mac-ui-tester}"
 PY_VERSION_MIN="${PY_VERSION_MIN:-3.11}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-false}"
+# NODE_SECRET 자동 추출 시 읽을 컨테이너 (docker logs) — 이름 override 가능
+CONTAINER_NAME="${CONTAINER_NAME:-dscore.ttc.playwright}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"     # e2e-pipeline/
@@ -65,20 +67,103 @@ else
   log "일반 Linux — headed 창은 X server ($DISPLAY) 가 있어야 표시됩니다"
 fi
 
+# ── 0-A. 기존 세션 정리 — "빌드/재배포 시마다 깨끗하게" 보장 ──────────────────
+# 이전 run 에서 남은 agent.jar 프로세스가 살아있으면 새 NODE_SECRET 으로 연결할 때
+# Jenkins master 가 "already connected" 로 거부한다. 또 여러 번 실행하면 중복 인스턴스가
+# 쌓여 리소스 낭비. 시작 시점에 먼저 전부 정리한다.
+#
+# 자기 자신 필터링: bash `$(...)` 는 subshell 을 띄우는데 그 subshell 은 부모
+# 스크립트의 cmdline 을 그대로 상속 → pgrep -f "wsl-agent-setup.sh" 에 같이 잡힌다.
+# MY_PID/PPID 만으론 이 subshell 을 걸러낼 수 없으므로 **session id (SID) 기준**으로
+# 같은 세션의 프로세스는 전부 제외한다. setsid 로 분리 기동된 이전 인스턴스는
+# 다른 SID 를 가지므로 정확히 타겟팅됨.
+MY_PID=$$
+MY_SID=$({ ps -o sid= -p "$MY_PID" 2>/dev/null || true; } | tr -d ' ')
+[ -z "$MY_SID" ] && MY_SID="$MY_PID"
+log "[0-A] 기존 agent / setup 프로세스 정리 (my_sid=$MY_SID)"
+
+# agent.jar 프로세스 (현재 $AGENT_NAME 기준 — 다른 세션 포함 모두)
+EXISTING_AGENT_PIDS=$(pgrep -f "agent.jar.*-name $AGENT_NAME" 2>/dev/null || true)
+if [ -n "$EXISTING_AGENT_PIDS" ]; then
+  log "  기존 agent.jar 감지 (pid: $(echo "$EXISTING_AGENT_PIDS" | tr '\n' ' ')) — 종료"
+  kill $EXISTING_AGENT_PIDS 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    pgrep -f "agent.jar.*-name $AGENT_NAME" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  STILL=$(pgrep -f "agent.jar.*-name $AGENT_NAME" 2>/dev/null || true)
+  [ -n "$STILL" ] && kill -9 $STILL 2>/dev/null || true
+fi
+
+# 다른 wsl-agent-setup.sh 인스턴스 (자기 세션 제외). ps/pgrep 실패를 set -e 가
+# 스크립트 전체 종료로 연결하지 않도록 각 단계마다 `|| true` 로 묶는다.
+OTHER_SETUP_PIDS=""
+_setup_pids=$(pgrep -f "wsl-agent-setup.sh" 2>/dev/null || true)
+for _pid in $_setup_pids; do
+  _sid=$({ ps -o sid= -p "$_pid" 2>/dev/null || true; } | tr -d ' ')
+  if [ -n "$_sid" ] && [ "$_sid" != "$MY_SID" ]; then
+    OTHER_SETUP_PIDS="$OTHER_SETUP_PIDS $_pid"
+  fi
+done
+# 양쪽 공백 trim (xargs 없이 bash 내장으로)
+OTHER_SETUP_PIDS="${OTHER_SETUP_PIDS# }"
+OTHER_SETUP_PIDS="${OTHER_SETUP_PIDS% }"
+if [ -n "$OTHER_SETUP_PIDS" ]; then
+  log "  이전 wsl-agent-setup.sh 인스턴스 감지 (pid: $OTHER_SETUP_PIDS) — 종료"
+  kill $OTHER_SETUP_PIDS 2>/dev/null || true
+  sleep 1
+  # 여전히 살아있는 것만 SIGKILL (PID 지정 — pkill -f 로 자기 자신까지 죽이는 사고 방지)
+  for _pid in $OTHER_SETUP_PIDS; do
+    kill -0 "$_pid" 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
+  done
+fi
+
+# Jenkins 가 기존 연결을 disconnect 로 인지할 때까지 대기 — **실제로 kill 한 게
+# 있을 때만**. 처음부터 깨끗한 상태 (kill 대상 0개) 면 즉시 통과.
+if [ -n "$EXISTING_AGENT_PIDS" ] || [ -n "$OTHER_SETUP_PIDS" ]; then
+  log "  Jenkins 가 disconnect 를 인지할 때까지 대기 (최대 15s)"
+  for _ in 1 2 3 4 5; do
+    if curl -fsS --max-time 2 -u admin:password "$JENKINS_URL/computer/$AGENT_NAME/api/json" 2>/dev/null \
+        | grep -q '"offline":true'; then
+      break
+    fi
+    sleep 1
+  done
+fi
+log "  정리 완료"
+
+# ── 0-B. NODE_SECRET 자동 추출 (env 미지정 시 docker logs 에서) ──────────────
 if [ -z "${NODE_SECRET:-}" ]; then
-  cat >&2 <<'EOT'
-[wsl-agent-setup] ERROR: NODE_SECRET 환경변수가 필요합니다.
+  log "[0-B] NODE_SECRET 미지정 — docker logs '$CONTAINER_NAME' 에서 자동 추출 시도"
+  if command -v docker >/dev/null 2>&1 && \
+     docker ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Names}}' | grep -q .; then
+    NODE_SECRET=$(docker logs "$CONTAINER_NAME" 2>&1 \
+      | grep -oE 'NODE_SECRET: [a-f0-9]{64}' \
+      | tail -n1 \
+      | awk '{print $2}' || true)
+  fi
+  if [ -z "${NODE_SECRET:-}" ]; then
+    cat >&2 <<EOT
+[wsl-agent-setup] ERROR: NODE_SECRET 을 찾을 수 없습니다.
 
-  컨테이너 로그에서 "NODE_SECRET: <64자 hex>" 줄을 찾아 아래처럼 실행하세요:
-    NODE_SECRET=abcdef0123... ./offline/wsl-agent-setup.sh
+  자동 추출 실패 원인 (아래 중 하나):
+    - 컨테이너 '$CONTAINER_NAME' 이 기동되어 있지 않음
+    - 프로비저닝이 아직 완료되지 않음 (NODE_SECRET 로그 라인이 아직 안 찍힘)
+    - 컨테이너 이름이 다름 — CONTAINER_NAME env 로 override
 
-  또는 docker exec 로 직접 추출:
-    NODE_SECRET=$(docker exec dscore.ttc.playwright curl -sS -u admin:password \
-      http://127.0.0.1:18080/computer/mac-ui-tester/slave-agent.jnlp \
-      | sed -n 's/.*<argument>\([a-f0-9]\{64\}\)<\/argument>.*/\1/p' | head -n1)
-    NODE_SECRET=$NODE_SECRET ./offline/wsl-agent-setup.sh
+  수동 지정:
+    NODE_SECRET=<64자 hex> ./offline/wsl-agent-setup.sh
+
+  또는 Jenkins REST 로 직접 추출:
+    NODE_SECRET=\$(curl -sS -u admin:password \\
+      "$JENKINS_URL/computer/$AGENT_NAME/slave-agent.jnlp" \\
+      | sed -n 's/.*<argument>\\([a-f0-9]\\{64\\}\\)<\\/argument>.*/\\1/p' | head -n1)
+    NODE_SECRET=\$NODE_SECRET ./offline/wsl-agent-setup.sh
 EOT
-  exit 1
+    exit 1
+  fi
+  export NODE_SECRET
+  log "  NODE_SECRET 자동 추출 완료: ${NODE_SECRET:0:16}..."
 fi
 
 command -v curl >/dev/null || err "curl 필요 (apt install curl)"
@@ -366,34 +451,8 @@ else
 fi
 
 # ── 7. 기동 스크립트 생성 + agent 연결 ─────────────────────────────────────
-#
-# 이전 run 에서 띄운 java agent.jar 프로세스가 살아있으면 Jenkins controller 가
-# 동일 Node 의 새 연결을 "already connected" 로 거부한다 (ConnectionRefusalException).
-# 재실행 시에는 기존 프로세스를 먼저 정리해야 깨끗하게 재연결된다.
-AGENT_MATCH="agent.jar.*-name $AGENT_NAME"
-EXISTING_AGENT_PIDS=$(pgrep -f "$AGENT_MATCH" 2>/dev/null || true)
-if [ -n "$EXISTING_AGENT_PIDS" ]; then
-  log "기존 agent 프로세스 감지 — 종료 후 재연결 (pid: $(echo "$EXISTING_AGENT_PIDS" | tr '\n' ' '))"
-  kill $EXISTING_AGENT_PIDS 2>/dev/null || true
-  for _ in 1 2 3 4 5; do
-    pgrep -f "$AGENT_MATCH" >/dev/null 2>&1 || break
-    sleep 1
-  done
-  if pgrep -f "$AGENT_MATCH" >/dev/null 2>&1; then
-    log "  SIGTERM 무응답 — SIGKILL"
-    pkill -9 -f "$AGENT_MATCH" 2>/dev/null || true
-    sleep 1
-  fi
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -fsS -u admin:password "$JENKINS_URL/computer/$AGENT_NAME/api/json" 2>/dev/null \
-        | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('offline') else 1)" 2>/dev/null
-    then
-      break
-    fi
-    sleep 1
-  done
-  log "  기존 프로세스 정리 완료 — Jenkins disconnect 인지됨"
-fi
+# 기존 agent.jar 프로세스 정리는 이미 step 0-A 에서 수행됨 (스크립트 시작 시점).
+# 여기선 run-agent.sh 스크립트를 써 두고 foreground 로 agent 를 기동한다.
 
 RUN_SCRIPT="$AGENT_DIR/run-agent.sh"
 cat > "$RUN_SCRIPT" <<RUN_EOF

@@ -37,8 +37,51 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
+# ── 플래그 파싱 ────────────────────────────────────────────────────────────
+# --redeploy : 빌드 직후 같은 호스트에서 컨테이너 재기동 + agent 재연결까지 수행
+# --fresh    : redeploy 시 dscore-data 볼륨까지 삭제 (프로비저닝 재수행)
+# --no-agent : redeploy 시 agent 재연결 스킵 (컨테이너만 기동)
+REDEPLOY=false
+FRESH_VOLUME=false
+SKIP_AGENT=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --redeploy) REDEPLOY=true; shift ;;
+    --fresh)    FRESH_VOLUME=true; shift ;;
+    --no-agent) SKIP_AGENT=true; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+사용법: ./offline/build-allinone.sh [옵션]
+
+  --redeploy   빌드 후 같은 호스트에서 컨테이너 재기동 + agent 재연결까지 수행
+               (기존 dscore.ttc.playwright 컨테이너가 있으면 rm -f, 기존 agent.jar
+                프로세스는 agent-setup 이 정리. dscore-data 볼륨은 유지)
+  --fresh      --redeploy 와 함께 사용 — dscore-data 볼륨도 삭제해 제로베이스 기동
+  --no-agent   --redeploy 와 함께 사용 — 컨테이너만 기동, agent 재연결은 스킵
+  -h, --help   이 도움말
+
+주요 env:
+  IMAGE_TAG          dscore.ttc.playwright:latest (기본)
+  TARGET_PLATFORM    uname -m 자동 감지 (Mac arm64 → linux/arm64, 그 외 → linux/amd64)
+  OLLAMA_MODEL       gemma4:e4b (Dify provider 에 등록될 모델 id)
+  OUTPUT_TAR         dscore.ttc.playwright-<ts>.tar.gz
+
+예시:
+  ./offline/build-allinone.sh                           # 빌드만 (tar.gz 산출)
+  ./offline/build-allinone.sh --redeploy                # 빌드 + 기존 볼륨 재사용 재기동 + agent
+  ./offline/build-allinone.sh --redeploy --fresh        # 빌드 + 볼륨 초기화 + agent
+  ./offline/build-allinone.sh --redeploy --no-agent     # 빌드 + 컨테이너만 재기동
+USAGE
+      exit 0
+      ;;
+    *) echo "알 수 없는 옵션: $1" >&2; exit 2 ;;
+  esac
+done
+
 # ── 설정값 ────────────────────────────────────────────────────────────────
 IMAGE_TAG="${IMAGE_TAG:-dscore.ttc.playwright:latest}"
+CONTAINER_NAME="${CONTAINER_NAME:-dscore.ttc.playwright}"
+DATA_VOLUME="${DATA_VOLUME:-dscore-data}"
 
 # TARGET_PLATFORM: 호스트 아키텍처를 자동 감지하되, env 로 override 가능.
 # "빌드 머신 OS/아키텍처 = 런타임 머신 OS/아키텍처" 가 기본 가정 (qemu 에뮬레이션 회피).
@@ -185,6 +228,101 @@ docker images "$IMAGE_TAG" --format '  {{.Repository}}:{{.Tag}}  {{.Size}}'
 log "[4/4] 이미지 save + 압축 → $OUTPUT_TAR"
 docker save "$IMAGE_TAG" | gzip -1 > "$ROOT_DIR/$OUTPUT_TAR"
 log "  최종 파일: $ROOT_DIR/$OUTPUT_TAR ($(du -h "$ROOT_DIR/$OUTPUT_TAR" | cut -f1))"
+
+# ── 5. --redeploy: 같은 호스트에서 바로 컨테이너 재기동 + agent 재연결 ──────
+if [ "$REDEPLOY" = "true" ]; then
+  log ""
+  log "=========================================================================="
+  log "[--redeploy] 빌드 후 같은 호스트에서 컨테이너 재기동 + agent 재연결 시작"
+  log "=========================================================================="
+
+  # 5-1. 기존 컨테이너 정리 (볼륨은 --fresh 일 때만 제거)
+  if docker ps -a --format '{{.Names}}' | grep -qxF "$CONTAINER_NAME"; then
+    log "  [5-1] 기존 컨테이너 '$CONTAINER_NAME' 제거 (docker rm -f)"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
+  if [ "$FRESH_VOLUME" = "true" ]; then
+    if docker volume ls --format '{{.Name}}' | grep -qxF "$DATA_VOLUME"; then
+      log "  [5-1] --fresh — 볼륨 '$DATA_VOLUME' 제거 (provision 재수행됨)"
+      docker volume rm "$DATA_VOLUME" >/dev/null
+    fi
+  else
+    log "  [5-1] 볼륨 '$DATA_VOLUME' 유지 (--fresh 없음 — 기존 provision 재사용)"
+  fi
+
+  # 5-2. 컨테이너 기동
+  log "  [5-2] docker run (Ollama 는 호스트 → host.docker.internal 로 경유)"
+  docker run -d --name "$CONTAINER_NAME" \
+    -p 18080:18080 -p 18081:18081 -p 50001:50001 \
+    -v "$DATA_VOLUME":/data \
+    --add-host host.docker.internal:host-gateway \
+    -e OLLAMA_BASE_URL="http://host.docker.internal:11434" \
+    -e OLLAMA_MODEL="$OLLAMA_MODEL" \
+    --restart unless-stopped \
+    "$IMAGE_TAG" >/dev/null
+  log "  [5-2] 컨테이너 기동: docker ps --filter name=$CONTAINER_NAME"
+
+  # 5-3. NODE_SECRET 대기 (프로비저닝 완료까지 최대 15분)
+  if [ "$SKIP_AGENT" != "true" ]; then
+    log "  [5-3] 프로비저닝 완료 / NODE_SECRET 출력 대기 (최대 15분 — amd64 는 3-5분 통상)"
+    _w=0
+    NODE_SECRET=""
+    while [ $_w -lt 900 ]; do
+      if docker exec "$CONTAINER_NAME" test -f /data/.app_provisioned 2>/dev/null; then
+        NODE_SECRET=$(docker logs "$CONTAINER_NAME" 2>&1 \
+          | grep -oE 'NODE_SECRET: [a-f0-9]{64}' \
+          | tail -n1 \
+          | awk '{print $2}' || true)
+        [ -n "$NODE_SECRET" ] && break
+      fi
+      sleep 5; _w=$((_w + 5))
+      if [ $((_w % 60)) -eq 0 ]; then
+        log "    ... ${_w}s 경과"
+      fi
+    done
+    if [ -z "$NODE_SECRET" ]; then
+      log "  [5-3] ⚠ NODE_SECRET 15분 내 확보 실패. 수동 확인: docker logs $CONTAINER_NAME | grep NODE_SECRET"
+      log "      이후 agent 연결: NODE_SECRET=<값> ./offline/<mac|wsl>-agent-setup.sh"
+    else
+      log "  [5-3] NODE_SECRET 확보: ${NODE_SECRET:0:16}..."
+
+      # 5-4. 플랫폼 감지 → 해당 agent-setup 호출 (setsid 로 분리 기동 — 셸 반환 후에도 생존)
+      case "$(uname -s)" in
+        Darwin) AGENT_SCRIPT="$SCRIPT_DIR/mac-agent-setup.sh"; AGENT_LABEL="mac-agent-setup" ;;
+        Linux)  AGENT_SCRIPT="$SCRIPT_DIR/wsl-agent-setup.sh"; AGENT_LABEL="wsl-agent-setup" ;;
+        *)      log "  [5-4] ⚠ 알 수 없는 OS ($(uname -s)) — agent 수동 연결 필요"; AGENT_SCRIPT="" ;;
+      esac
+      if [ -n "$AGENT_SCRIPT" ]; then
+        log "  [5-4] $AGENT_LABEL 기동 (setsid 분리 + /tmp/dscore-agent.log 로 리다이렉트)"
+        # agent-setup 스크립트 자신이 기존 프로세스 정리 + 새 연결 수행
+        if command -v setsid >/dev/null 2>&1; then
+          setsid env NODE_SECRET="$NODE_SECRET" bash "$AGENT_SCRIPT" \
+            </dev/null >/tmp/dscore-agent.log 2>&1 &
+          disown
+        else
+          # Mac 에는 setsid 가 없을 수 있음 — nohup 으로 대체
+          nohup env NODE_SECRET="$NODE_SECRET" bash "$AGENT_SCRIPT" \
+            </dev/null >/tmp/dscore-agent.log 2>&1 &
+          disown
+        fi
+        sleep 3
+        log "  [5-4] 로그 위치: /tmp/dscore-agent.log  (tail -f 로 진행 관찰 가능)"
+        log "  [5-4] Jenkins Node online 확인: "
+        log "        curl -sf -u admin:password $JENKINS_URL/computer/mac-ui-tester/api/json | grep offline"
+      fi
+    fi
+  else
+    log "  [5-3] --no-agent — agent 재연결 스킵"
+    log "        수동 연결:"
+    log "          docker logs $CONTAINER_NAME | grep NODE_SECRET"
+    log "          NODE_SECRET=<값> ./offline/<mac|wsl>-agent-setup.sh"
+  fi
+
+  log ""
+  log "=========================================================================="
+  log "[--redeploy] 완료"
+  log "=========================================================================="
+fi
 
 log ""
 log "=========================================================================="
