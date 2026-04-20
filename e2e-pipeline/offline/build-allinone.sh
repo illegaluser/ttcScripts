@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Zero-Touch QA All-in-One — 번들 빌드 스크립트 (온라인 머신 전용)
+# Zero-Touch QA All-in-One — 호스트 하이브리드 이미지 빌드 스크립트 (온라인 머신)
+#
+# 본 스크립트는 호스트 Ollama + 호스트 agent 하이브리드 이미지를 만든다.
+# 설계: Mac (Metal GPU passthrough 부재) 과 Windows (headed Chromium 이 Windows
+# 네이티브 화면에서만 뜸) 공통 요구 해결. 컨테이너는 Jenkins controller + Dify 만.
+#
+# 원본 All-in-One 대비 차이:
+#   - 컨테이너 내부 Ollama 제거 (바이너리·모델 seed·supervisord 프로그램 없음)
+#   - 컨테이너 내부 Jenkins agent 제거 (호스트에서 JNLP 연결)
+#   - 사전 `ollama pull` 단계 없음 → 빌드 빠름 (4GB 모델 다운로드 스킵)
+#   - 결과 이미지 5-7GB (원본 All-in-One 10-12GB 대비 4-5GB 절감)
 #
 # 동작:
 #   1) Jenkins 플러그인 hpi 다운로드 (jenkins-plugin-manager.jar 로 의존성 포함)
@@ -11,9 +21,15 @@
 # 출력: dscore.ttc.playwright-<timestamp>.tar.gz (e2e-pipeline/ 루트에)
 #
 # 요구:
-#   - Docker 26+ (buildx 활성), 디스크 40GB+ 여유
+#   - Docker 26+ (buildx 활성), 디스크 20GB+ 여유
 #   - 온라인 (Docker Hub + PyPI + github.com + marketplace.dify.ai + updates.jenkins.io 접근)
-#   - 빌드 소요: 30-90 분 (네트워크 속도 의존)
+#   - 빌드 소요: 10-30 분 (ollama pull 단계 없어 원본보다 크게 단축)
+#
+# 런타임 전제:
+#   - 호스트 (Mac 또는 Windows) 에 Ollama 가 설치·기동되어 있어야 함
+#   - 호스트에 JDK 21 + Python 3.11+ 설치 필요 (agent 용)
+#   - docker run 에 `--add-host host.docker.internal:host-gateway` 필수
+#   - 자세한 가이드: README §4 (Mac), §5 (Windows)
 # ============================================================================
 set -euo pipefail
 
@@ -23,7 +39,24 @@ cd "$ROOT_DIR"
 
 # ── 설정값 ────────────────────────────────────────────────────────────────
 IMAGE_TAG="${IMAGE_TAG:-dscore.ttc.playwright:latest}"
-TARGET_PLATFORM="${TARGET_PLATFORM:-linux/amd64}"
+
+# TARGET_PLATFORM: 호스트 아키텍처를 자동 감지하되, env 로 override 가능.
+# "빌드 머신 OS/아키텍처 = 런타임 머신 OS/아키텍처" 가 기본 가정 (qemu 에뮬레이션 회피).
+#   - Apple Silicon Mac  → linux/arm64  (네이티브)
+#   - Intel Mac / Windows (WSL2/Docker Desktop) / Linux x86 → linux/amd64
+#   - qemu 크로스 빌드는 playwright chromium 설치가 silent-fail 하는 등 결함이 잦음
+#   - 다른 아키의 서버로 배포하려면 TARGET_PLATFORM=linux/<amd64|arm64> 로 명시 override
+if [ -z "${TARGET_PLATFORM:-}" ]; then
+  case "$(uname -m)" in
+    arm64|aarch64) TARGET_PLATFORM="linux/arm64" ;;
+    x86_64|amd64)  TARGET_PLATFORM="linux/amd64" ;;
+    *)             TARGET_PLATFORM="linux/amd64" ;;  # fallback
+  esac
+fi
+
+# OLLAMA_MODEL: 이미지에 사전 pull 되지 않음 (이 이미지는 호스트 Ollama 사용).
+# 이 값은 docker buildx 가 Dockerfile ARG 로 받아두긴 하지만 실질적 효과는 없음.
+# 실제 런타임 모델 지정은 docker run 의 `-e OLLAMA_MODEL=...` 로 Dify provider 에 등록됨.
 OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
 OUTPUT_TAR="${OUTPUT_TAR:-dscore.ttc.playwright-$(date +%Y%m%d-%H%M%S).tar.gz}"
 
@@ -155,54 +188,49 @@ log "  최종 파일: $ROOT_DIR/$OUTPUT_TAR ($(du -h "$ROOT_DIR/$OUTPUT_TAR" | c
 
 log ""
 log "=========================================================================="
-log "빌드 완료"
+log "빌드 완료 (호스트 하이브리드 이미지 — 내부 Ollama·agent 없음)"
 log ""
-log "폐쇄망 타겟으로 $OUTPUT_TAR 를 이동한 뒤 아래 명령으로 기동하세요."
-log "운영 환경에 맞는 블록 하나만 복사해 사용하면 됩니다."
+log "아키텍처:"
+log "  Jenkins master + Dify + DB  → 컨테이너 (이 이미지)"
+log "  Ollama (LLM 추론)          → 호스트 (Mac: Metal / WSL2: CUDA)"
+log "  Jenkins agent + Playwright → 호스트 (headed Chromium)"
+log "                              — Mac: macOS 네이티브 창"
+log "                              — WSL2: WSLg 경유 Windows 데스크탑 창"
 log ""
-log "  공통 1단계: 이미지 로드"
-log "    docker load -i $OUTPUT_TAR"
+log "[사전 준비 — 호스트 Mac]"
+log "  A. Ollama:  brew install ollama && brew services start ollama && ollama pull ${OLLAMA_MODEL}"
+log "  B. JDK 21:  brew install --cask temurin@21   (또는 openjdk@21)"
+log "  C. Python:  brew install python@3.12   (3.11+)"
 log ""
-log "──────────────────────────────────────────────────────────────────────────"
-log "[A] 일반 Linux 서버 (GPU 없음 / 온프레미스 폐쇄망)"
-log "──────────────────────────────────────────────────────────────────────────"
+log "[사전 준비 — Windows 11 하이브리드 (Ollama = Windows 네이티브, agent = WSL2 Ubuntu)]"
+log "  0. Windows NVIDIA 드라이버 + WSL2 + Ubuntu 22.04 설치 (PowerShell 관리자: wsl --install -d Ubuntu-22.04)"
+log "  A. Ollama (Windows 네이티브 — PowerShell): winget install Ollama.Ollama && ollama pull ${OLLAMA_MODEL}"
+log "     (Windows Ollama 가 host.docker.internal 로 Docker Desktop 포워딩되어 컨테이너에서 사용됨)"
+log "  B. WSL2 Ubuntu 안 — JDK 21:  sudo apt install -y openjdk-21-jdk-headless"
+log "  C. WSL2 Ubuntu 안 — Python:  sudo apt install -y python3.12 python3.12-venv"
+log "  D. Docker:  Docker Desktop (WSL2 백엔드) 또는 WSL native Docker Engine"
+log ""
+log "[이미지 로드 및 컨테이너 기동 — Mac / WSL2 동일]"
+log "  docker load -i $OUTPUT_TAR"
 log "  docker run -d --name dscore.ttc.playwright \\"
 log "    -p 18080:18080 -p 18081:18081 -p 50001:50001 \\"
 log "    -v dscore-data:/data \\"
 log "    --add-host host.docker.internal:host-gateway \\"
-log "    --shm-size=2g \\"
+log "    -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \\"
+log "    -e OLLAMA_MODEL=${OLLAMA_MODEL} \\"
 log "    --restart unless-stopped \\"
 log "    $IMAGE_TAG"
 log ""
-log "──────────────────────────────────────────────────────────────────────────"
-log "[B] Windows 11 WSL2 + NVIDIA GPU"
-log "──────────────────────────────────────────────────────────────────────────"
-log "  사전: docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi  → 성공 확인"
+log "[호스트 agent 연결 — 컨테이너 기동 완료 후]"
+log "  1) docker logs dscore.ttc.playwright | grep NODE_SECRET        # 64자 hex 값 확인"
+log "  2) Mac:  NODE_SECRET=<위 값> ./offline/mac-agent-setup.sh"
+log "     WSL2: NODE_SECRET=<위 값> ./offline/wsl-agent-setup.sh"
+log "     → JDK/venv/Chromium 설치 + agent 연결. 성공 시 호스트 화면에 headed Chromium"
 log ""
-log "  docker run -d --name dscore.ttc.playwright \\"
-log "    -p 18080:18080 -p 18081:18081 -p 50001:50001 \\"
-log "    -v dscore-data:/data \\"
-log "    --add-host host.docker.internal:host-gateway \\"
-log "    --gpus all \\"
-log "    --shm-size=2g \\"
-log "    --restart unless-stopped \\"
-log "    $IMAGE_TAG"
+log "접속:"
+log "  - Jenkins:  http://localhost:18080  (admin / password)"
+log "  - Dify:     http://localhost:18081  (admin@example.com / Admin1234!)"
 log ""
-log "  Jenkins Pipeline 실행 시 HEADLESS 파라미터 반드시 체크 (컨테이너 X display 없음)"
-log ""
-log "──────────────────────────────────────────────────────────────────────────"
-log "[C] Linux + NVIDIA GPU 서버 (베어메탈/클라우드)"
-log "──────────────────────────────────────────────────────────────────────────"
-log "  [B] 와 동일. nvidia-container-toolkit 호스트 설치 여부만 확인."
-log ""
-log "──────────────────────────────────────────────────────────────────────────"
-log "[D] Apple Silicon Mac (Docker Desktop) — Metal 은 컨테이너로 passthrough 되지 않음"
-log "──────────────────────────────────────────────────────────────────────────"
-log "  호스트에 Ollama 설치 필요. 별도 브랜치 feat/allinone-mac-host-ollama 참조."
-log ""
-log "초기 기동 후 5-10분 지나면 다음이 가용합니다:"
-log "  - Jenkins:  http://<host>:18080  (admin / password)"
-log "  - Dify:     http://<host>:18081  (admin@example.com / Admin1234!)"
-log ""
-log "WSL2/GPU 옵션 상세: README.md 섹션 2.3 (c) 참조."
+log "⚠️  호스트 Ollama 미기동 / 호스트 agent 미연결 시 Pipeline Stage 3 가 실패한다."
+log "    자세한 가이드: e2e-pipeline/offline/README.md"
 log "=========================================================================="

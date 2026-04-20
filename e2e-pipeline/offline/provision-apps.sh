@@ -116,15 +116,36 @@ JENKINS_COOKIES="/tmp/jenkins-cookies.txt"
 JENKINS_CRUMB_HEADER=""
 rm -f "$JENKINS_COOKIES"
 
-JENKINS_CRUMB_RAW=$(curl -sS -c "$JENKINS_COOKIES" \
+# PoC 2026-04-20: 이전 버전은 /crumbIssuer/api/xml?xpath=... 로 받아 ':' 포함 여부만
+# 체크했는데, Jenkins 2.555 이 인증/세션 상태에 따라 200 + HTML 페이지를 내려주는
+# 경우가 관찰됐다. HTML 에는 ':' 이 흔하므로 조건을 통과하고 쓰레기 HTML 전체가
+# crumb 헤더로 주입 → 이후 모든 POST 가 403 (HTML 로그인 페이지) 반환 → Pipeline
+# Job/Credentials/Node 생성이 전부 실패하는 연쇄가 발생했다.
+# 해결: JSON 엔드포인트로 받아 파이썬 파서로 명시적 검증. 파싱 실패 시 empty 로 두면
+# ${JENKINS_CRUMB_HEADER:+-H ...} 패턴이 자동으로 헤더를 빼기 때문에 basic auth 만으로
+# POST 가 진행된다 (Jenkins 2.555 은 basic auth 요청에 대해 crumb 를 요구하지 않음).
+JENKINS_CRUMB_JSON=$(curl -sS -c "$JENKINS_COOKIES" \
     -u "${JENKINS_ADMIN_USER}:${JENKINS_ADMIN_PW}" \
-    "${JENKINS_URL}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)" \
+    -H "Accept: application/json" \
+    "${JENKINS_URL}/crumbIssuer/api/json" \
     2>/dev/null || echo "")
-if [ -n "$JENKINS_CRUMB_RAW" ] && [ "${JENKINS_CRUMB_RAW#*:}" != "$JENKINS_CRUMB_RAW" ]; then
-  JENKINS_CRUMB_HEADER="$JENKINS_CRUMB_RAW"
-  ok "Jenkins crumb 획득: ${JENKINS_CRUMB_HEADER%%:*}=${JENKINS_CRUMB_HEADER#*:} (${#JENKINS_CRUMB_HEADER}자)"
+JENKINS_CRUMB_HEADER=$(echo "$JENKINS_CRUMB_JSON" | $PY -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    f = d.get('crumbRequestField','')
+    c = d.get('crumb','')
+    if f and c and all(ch.isalnum() or ch == '-' for ch in f):
+        print(f'{f}:{c}')
+    else:
+        print('')
+except Exception:
+    print('')
+")
+if [ -n "$JENKINS_CRUMB_HEADER" ]; then
+  ok "Jenkins crumb 획득: ${JENKINS_CRUMB_HEADER%%:*} (${#JENKINS_CRUMB_HEADER}자)"
 else
-  warn "Jenkins crumb 발급 실패 — POST 호출이 403 으로 실패할 수 있음"
+  warn "Jenkins crumb 파싱 실패 — basic auth 로만 진행 (Jenkins 2.555+ 는 crumb 없이도 POST 허용)"
 fi
 
 # Jenkins POST 요청용 헬퍼 — -u 인증 + crumb 헤더 + 쿠키 jar 자동 부착
@@ -261,22 +282,22 @@ except Exception: sys.exit(1)
 fi
 
 # 2-3b. Ollama 모델 공급자 등록
+#
+# Dify 1.13.3 의 credential 저장 구조 (실측 2026-04-19):
+#   provider_models.credential_id ─▶ provider_model_credentials.id
+#   "Add Model credentials" POST 는 **새 credential 레코드** 추가만 할 뿐
+#   provider_models 의 credential_id 포인터를 바꾸지 않는다. 또한 Redis 에
+#   provider_model_credentials:tenant_id:...:id:<uuid> 키로 값을 캐시한다.
+#   OLLAMA_BASE_URL 을 변경한 뒤 이 두 가지를 직접 처리하지 않으면 Dify 는
+#   계속 옛 base_url 로 요청을 보내 ConnectionError 가 난다.
+#
+# 대응:
+#   1) POST credentials 로 새 레코드 등록 (upsert 가 아님 — 항상 추가)
+#   2) DB UPDATE 로 provider_models.credential_id 를 가장 최근 레코드로 swap
+#   3) Redis FLUSH — provider_model_credentials:* 및 model 다이제스트 캐시 삭제
 if [ "$DIFY_OLLAMA_INSTALLED" = "true" ]; then
-  log "2-3b. 모델 공급자 등록: ${OLLAMA_MODEL}"
-  MODELS_RESP=$(curl -sS -b "$DIFY_COOKIES" \
-      "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models" \
-      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" 2>&1 || echo '{}')
-  if echo "$MODELS_RESP" | $PY -c "
-import json,sys
-target='''${OLLAMA_MODEL}'''
-try:
-    d=json.load(sys.stdin)
-    sys.exit(0 if any(m.get('model')==target for m in d.get('data',[])) else 1)
-except Exception: sys.exit(1)
-" 2>/dev/null; then
-    ok "  ${OLLAMA_MODEL} 이미 등록됨"
-  else
-    REG_BODY=$($PY - << PYEOF
+  log "2-3b. 모델 공급자 등록: ${OLLAMA_MODEL} (base_url=${OLLAMA_BASE_URL})"
+  REG_BODY=$($PY - << PYEOF
 import json
 print(json.dumps({
     "model": "${OLLAMA_MODEL}",
@@ -292,17 +313,98 @@ print(json.dumps({
 }))
 PYEOF
 )
-    REG_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
-        -X POST "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials" \
-        -H "Content-Type: application/json" \
-        -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
-        -d "$REG_BODY" 2>&1 || echo "HTTP:000")
-    debug "model register response: $REG_RESP"
-    if echo "$REG_RESP" | grep -qE 'HTTP:(200|201)'; then
-      ok "  ${OLLAMA_MODEL} 등록 완료"
-    else
-      warn "  등록 실패: $REG_RESP"
-    fi
+  REG_RESP=$(curl -sS -w $'\nHTTP:%{http_code}' -b "$DIFY_COOKIES" \
+      -X POST "${DIFY_URL}/console/api/workspaces/current/model-providers/langgenius/ollama/ollama/models/credentials" \
+      -H "Content-Type: application/json" \
+      -H "X-CSRF-Token: ${DIFY_CSRF_TOKEN}" \
+      -d "$REG_BODY" 2>&1 || echo "HTTP:000")
+  debug "model register response: $REG_RESP"
+  if echo "$REG_RESP" | grep -qE 'HTTP:(200|201)'; then
+    ok "  credentials POST 완료 (새 레코드 추가됨)"
+  elif echo "$REG_RESP" | grep -q 'already_exist'; then
+    ok "  credentials 이미 동일 구성 존재"
+  else
+    warn "  credentials POST 이상 응답: $REG_RESP"
+  fi
+
+  # 2-3c. credential_id swap: 가장 최근 추가된 host URL 레코드를 활성화
+  log "2-3c. credential_id swap (base_url=${OLLAMA_BASE_URL} 레코드 활성화)"
+  SWAP_TARGET_PATTERN=$(echo "${OLLAMA_BASE_URL}" | sed "s|'|''|g")
+  SWAP_SQL=$(cat <<SQL
+UPDATE provider_models pm
+   SET credential_id = (
+         SELECT id FROM provider_model_credentials
+          WHERE provider_name = pm.provider_name
+            AND model_name    = pm.model_name
+            AND model_type    = pm.model_type
+            AND encrypted_config LIKE '%${SWAP_TARGET_PATTERN}%'
+          ORDER BY updated_at DESC LIMIT 1
+       ),
+       updated_at = now()
+ WHERE provider_name LIKE '%ollama%'
+   AND model_name = '${OLLAMA_MODEL}'
+   AND EXISTS (
+         SELECT 1 FROM provider_model_credentials pmc
+          WHERE pmc.provider_name = pm.provider_name
+            AND pmc.model_name    = pm.model_name
+            AND pmc.model_type    = pm.model_type
+            AND pmc.encrypted_config LIKE '%${SWAP_TARGET_PATTERN}%'
+       );
+-- 중복된 구 credential 정리 (동일 모델 × 다른 base_url)
+DELETE FROM provider_model_credentials pmc
+ WHERE pmc.provider_name LIKE '%ollama%'
+   AND pmc.model_name = '${OLLAMA_MODEL}'
+   AND pmc.encrypted_config NOT LIKE '%${SWAP_TARGET_PATTERN}%'
+   AND NOT EXISTS (SELECT 1 FROM provider_models pm WHERE pm.credential_id = pmc.id);
+SQL
+)
+  SWAP_OUT=$(PGPASSWORD=difyai123456 psql -h 127.0.0.1 -U postgres -d dify -tAc "$SWAP_SQL" 2>&1 || echo "psql-error")
+  debug "swap result: $SWAP_OUT"
+  ok "  credential_id 스왑 + 잔존 레코드 정리 완료"
+
+  # 2-3d. Redis 캐시 FLUSH — Dify 는 provider_model_credentials:* 키에 base_url 포함
+  # JSON 을 캐시한다. DB 를 바꿔도 재기동 전까지 옛 값이 서빙되므로 명시 삭제.
+  log "2-3d. Redis provider_model_credentials 캐시 FLUSH"
+  # scan + del 을 bash 루프로 (Redis 는 비동기 unlink 가 없는 경우 DEL 로 대체)
+  redis-cli -h 127.0.0.1 --scan --pattern 'provider_model_credentials:*' 2>/dev/null \
+    | while read k; do redis-cli -h 127.0.0.1 DEL "$k" >/dev/null 2>&1; done
+  # 모델 다이제스트 키 (tenant:langgenius/ollama:... 형태)
+  redis-cli -h 127.0.0.1 --scan --pattern "*:langgenius/ollama:ollama:llm:${OLLAMA_MODEL}*" 2>/dev/null \
+    | while read k; do redis-cli -h 127.0.0.1 DEL "$k" >/dev/null 2>&1; done
+  ok "  Redis 캐시 삭제 완료"
+
+  # 2-3e. 반영 위해 dify-api + dify-plugin-daemon 재기동
+  #
+  # PoC 2026-04-20: Windows 11 WSL2 (amd64) 환경에서 Dify 1.13.3 의 gevent 워커가
+  # Flask app import + DB migration 완료까지 **첫 요청 응답 기준 60-90s** 걸린다
+  # (Mac arm64 는 10-20s). 이 대기를 짧게 잡으면 재기동 직후 2-4 Chatflow import
+  # 단계의 /console/api/apps curl 이 워커 부팅 중 blocking I/O 경합으로 hang →
+  # 전체 프로비저닝 중단. 따라서 대기 timeout 을 넉넉히 (최대 300s) 두고,
+  # **실제 HTTP 200 응답**을 확인해야만 다음 단계로 진행한다.
+  # max-time 도 3s → 5s 로 완화 (import 중 curl 이 조기 에러로 retry 폭탄 쏘는 것 방지).
+  if command -v supervisorctl >/dev/null 2>&1; then
+    log "2-3e. dify-api + dify-plugin-daemon 재기동 (credential cache 리로드)"
+    supervisorctl -c /etc/supervisor/supervisord.conf restart dify-api dify-plugin-daemon >/dev/null 2>&1 || true
+    # supervisorctl restart 반환 직후에도 이전 프로세스의 5001 소켓 해제 지연
+    # 가능성 — 2s 안전 마진
+    sleep 2
+    log "  dify-api HTTP 응답 대기 (최대 300s — amd64 에선 60-90s 소요)"
+    _w=0
+    until curl -sf --max-time 5 -o /dev/null http://127.0.0.1:5001/console/api/setup; do
+      sleep 3; _w=$((_w+3))
+      if [ $_w -ge 300 ]; then
+        warn "  dify-api 300s 내 응답 없음 — 이후 Chatflow import / API Key 단계 실패 가능"
+        break
+      fi
+    done
+    DIFY_API_READY_AT=$_w
+    log "  dify-plugin-daemon /health/check 응답 대기 (최대 60s)"
+    _w2=0
+    until curl -sf --max-time 3 -o /dev/null http://127.0.0.1:5002/health/check; do
+      sleep 2; _w2=$((_w2+2))
+      [ $_w2 -ge 60 ] && { warn "  plugin-daemon 60s 내 응답 없음"; break; }
+    done
+    ok "  재기동 후 readiness 확인 완료 (dify-api=${DIFY_API_READY_AT}s, plugin-daemon=${_w2}s)"
   fi
 fi
 
@@ -533,8 +635,18 @@ PYEOF
   fi
 fi
 
-# 3-4. mac-ui-tester 노드 등록 (loopback JNLP)
-log "3-4. mac-ui-tester 에이전트 노드 등록"
+# 3-4. mac-ui-tester 노드 등록 — 호스트 agent 전제 (Mac / Windows 공용)
+#
+# Node 레이블은 Pipeline 파일과의 호환성 때문에 'mac-ui-tester' 를 그대로 사용한다
+# (루트 DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline 의 `agent { label 'mac-ui-tester' }`).
+# 실제 실행 호스트는 Mac / Windows 모두 가능.
+#
+# 하이브리드 설계: Jenkins controller 는 컨테이너, agent 는 호스트 (JDK21 + Playwright).
+# remoteFS 는 호스트 사용자의 홈 기준 절대 경로. agent 는 Jenkins 에게 이 경로를
+# 워크스페이스 루트로 알린다. SCRIPTS_HOME 환경변수는 Node 에 **설정하지 않는다** —
+# 호스트 agent 의 setup 스크립트 (mac-agent-setup.sh / windows-agent-setup.ps1) 가
+# 실행 env 로 주입한다 (각 사용자의 e2e-pipeline clone 경로가 달라 컨테이너가 예측 불가).
+log "3-4. mac-ui-tester 에이전트 노드 등록 (호스트 JNLP — Mac/Windows 공용)"
 NODE_GROOVY=$(cat << 'GROOVY_EOF'
 import jenkins.model.*
 import hudson.model.*
@@ -543,30 +655,36 @@ import hudson.slaves.*
 def instance = Jenkins.getInstance()
 def existingNode = instance.getNode('mac-ui-tester')
 def node
+
+// 하이브리드 설계: remoteFS 를 호스트 사용자의 ~/.dscore.ttc.playwright-agent 기준 절대 경로로.
+// mac-agent-setup.sh 가 이 디렉토리를 생성하므로 Node 는 prescriptive 값을 사용.
+// Jenkins master 입장에선 텍스트일 뿐이고 실제 해석은 agent 쪽.
+def REMOTE_FS = System.getenv('MAC_AGENT_WORKDIR') ?: '~/.dscore.ttc.playwright-agent'
+
 if (existingNode != null) {
     node = existingNode
-    println "[node] mac-ui-tester 기존 노드 발견 — 환경변수 갱신"
+    println "[node] mac-ui-tester 기존 노드 발견 — 호스트 agent 전제로 갱신"
 } else {
     def launcher = new JNLPLauncher(true)
     def strategy = new RetentionStrategy.Always()
-    node = new DumbSlave('mac-ui-tester', '/data/jenkins-agent', launcher)
-    node.setNodeDescription('All-in-One 내부 loopback JNLP Agent')
+    node = new DumbSlave('mac-ui-tester', REMOTE_FS, launcher)
+    node.setNodeDescription('Host-side JNLP Agent (Mac/Windows, headed Playwright)')
     node.setNumExecutors(1)
     node.setLabelString('mac-ui-tester')
     node.setMode(Node.Mode.EXCLUSIVE)
     node.setRetentionStrategy(strategy)
     instance.addNode(node)
-    println "[node] mac-ui-tester 생성 완료"
+    println "[node] mac-ui-tester 생성 완료 (remoteFS=" + REMOTE_FS + ")"
 }
 
-// 환경변수 갱신 — 기존 EnvironmentVariablesNodeProperty 는 제거 후 재추가 (멱등)
+// 환경변수 갱신 — Node 에는 SCRIPTS_HOME 을 세팅하지 않는다. 호스트 agent 측에서
+// 실행 env 로 주입하는 쪽이 사용자별 clone 경로 차이를 수용하기 좋다.
+// 기존 EnvironmentVariablesNodeProperty 가 있으면 (과거 brands 의 잔재) 제거.
 node.getNodeProperties().removeAll { it instanceof hudson.slaves.EnvironmentVariablesNodeProperty }
-def envList = new hudson.slaves.EnvironmentVariablesNodeProperty([
-    new hudson.slaves.EnvironmentVariablesNodeProperty.Entry('SCRIPTS_HOME','/opt/scripts-home')
-])
-node.getNodeProperties().add(envList)
-instance.save()
-println "[node] SCRIPTS_HOME=/opt/scripts-home"
+// Jenkins 2.479+ 는 instance.save() 만으로 Node config.xml 에 디스크 flush 가 되지
+// 않는다. updateNode() 가 명시적으로 nodes/<name>/config.xml 을 재작성한다.
+instance.updateNode(node)
+println "[node] 호스트 agent 연결 대기 중 (remoteFS=" + REMOTE_FS + ")"
 GROOVY_EOF
 )
 NODE_RESP=$(jkpost --max-time 30 -X POST "${JENKINS_URL}/scriptText" \
@@ -586,4 +704,11 @@ echo ""
 echo "  Jenkins:   ${JENKINS_URL}  (${JENKINS_ADMIN_USER} / ${JENKINS_ADMIN_PW})"
 echo "  Dify:      ${DIFY_URL}     (${DIFY_EMAIL} / ${DIFY_PASSWORD})"
 [ -n "$DIFY_API_KEY" ] && echo "  API Key:   ${DIFY_API_KEY:0:12}... (Jenkins Credentials 'dify-qa-api-token' 등록됨)"
+echo ""
+echo "  ⚠️  Jenkins Node 'mac-ui-tester' 는 **호스트 (Mac / WSL2)** 에서 JNLP 로 연결해야 합니다."
+echo "     컨테이너 내부 agent 는 없으며, Playwright 는 호스트에서 실행되어야 headed Chromium"
+echo "     창이 호스트 화면에 뜹니다 (Mac: macOS 창 / WSL2: WSLg → Windows 데스크탑 창). 연결 방법:"
+echo "       Mac:  NODE_SECRET=... ./offline/mac-agent-setup.sh"
+echo "       WSL2: NODE_SECRET=... ./offline/wsl-agent-setup.sh"
+echo "     entrypoint 로그에 NODE_SECRET 이 찍혀 있으니 그 값을 사용합니다."
 echo ""
