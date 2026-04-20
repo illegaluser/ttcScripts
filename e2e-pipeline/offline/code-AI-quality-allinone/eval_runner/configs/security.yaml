@@ -1,0 +1,3 @@
+- type: python
+  value: "file://../configs/security_assert.py:check_security_assertions"
+  metric: "Fail-fast security exposure check"

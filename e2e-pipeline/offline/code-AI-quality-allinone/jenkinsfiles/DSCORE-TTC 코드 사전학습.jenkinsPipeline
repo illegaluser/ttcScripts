@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git 레포지토리 URL (예: http://gitlab:8929/root/repo.git)')
+    }
+    
+    environment {
+        SCRIPTS_DIR = '/var/jenkins_home/scripts'
+        WORKSPACE_CODES = '/var/knowledges/codes'
+        RESULT_DIR = '/var/knowledges/docs/result'
+        DOC_FORM = 'text_model'
+        DOC_LANGUAGE = 'Korean'
+    }
+    
+    stages {
+        stage('1. Git Clone') {
+            when { expression { params.REPO_URL != '' } }
+            steps {
+                echo "[Clone] Git 레포지토리 클론 시작: ${params.REPO_URL}"
+                sh '''
+                set -e
+                REPO_NAME=$(basename "${REPO_URL}" .git)
+                # 기존 코드 디렉터리 초기화
+                rm -rf ${WORKSPACE_CODES}/*
+                # Git 클론 (실제 저장소 이름으로 디렉터리 생성)
+                git clone "${REPO_URL}" ${WORKSPACE_CODES}/$REPO_NAME
+                echo "[Clone] 완료"
+                '''
+            }
+        }
+        
+        stage('2. Build Context') {
+            steps {
+                echo "[Build] 레포지토리 컨텍스트 생성 시작"
+                sh '''
+                set -e
+                REPO_NAME=$(basename "${REPO_URL}" .git)
+                # Dify 중복 업로드 에러 방지를 위해 이전 결과물 삭제
+                rm -rf ${RESULT_DIR}/*
+                
+                # 스크립트 실행 (내부에서 context_저장소이름.md로 자동 생성됨)
+                python3 ${SCRIPTS_DIR}/repo_context_builder.py \
+                    --repo_root ${WORKSPACE_CODES}/$REPO_NAME \
+                    --out ${RESULT_DIR}
+                echo "[Build] 완료"
+                '''
+            }
+        }
+        
+        stage('3. Upload Context') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'dify-knowledge-key', variable: 'DIFY_API_KEY'),
+                    string(credentialsId: 'dify-dataset-id', variable: 'DIFY_DATASET_ID')
+                ]) {
+                    echo "[Upload] 코드 컨텍스트 전송 시작"
+                    sh '''
+                    set -e
+                    # doc_processor.py는 RESULT_DIR 내의 모든 .md 파일을 찾아 업로드함
+                    python3 ${SCRIPTS_DIR}/doc_processor.py upload \
+                        "$DIFY_API_KEY" \
+                        "$DIFY_DATASET_ID" \
+                        "$DOC_FORM" \
+                        "$DOC_LANGUAGE"
+                    echo "[Upload] 완료"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "[Success] 코드 지식화 작업이 성공적으로 완료되었습니다."
+        }
+        failure {
+            echo "[Failure] 작업 중 오류가 발생했습니다. 로그를 확인하세요."
+        }
+    }
+}

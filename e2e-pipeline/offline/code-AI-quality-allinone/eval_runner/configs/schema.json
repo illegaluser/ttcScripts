@@ -1,0 +1,9 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "answer": { "type": "string", "minLength": 1 },
+    "docs": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["answer"]
+}

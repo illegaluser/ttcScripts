@@ -24,8 +24,13 @@
 #   - GitLab: 외부 서비스 (API 호출만)
 #   - Jenkins agent: 호스트에서 JNLP 연결 (Playwright headed 테스트용)
 #
-# 빌드 컨텍스트: **레포 루트** (e2e-pipeline/offline/* 자산을 그대로 재사용).
-# 멀티 아키: docker buildx build --platform linux/<amd64|arm64> -f Dockerfile.allinone .
+# 빌드 컨텍스트: **이 폴더 자체** (자체 완결). 폴더만 압축해서 다른 머신으로
+# 옮긴 뒤 scripts/download-plugins.sh (온라인 필요) + scripts/build-{wsl2,mac}.sh
+# 한 번씩 돌리면 완성된 이미지가 생성된다.
+#
+# 멀티 아키: docker buildx build --platform linux/<amd64|arm64> \
+#   -f e2e-pipeline/offline/code-AI-quality-allinone/Dockerfile \
+#   e2e-pipeline/offline/code-AI-quality-allinone
 #
 # 결과 이미지 크기 예상: 7-9GB (SonarQube 추가로 기존 대비 ~2GB 증가).
 # ============================================================================
@@ -114,8 +119,8 @@ RUN sed -i 's|"plugin_unique_identifier": plugin_unique_identifier|"PluginUnique
 # Python 의존성 — eval_runner / 파이프라인 1~3 공통
 # (requirements-allinone.txt 는 기존 자산 재사용: requests, playwright, deepeval 등)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/playwright-allinone/requirements.txt /tmp/requirements-allinone.txt
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/requirements-pipelines.txt             /tmp/requirements-pipelines.txt
+COPY requirements.txt /tmp/requirements-allinone.txt
+COPY scripts/requirements-pipelines.txt             /tmp/requirements-pipelines.txt
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
         -r /tmp/requirements-allinone.txt && \
     pip3 install --no-cache-dir --break-system-packages --ignore-installed \
@@ -200,21 +205,21 @@ RUN set -eux; \
 # ─────────────────────────────────────────────────────────────────────────────
 # Jenkins 플러그인 seed + Dify 플러그인 seed (기존 offline 자산 재사용)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/playwright-allinone/jenkins-plugins/ /opt/seed/jenkins-plugins/
-COPY e2e-pipeline/offline/playwright-allinone/dify-plugins/    /opt/seed/dify-plugins/
+COPY jenkins-plugins/ /opt/seed/jenkins-plugins/
+COPY dify-plugins/    /opt/seed/dify-plugins/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PostgreSQL initdb + Dify/SonarQube DB 생성
 # (기존 pg-init-allinone.sh 는 dify/dify_plugin 만 생성 → sonar 추가한 확장본 사용)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/pg-init.sh /opt/pg-init.sh
+COPY scripts/pg-init.sh /opt/pg-init.sh
 RUN bash /opt/pg-init.sh
 
 # ─────────────────────────────────────────────────────────────────────────────
 # supervisord / nginx 설정 — 통합 이미지 전용 (포트 28080/28081/29000/50002)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/supervisord.conf /etc/supervisor/supervisord.conf
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/nginx.conf       /etc/nginx/nginx.conf
+COPY scripts/supervisord.conf /etc/supervisor/supervisord.conf
+COPY scripts/nginx.conf       /etc/nginx/nginx.conf
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 파이프라인 1~3 Python 스크립트 + 파이프라인 4 eval_runner
@@ -222,11 +227,11 @@ COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/nginx.conf       /etc
 #  ZeroTouch-QA 는 기존 e2e-pipeline 스택이 담당)
 # ─────────────────────────────────────────────────────────────────────────────
 RUN mkdir -p /opt/pipeline-scripts
-COPY repo_context_builder.py           /opt/pipeline-scripts/
-COPY doc_processor.py                  /opt/pipeline-scripts/
-COPY sonar_issue_exporter.py           /opt/pipeline-scripts/
-COPY dify_sonar_issue_analyzer.py      /opt/pipeline-scripts/
-COPY gitlab_issue_creator.py           /opt/pipeline-scripts/
+COPY pipeline-scripts/repo_context_builder.py           /opt/pipeline-scripts/
+COPY pipeline-scripts/doc_processor.py                  /opt/pipeline-scripts/
+COPY pipeline-scripts/sonar_issue_exporter.py           /opt/pipeline-scripts/
+COPY pipeline-scripts/dify_sonar_issue_analyzer.py      /opt/pipeline-scripts/
+COPY pipeline-scripts/gitlab_issue_creator.py           /opt/pipeline-scripts/
 COPY eval_runner                       /opt/eval_runner
 
 # SCRIPTS_HOME 심볼릭 (eval_runner 전용)
@@ -242,12 +247,12 @@ RUN mkdir -p /opt/scripts-home && \
 #  PAT 을 Jenkins Credentials 'gitlab-pat' 으로 주입하고, withCredentials
 #  래핑은 Phase 6 에서 추가)
 # ─────────────────────────────────────────────────────────────────────────────
-COPY "DSCORE-TTC 코드 사전학습.jenkinsPipeline" \
-     "DSCORE-TTC 코드 정적분석.jenkinsPipeline" \
-     "DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록.jenkinsPipeline" \
-     "DSCORE-TTC AI평가.jenkinsPipeline" \
+COPY "jenkinsfiles/DSCORE-TTC 코드 사전학습.jenkinsPipeline" \
+     "jenkinsfiles/DSCORE-TTC 코드 정적분석.jenkinsPipeline" \
+     "jenkinsfiles/DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록.jenkinsPipeline" \
+     "jenkinsfiles/DSCORE-TTC AI평가.jenkinsPipeline" \
      /opt/jenkinsfiles/
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/jenkins-seed/ /opt/seed/jenkins-home/
+COPY scripts/jenkins-seed/ /opt/seed/jenkins-home/
 
 RUN set -eux; \
     cd /opt/jenkinsfiles; \
@@ -266,20 +271,20 @@ RUN set -eux; \
     echo "Jenkinsfile URL/PAT 치환 완료"
 
 # jenkins-init groovy 스크립트 (관리자 계정 등)도 기존 자산 재사용
-COPY e2e-pipeline/jenkins-init /opt/jenkins-init
+COPY jenkins-init /opt/jenkins-init
 RUN mkdir -p /opt/seed/jenkins-home/init.groovy.d && \
     cp /opt/jenkins-init/*.groovy /opt/seed/jenkins-home/init.groovy.d/ 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dify 자산 (Workflow DSL, Dataset 정의) — provision.allinone.sh 가 자동 import
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/dify-assets/ /opt/dify-assets/
+COPY scripts/dify-assets/ /opt/dify-assets/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # entrypoint + provisioner
 # ─────────────────────────────────────────────────────────────────────────────
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/entrypoint.sh /entrypoint.sh
-COPY e2e-pipeline/offline/code-AI-quality-allinone/scripts/provision.sh  /opt/provision.sh
+COPY scripts/entrypoint.sh /entrypoint.sh
+COPY scripts/provision.sh  /opt/provision.sh
 RUN chmod +x /entrypoint.sh /opt/provision.sh
 
 # ─────────────────────────────────────────────────────────────────────────────

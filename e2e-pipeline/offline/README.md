@@ -13,17 +13,19 @@
 
 ## 빌드 진입점
 
-```bash
-# Playwright 이미지
-bash e2e-pipeline/offline/playwright-allinone/build.sh
+각 이미지는 자체 완결 폴더입니다. 해당 폴더 안에서 실행하면 됩니다.
 
-# Code & AI Quality 이미지
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-wsl2.sh     # WSL2
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-mac.sh      # macOS
+```bash
+# Playwright 이미지 (호스트 Ollama + 호스트 agent 하이브리드)
+cd e2e-pipeline/offline/playwright-allinone
+bash build.sh
+
+# Code & AI Quality 이미지 (docker compose 스택: allinone + gitlab)
+cd e2e-pipeline/offline/code-AI-quality-allinone
+bash scripts/download-plugins.sh          # 최초 1회 — Jenkins + Dify 플러그인 (온라인)
+bash scripts/build-wsl2.sh                # 또는 scripts/build-mac.sh
 ```
 
 세부 가이드는 각 폴더의 `README.md` 를 참고.
 
-## 임시 커플링 주의
-
-현재 `code-AI-quality-allinone/Dockerfile` 이 `playwright-allinone/jenkins-plugins/`, `playwright-allinone/dify-plugins/`, `playwright-allinone/requirements.txt` 를 참조합니다. 즉 Code & AI Quality 이미지를 빌드하기 전에 **Playwright 이미지의 `build.sh [1/4]-[2/4]` 단계** 를 먼저 돌려 바이너리를 채워두어야 합니다. 완전 격리(각 이미지가 자체 바이너리 다운로드 스크립트를 가지는 구조)는 후속 작업으로 분리 예정.
+두 이미지는 이제 **상호 의존이 없습니다**. 각각 독립적으로 빌드·배포 가능합니다.

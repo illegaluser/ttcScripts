@@ -1,0 +1,597 @@
+properties([
+    parameters([
+        [$class: 'StringParameterDefinition', name: 'TARGET_URL', defaultValue: 'http://host.docker.internal:8000/invoke', description: '평가 대상 URL. direct 모드에서만 필수입니다. 예: http://host.docker.internal:8000/invoke'],
+        [$class: 'ChoiceParameterDefinition', name: 'TARGET_TYPE', choices: 'http\nui_chat', description: '대상 형태 선택. API면 http, 웹 채팅 자동화면 ui_chat. wrapper 모드(local_ollama/openai/gemini)는 http만 지원'],
+        [$class: 'ChoiceParameterDefinition', name: 'TARGET_MODE', choices: 'local_ollama_wrapper\nopenai_wrapper\ngemini_wrapper\ndirect', description: '호출 경로 선택. local_ollama_wrapper=로컬 Ollama 자동기동, openai_wrapper=OpenAI API 자동기동, gemini_wrapper=Gemini API 자동기동, direct=TARGET_URL 직접 호출'],
+        [$class: 'PasswordParameterDefinition', name: 'API_KEY', description: '(선택) 공통 API 키. direct 호출 대상이 키를 요구할 때 사용. openai_wrapper/gemini_wrapper에서는 전용 키가 비었을 때 fallback으로 사용'],
+        [$class: 'PasswordParameterDefinition', name: 'TARGET_AUTH_HEADER', description: '(선택) 전체 인증 헤더 직접 입력. 예: Authorization: Bearer eyJ... (주로 direct/http 모드)'],
+        [$class: 'StringParameterDefinition', name: 'OLLAMA_BASE_URL', defaultValue: 'http://host.docker.internal:11434', description: '심판(Judge) 모델용 Ollama 주소. 예: http://host.docker.internal:11434 (local_ollama_wrapper 대상 호출에도 사용)'],
+        [$class: 'StringParameterDefinition', name: 'OPENAI_BASE_URL', defaultValue: 'https://api.openai.com/v1', description: 'OpenAI API 주소(openai_wrapper). 기본값 그대로 사용 권장'],
+        [$class: 'StringParameterDefinition', name: 'OPENAI_MODEL', defaultValue: 'gpt-4.1-mini', description: 'openai_wrapper 대상 모델명. 예: gpt-4.1-mini, gpt-4.1'],
+        [$class: 'PasswordParameterDefinition', name: 'OPENAI_API_KEY', description: '(선택) OpenAI 전용 키. 예: sk-... 비우면 API_KEY를 fallback으로 사용'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_BASE_URL', defaultValue: 'https://generativelanguage.googleapis.com/v1beta', description: 'Gemini API 주소(gemini_wrapper). 기본값 그대로 사용 권장'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_MODEL', defaultValue: 'gemini-2.0-flash', description: 'gemini_wrapper 대상 모델명. 예: gemini-2.0-flash, gemini-1.5-pro'],
+        [$class: 'PasswordParameterDefinition', name: 'GEMINI_API_KEY', description: '(선택) Gemini 전용 키. 예: AIza... 비우면 API_KEY를 fallback으로 사용'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_MIN_INTERVAL_SEC', defaultValue: '1.0', description: 'Gemini 호출 최소 간격(초). 429가 나면 1.5~3.0으로 올리세요'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_MAX_RETRIES', defaultValue: '5', description: 'Gemini 429 재시도 횟수. 예: 5~8'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_RETRY_BASE_SEC', defaultValue: '1.0', description: 'Gemini 백오프 시작 지연(초). 예: 1.0'],
+        [$class: 'StringParameterDefinition', name: 'GEMINI_RETRY_MAX_SEC', defaultValue: '20.0', description: 'Gemini 백오프 최대 지연(초). 예: 20.0~60.0'],
+        [
+            $class: 'CascadeChoiceParameter',
+            choiceType: 'PT_SINGLE_SELECT',
+            description: 'OLLAMA 모델 목록에서 선택. 예: qwen3-coder:30b',
+            filterLength: 1,
+            filterable: true,
+            name: 'JUDGE_MODEL',
+            randomName: 'judge-model-choice',
+            referencedParameters: 'OLLAMA_BASE_URL',
+            script: [
+                $class: 'GroovyScript',
+                fallbackScript: [
+                    classpath: [],
+                    sandbox: true,
+                    script: '''
+                        // Active Choices 스크립트 권한 문제가 있어도 드롭다운이 비지 않도록
+                        // 최소 선택지를 항상 반환합니다.
+                        return ['qwen3-coder:30b', 'qwen2:7b']
+                    '''
+                ],
+                script: [
+                    classpath: [],
+                    sandbox: true,
+                    script: '''
+                        import groovy.json.JsonSlurperClassic
+
+                        // ScriptApproval/네트워크 이슈가 있을 때에도 Build 화면 선택이 가능해야 하므로
+                        // fallback 가능한 기본 목록을 유지합니다.
+                        def defaultModels = ['qwen3-coder:30b', 'qwen2:7b']
+                        def baseUrl = (OLLAMA_BASE_URL ?: 'http://host.docker.internal:11434').trim()
+                        if (!baseUrl) {
+                            return defaultModels
+                        }
+
+                        try {
+                            def apiUrl = baseUrl.endsWith('/') ? "${baseUrl}api/tags" : "${baseUrl}/api/tags"
+                            def connection = new URL(apiUrl).openConnection()
+                            connection.setConnectTimeout(3000)
+                            connection.setReadTimeout(5000)
+                            def payload = new JsonSlurperClassic().parse(connection.getInputStream().newReader('UTF-8'))
+                            def models = ((payload?.models ?: []) as List)
+                                .collect { it?.name?.toString() }
+                                .findAll { it }
+                                .unique()
+                                .sort()
+                            return models ?: defaultModels
+                        } catch (Throwable ignored) {
+                            // UI 렌더링 시점 네트워크/권한 이슈가 있어도 최소 선택지는 노출합니다.
+                            return defaultModels
+                        }
+                    '''
+                ]
+            ]
+        ],
+        [$class: 'StringParameterDefinition', name: 'ANSWER_RELEVANCY_THRESHOLD', defaultValue: '0.7', description: '답변 관련성 합격 기준(0~1). 초보자 권장: 0.7, 엄격 평가: 0.8'],
+        [$class: 'StringParameterDefinition', name: 'GOLDEN_CSV_PATH', defaultValue: '/var/knowledges/eval/data/golden.csv', description: '시험지 CSV 경로. 예: /var/knowledges/eval/data/golden.csv'],
+        [$class: 'FileParameterDefinition', name: 'UPLOADED_GOLDEN_DATASET', description: '(선택) 내 PC의 golden.csv 업로드. 업로드하면 GOLDEN_CSV_PATH 위치로 덮어쓰기']
+    ])
+])
+
+pipeline {
+    agent any
+    environment {
+        LANGFUSE_HOST = 'http://host.docker.internal:3000'
+        PYTHONPATH = '/var/jenkins_home/scripts/eval_runner'
+        REPORT_ROOT_DIR = '/var/knowledges/eval/reports'
+        REPORT_DIR = "${REPORT_ROOT_DIR}/build-${BUILD_NUMBER}"
+    }
+    stages {
+        stage('1. 시험지(Golden Dataset) 준비') {
+            steps {
+                script {
+                    sh """
+                    mkdir -p "\$(dirname '${params.GOLDEN_CSV_PATH}')"
+                    mkdir -p '${env.REPORT_ROOT_DIR}'
+                    mkdir -p '${env.REPORT_DIR}'
+                    """
+                    if (params.UPLOADED_GOLDEN_DATASET?.trim()) {
+                        sh """
+                        cp "${env.UPLOADED_GOLDEN_DATASET}" "${params.GOLDEN_CSV_PATH}"
+                        """
+                        echo "Uploaded dataset has been copied to ${params.GOLDEN_CSV_PATH}"
+                    } else {
+                        echo "Using existing dataset at ${params.GOLDEN_CSV_PATH}"
+                    }
+                }
+            }
+        }
+        stage('1-1. Judge Model 검증') {
+            steps {
+                withEnv([
+                    "OLLAMA_BASE_URL=${params.OLLAMA_BASE_URL}",
+                    "JUDGE_MODEL=${params.JUDGE_MODEL ?: ''}",
+                ]) {
+                    sh '''
+                    set -eu
+                    # 입력한 JUDGE_MODEL이 실제 Ollama 설치 목록에 있는지 먼저 검증합니다.
+                    NORMALIZED_OLLAMA_BASE_URL="$(printf '%s' "$OLLAMA_BASE_URL" | sed 's:/*$::')"
+                    TAGS_URL="$NORMALIZED_OLLAMA_BASE_URL/api/tags"
+                    TMP_JSON="$(mktemp)"
+                    EFFECTIVE_MODEL_FILE=".effective_judge_model"
+                    trap 'rm -f "$TMP_JSON"' EXIT
+
+                    curl -fsSL "$TAGS_URL" -o "$TMP_JSON"
+
+                    echo "--------------------------------------------------"
+                    echo "Installed Ollama models:"
+                    python3 - "$TMP_JSON" "${JUDGE_MODEL:-}" "$EFFECTIVE_MODEL_FILE" <<'PY'
+import json
+import sys
+
+payload_path, selected_model, output_path = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
+with open(payload_path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh) or {}
+
+models = sorted({model.get("name") for model in payload.get("models", []) if model.get("name")})
+for model in models:
+    print(f" - {model}")
+
+if not models:
+    raise SystemExit("No Ollama models were returned from /api/tags.")
+
+if selected_model:
+    if selected_model not in models:
+        raise SystemExit(
+            f"Selected JUDGE_MODEL '{selected_model}' is not installed. "
+            f"Choose one of: {', '.join(models)}"
+        )
+    effective_model = selected_model
+else:
+    preferred = ["qwen3-coder:30b", "qwen2:7b"]
+    effective_model = next((m for m in preferred if m in models), models[0])
+    print("JUDGE_MODEL was empty. Auto-selected installed model:", effective_model)
+
+with open(output_path, "w", encoding="utf-8") as fh:
+    fh.write(effective_model)
+
+print("--------------------------------------------------")
+print(f"Selected judge model confirmed: {effective_model}")
+PY
+                    '''
+                }
+            }
+        }
+        stage('1-2. Target URL 연결 검증') {
+            steps {
+                withEnv([
+                    "TARGET_URL=${params.TARGET_URL}",
+                    "TARGET_TYPE=${params.TARGET_TYPE}",
+                    "TARGET_MODE=${params.TARGET_MODE}",
+                    "OLLAMA_BASE_URL=${params.OLLAMA_BASE_URL}",
+                    "OPENAI_BASE_URL=${params.OPENAI_BASE_URL}",
+                    "OPENAI_MODEL=${params.OPENAI_MODEL}",
+                    "GEMINI_BASE_URL=${params.GEMINI_BASE_URL}",
+                    "GEMINI_MODEL=${params.GEMINI_MODEL}",
+                    "GEMINI_MIN_INTERVAL_SEC=${params.GEMINI_MIN_INTERVAL_SEC}",
+                    "GEMINI_MAX_RETRIES=${params.GEMINI_MAX_RETRIES}",
+                    "GEMINI_RETRY_BASE_SEC=${params.GEMINI_RETRY_BASE_SEC}",
+                    "GEMINI_RETRY_MAX_SEC=${params.GEMINI_RETRY_MAX_SEC}",
+                    "JUDGE_MODEL=${params.JUDGE_MODEL ?: ''}",
+                    "REPORT_DIR=${env.REPORT_DIR}",
+                ]) {
+                    sh '''
+                    set +x
+                    set -eu
+                    EFFECTIVE_TARGET_URL="$TARGET_URL"
+                    WRAPPER_PID_FILE=".wrapper_pid"
+                    EFFECTIVE_TARGET_URL_FILE=".effective_target_url"
+
+                    # 이전 빌드 잔여 파일 정리
+                    rm -f "$EFFECTIVE_TARGET_URL_FILE"
+
+                    case "$TARGET_MODE" in
+                        local_ollama_wrapper)
+                            if [ "$TARGET_TYPE" != "http" ]; then
+                                echo "TARGET_MODE=local_ollama_wrapper is only supported when TARGET_TYPE=http"
+                                exit 2
+                            fi
+
+                            EFFECTIVE_JUDGE_MODEL="${JUDGE_MODEL:-}"
+                            if [ -f .effective_judge_model ]; then
+                                EFFECTIVE_JUDGE_MODEL="$(cat .effective_judge_model)"
+                            fi
+                            if [ -z "$EFFECTIVE_JUDGE_MODEL" ]; then
+                                echo "Cannot start wrapper: effective judge model is empty."
+                                exit 2
+                            fi
+
+                            if [ -f "$WRAPPER_PID_FILE" ]; then
+                                OLD_PID="$(cat "$WRAPPER_PID_FILE" || true)"
+                                if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                                    kill "$OLD_PID" 2>/dev/null || true
+                                    sleep 1
+                                    kill -9 "$OLD_PID" 2>/dev/null || true
+                                fi
+                                rm -f "$WRAPPER_PID_FILE"
+                            fi
+
+                            echo "Auto-managing local Ollama wrapper"
+                            nohup env \
+                                OLLAMA_WRAPPER_HOST=0.0.0.0 \
+                                OLLAMA_WRAPPER_PORT=8000 \
+                                OLLAMA_BASE_URL="$OLLAMA_BASE_URL" \
+                                OLLAMA_MODEL="$EFFECTIVE_JUDGE_MODEL" \
+                                python3 /var/jenkins_home/scripts/eval_runner/ollama_wrapper_api.py \
+                                > "$REPORT_DIR/wrapper.log" 2>&1 &
+                            WRAPPER_PID="$!"
+                            echo "$WRAPPER_PID" > "$WRAPPER_PID_FILE"
+
+                            READY="false"
+                            for _ in $(seq 1 20); do
+                                if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+                                    READY="true"
+                                    break
+                                fi
+                                sleep 1
+                            done
+
+                            if [ "$READY" != "true" ]; then
+                                echo "Wrapper startup failed. See $REPORT_DIR/wrapper.log"
+                                tail -n 100 "$REPORT_DIR/wrapper.log" || true
+                                exit 1
+                            fi
+
+                            EFFECTIVE_TARGET_URL="http://127.0.0.1:8000/invoke"
+                            echo "Wrapper started (pid=$WRAPPER_PID), effective TARGET_URL=$EFFECTIVE_TARGET_URL"
+                            ;;
+                        openai_wrapper)
+                            if [ "$TARGET_TYPE" != "http" ]; then
+                                echo "TARGET_MODE=openai_wrapper is only supported when TARGET_TYPE=http"
+                                exit 2
+                            fi
+
+                            EFFECTIVE_OPENAI_API_KEY="${OPENAI_API_KEY:-${API_KEY:-}}"
+                            if [ -z "$EFFECTIVE_OPENAI_API_KEY" ]; then
+                                echo "Cannot start openai_wrapper: OPENAI_API_KEY (or API_KEY fallback) is empty."
+                                exit 2
+                            fi
+
+                            if [ -f "$WRAPPER_PID_FILE" ]; then
+                                OLD_PID="$(cat "$WRAPPER_PID_FILE" || true)"
+                                if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                                    kill "$OLD_PID" 2>/dev/null || true
+                                    sleep 1
+                                    kill -9 "$OLD_PID" 2>/dev/null || true
+                                fi
+                                rm -f "$WRAPPER_PID_FILE"
+                            fi
+
+                            echo "Auto-managing OpenAI wrapper"
+                            nohup env \
+                                OPENAI_WRAPPER_HOST=0.0.0.0 \
+                                OPENAI_WRAPPER_PORT=8000 \
+                                OPENAI_BASE_URL="$OPENAI_BASE_URL" \
+                                OPENAI_MODEL="$OPENAI_MODEL" \
+                                OPENAI_API_KEY="$EFFECTIVE_OPENAI_API_KEY" \
+                                python3 /var/jenkins_home/scripts/eval_runner/openai_wrapper_api.py \
+                                > "$REPORT_DIR/wrapper.log" 2>&1 &
+                            WRAPPER_PID="$!"
+                            echo "$WRAPPER_PID" > "$WRAPPER_PID_FILE"
+
+                            READY="false"
+                            for _ in $(seq 1 20); do
+                                if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+                                    READY="true"
+                                    break
+                                fi
+                                sleep 1
+                            done
+
+                            if [ "$READY" != "true" ]; then
+                                echo "OpenAI wrapper startup failed. See $REPORT_DIR/wrapper.log"
+                                tail -n 100 "$REPORT_DIR/wrapper.log" || true
+                                exit 1
+                            fi
+
+                            EFFECTIVE_TARGET_URL="http://127.0.0.1:8000/invoke"
+                            echo "OpenAI wrapper started (pid=$WRAPPER_PID), effective TARGET_URL=$EFFECTIVE_TARGET_URL"
+                            ;;
+                        gemini_wrapper)
+                            if [ "$TARGET_TYPE" != "http" ]; then
+                                echo "TARGET_MODE=gemini_wrapper is only supported when TARGET_TYPE=http"
+                                exit 2
+                            fi
+
+                            EFFECTIVE_GEMINI_API_KEY="${GEMINI_API_KEY:-${API_KEY:-}}"
+                            if [ -z "$EFFECTIVE_GEMINI_API_KEY" ]; then
+                                echo "Cannot start gemini_wrapper: GEMINI_API_KEY (or API_KEY fallback) is empty."
+                                exit 2
+                            fi
+
+                            if [ -f "$WRAPPER_PID_FILE" ]; then
+                                OLD_PID="$(cat "$WRAPPER_PID_FILE" || true)"
+                                if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                                    kill "$OLD_PID" 2>/dev/null || true
+                                    sleep 1
+                                    kill -9 "$OLD_PID" 2>/dev/null || true
+                                fi
+                                rm -f "$WRAPPER_PID_FILE"
+                            fi
+
+                            echo "Auto-managing Gemini wrapper"
+                            nohup env \
+                                GEMINI_WRAPPER_HOST=0.0.0.0 \
+                                GEMINI_WRAPPER_PORT=8000 \
+                                GEMINI_BASE_URL="$GEMINI_BASE_URL" \
+                                GEMINI_MODEL="$GEMINI_MODEL" \
+                                GEMINI_API_KEY="$EFFECTIVE_GEMINI_API_KEY" \
+                                GEMINI_MIN_INTERVAL_SEC="$GEMINI_MIN_INTERVAL_SEC" \
+                                GEMINI_MAX_RETRIES="$GEMINI_MAX_RETRIES" \
+                                GEMINI_RETRY_BASE_SEC="$GEMINI_RETRY_BASE_SEC" \
+                                GEMINI_RETRY_MAX_SEC="$GEMINI_RETRY_MAX_SEC" \
+                                python3 /var/jenkins_home/scripts/eval_runner/gemini_wrapper_api.py \
+                                > "$REPORT_DIR/wrapper.log" 2>&1 &
+                            WRAPPER_PID="$!"
+                            echo "$WRAPPER_PID" > "$WRAPPER_PID_FILE"
+
+                            READY="false"
+                            for _ in $(seq 1 20); do
+                                if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+                                    READY="true"
+                                    break
+                                fi
+                                sleep 1
+                            done
+
+                            if [ "$READY" != "true" ]; then
+                                echo "Gemini wrapper startup failed. See $REPORT_DIR/wrapper.log"
+                                tail -n 100 "$REPORT_DIR/wrapper.log" || true
+                                exit 1
+                            fi
+
+                            EFFECTIVE_TARGET_URL="http://127.0.0.1:8000/invoke"
+                            echo "Gemini wrapper started (pid=$WRAPPER_PID), effective TARGET_URL=$EFFECTIVE_TARGET_URL"
+                            ;;
+                        direct)
+                            if [ -z "$TARGET_URL" ]; then
+                                echo "TARGET_MODE=direct requires TARGET_URL."
+                                exit 2
+                            fi
+                            echo "Direct target mode: $TARGET_URL"
+                            ;;
+                        *)
+                            echo "Unsupported TARGET_MODE: $TARGET_MODE"
+                            exit 2
+                            ;;
+                    esac
+
+                    echo "$EFFECTIVE_TARGET_URL" > "$EFFECTIVE_TARGET_URL_FILE"
+
+                    # 평가 시작 전에 Jenkins 컨테이너에서 대상 엔드포인트 접근 가능 여부를 먼저 확인합니다.
+                    export EFFECTIVE_TARGET_URL
+                    python3 - <<'PY'
+import os
+import socket
+from urllib.parse import urlparse
+
+import requests
+
+target_url = os.environ.get("EFFECTIVE_TARGET_URL", "").strip()
+target_type = os.environ.get("TARGET_TYPE", "http").strip()
+target_mode = os.environ.get("TARGET_MODE", "").strip()
+
+if not target_url:
+    raise SystemExit("EFFECTIVE_TARGET_URL is empty.")
+
+parsed = urlparse(target_url)
+host = parsed.hostname or ""
+port = parsed.port or (443 if parsed.scheme == "https" else 80)
+if not host:
+    raise SystemExit(f"Invalid TARGET_URL: {target_url}")
+
+# host가 IPv4/IPv6를 동시에 반환할 때 requests 예외 메시지가 마지막 주소 오류만 보여줄 수 있어
+# 주소별 TCP 연결 결과를 먼저 수집해 실제 네트워크 상태를 명확히 출력합니다.
+addr_results = []
+tcp_reachable = False
+for family, socktype, proto, _, sockaddr in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+    sock = socket.socket(family, socktype, proto)
+    sock.settimeout(2)
+    try:
+        sock.connect(sockaddr)
+        addr_results.append(f"OK   {sockaddr}")
+        tcp_reachable = True
+    except OSError as exc:
+        addr_results.append(f"FAIL {sockaddr} -> {exc}")
+    finally:
+        sock.close()
+
+print("Address connectivity details:")
+for row in addr_results:
+    print(f" - {row}")
+
+if not tcp_reachable:
+    raise SystemExit(
+        "Cannot reach TARGET_URL from Jenkins container.\\n"
+        f" - TARGET_URL: {target_url}\\n"
+        f" - host: {host}, port: {port}\\n"
+        "Check target service is running and bound to 0.0.0.0, and verify host.docker.internal routing."
+    )
+
+try:
+    wrapper_modes = {"local_ollama_wrapper", "openai_wrapper", "gemini_wrapper"}
+    if target_type == "http":
+        if target_mode in wrapper_modes:
+            # wrapper 모드에서는 먼저 로컬 wrapper 프로세스 상태를 확인합니다.
+            parsed_health = urlparse(target_url)
+            health_url = f"{parsed_health.scheme}://{parsed_health.netloc}/health"
+            health_response = requests.get(health_url, timeout=5)
+            print(f"Wrapper health probe response: HTTP {health_response.status_code}")
+            if health_response.status_code >= 400:
+                compact_body = " ".join((health_response.text or "").split())
+                raise SystemExit(
+                    f"{target_mode} health probe failed with HTTP {health_response.status_code}. "
+                    f"body={compact_body[:500]}"
+                )
+
+            # 이후 실제 invoke를 1회 호출해 upstream LLM 인증/쿼터 문제를 pytest 전에 빠르게 감지합니다.
+            response = requests.post(target_url, json={"input": "ping"}, timeout=20)
+            print(f"Wrapper invoke probe response: HTTP {response.status_code}")
+        else:
+            # direct 모드에서는 인증/스키마 오류와 무관하게 엔드포인트 응답성만 확인합니다.
+            response = requests.post(target_url, json={"input": "ping"}, timeout=5)
+    else:
+        response = requests.get(target_url, timeout=5)
+    print(f"TARGET_URL probe response: HTTP {response.status_code}")
+    if target_mode in wrapper_modes and response.status_code >= 400:
+        compact_body = " ".join((response.text or "").split())
+        raise SystemExit(
+            f"{target_mode} probe failed with HTTP {response.status_code}. "
+            f"body={compact_body[:500]}"
+        )
+except requests.RequestException as exc:
+    raise SystemExit(f"TARGET_URL TCP reachable, but probe request failed: {exc}")
+PY
+                    '''
+                }
+            }
+        }
+        stage('2. 파이썬 평가 실행 (Pytest)') {
+            steps {
+                script {
+                    // Langfuse 유무와 무관하게 동일한 평가 명령을 재사용하기 위한 클로저입니다.
+                    def runEval = { ->
+                        sh """
+                        set +x
+                        echo "=================================================="
+                        echo "             STARTING EVALUATION RUN              "
+                        echo "=================================================="
+                        echo "TARGET_MODE: ${params.TARGET_MODE}"
+                        echo "TARGET_TYPE: ${params.TARGET_TYPE}"
+                        EFFECTIVE_TARGET_URL="${params.TARGET_URL}"
+                        if [ -f .effective_target_url ]; then
+                          EFFECTIVE_TARGET_URL="\$(cat .effective_target_url)"
+                        fi
+                        echo "TARGET_URL: \$EFFECTIVE_TARGET_URL"
+                        EFFECTIVE_JUDGE_MODEL="${params.JUDGE_MODEL ?: ''}"
+                        if [ -f .effective_judge_model ]; then
+                          EFFECTIVE_JUDGE_MODEL="\$(cat .effective_judge_model)"
+                        fi
+                        if [ -z "\$EFFECTIVE_JUDGE_MODEL" ]; then
+                          echo "JUDGE_MODEL is empty and no auto-selected model was found."
+                          exit 2
+                        fi
+                        echo "JUDGE_MODEL: \$EFFECTIVE_JUDGE_MODEL"
+                        echo "OLLAMA_BASE_URL: ${params.OLLAMA_BASE_URL}"
+                        if [ "${params.TARGET_MODE}" = "openai_wrapper" ]; then
+                          echo "OPENAI_BASE_URL: ${params.OPENAI_BASE_URL}"
+                          echo "OPENAI_MODEL: ${params.OPENAI_MODEL}"
+                        fi
+                        if [ "${params.TARGET_MODE}" = "gemini_wrapper" ]; then
+                          echo "GEMINI_BASE_URL: ${params.GEMINI_BASE_URL}"
+                          echo "GEMINI_MODEL: ${params.GEMINI_MODEL}"
+                          echo "GEMINI_MIN_INTERVAL_SEC: ${params.GEMINI_MIN_INTERVAL_SEC}"
+                          echo "GEMINI_MAX_RETRIES: ${params.GEMINI_MAX_RETRIES}"
+                          echo "GEMINI_RETRY_BASE_SEC: ${params.GEMINI_RETRY_BASE_SEC}"
+                          echo "GEMINI_RETRY_MAX_SEC: ${params.GEMINI_RETRY_MAX_SEC}"
+                        fi
+                        echo "ANSWER_RELEVANCY_THRESHOLD: ${params.ANSWER_RELEVANCY_THRESHOLD}"
+                        echo "GOLDEN_CSV_PATH: ${params.GOLDEN_CSV_PATH}"
+                        echo "REPORT_DIR: ${env.REPORT_DIR}"
+                        echo "--------------------------------------------------"
+                        export TARGET_URL="\$EFFECTIVE_TARGET_URL"
+                        export TARGET_TYPE='${params.TARGET_TYPE}'
+                        export API_KEY="\${API_KEY:-}"
+                        export TARGET_AUTH_HEADER="\${TARGET_AUTH_HEADER:-}"
+                        export JUDGE_MODEL="\$EFFECTIVE_JUDGE_MODEL"
+                        export OLLAMA_BASE_URL='${params.OLLAMA_BASE_URL}'
+                        export ANSWER_RELEVANCY_THRESHOLD='${params.ANSWER_RELEVANCY_THRESHOLD}'
+                        export GOLDEN_CSV_PATH='${params.GOLDEN_CSV_PATH}'
+                        export REPORT_DIR='${env.REPORT_DIR}'
+                        export PYTHONPATH='${env.PYTHONPATH}'
+                        set -x
+
+                        python3 -m pytest /var/jenkins_home/scripts/eval_runner/tests/test_runner.py \
+                          -n 1 \
+                          --junitxml=${env.REPORT_DIR}/results.xml
+                        """
+                    }
+
+                    try {
+                        withCredentials([
+                            string(credentialsId: 'langfuse-public-key', variable: 'LANGFUSE_PUBLIC_KEY'),
+                            string(credentialsId: 'langfuse-secret-key', variable: 'LANGFUSE_SECRET_KEY')
+                        ]) {
+                            runEval()
+                        }
+                    } catch (err) {
+                        echo "Langfuse credentials not found or unavailable. Continuing evaluation without Langfuse tracing."
+                        withEnv(['LANGFUSE_PUBLIC_KEY=', 'LANGFUSE_SECRET_KEY=']) {
+                            runEval()
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                // 자동 기동한 wrapper 프로세스가 남지 않도록 항상 종료를 시도합니다.
+                sh '''
+                if [ -f .wrapper_pid ]; then
+                    WRAPPER_PID="$(cat .wrapper_pid || true)"
+                    if [ -n "${WRAPPER_PID:-}" ] && kill -0 "$WRAPPER_PID" 2>/dev/null; then
+                        kill "$WRAPPER_PID" 2>/dev/null || true
+                        sleep 1
+                        kill -9 "$WRAPPER_PID" 2>/dev/null || true
+                    fi
+                    rm -f .wrapper_pid
+                fi
+                rm -f .effective_target_url .effective_judge_model
+                '''
+
+                // 실행 단계에서 이미 REPORT_DIR=.../build-<번호>로 저장되므로,
+                // 아티팩트만 워크스페이스로 복사해 보존합니다.
+                def buildFolder = "build-${env.BUILD_NUMBER ?: 'manual'}"
+                def artifactDir = "eval-reports/${buildFolder}"
+                sh """
+                mkdir -p '${artifactDir}'
+                find '${env.REPORT_DIR}' -maxdepth 1 -type f -exec cp -f {} '${artifactDir}/' \\;
+                """
+                junit testResults: "${artifactDir}/results.xml", allowEmptyResults: true
+                archiveArtifacts artifacts: "${artifactDir}/*", allowEmptyArchive: true
+
+                def safeBuildTag = (env.BUILD_TAG ?: env.BUILD_ID ?: 'manual').replaceAll('[^a-zA-Z0-9_.-]', '')
+                def publicLangfuseUrl = "${env.LANGFUSE_HOST}/project/traces?filter=tags%3D${safeBuildTag}"
+                def summaryUrl = env.BUILD_URL ? "${env.BUILD_URL}artifact/${artifactDir}/summary.html" : "${artifactDir}/summary.html"
+                echo "Evaluation summary: ${summaryUrl}"
+                echo "Evaluation raw json: ${env.BUILD_URL ?: ''}artifact/${artifactDir}/summary.json"
+                echo "Report build folder: ${env.REPORT_DIR}"
+
+                try {
+                    publishHTML(
+                        target: [
+                            reportName: "AI Eval Summary (${buildFolder})",
+                            reportDir: artifactDir,
+                            reportFiles: 'summary.html',
+                            keepAll: true,
+                            alwaysLinkToLastBuild: true,
+                            allowMissing: true
+                        ]
+                    )
+                } catch (ignored) {
+                    echo "publishHTML plugin is unavailable. Open summary via Artifacts."
+                }
+
+                // Build 화면 description에 직접 링크를 남깁니다.
+                // (Markup Formatter 설정에 따라 HTML이 비활성화된 경우 URL 텍스트로 fallback)
+                def summaryLinkHtml = "<a href='${summaryUrl}'>summary.html</a>"
+                def langfuseLinkHtml = "<a href='${publicLangfuseUrl}'>langfuse</a>"
+                try {
+                    currentBuild.description = "Summary: ${summaryLinkHtml} | Langfuse: ${langfuseLinkHtml}"
+                } catch (ignored) {
+                    currentBuild.description = "Summary: ${summaryUrl} | Langfuse: ${publicLangfuseUrl}"
+                }
+            }
+        }
+    }
+}

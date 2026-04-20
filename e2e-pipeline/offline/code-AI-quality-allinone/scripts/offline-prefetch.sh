@@ -3,24 +3,24 @@
 # TTC 4-Pipeline All-in-One — 오프라인 이미지 export 헬퍼
 #
 # 폐쇄망 빌드 전략: 온라인 머신에서 이미지를 빌드한 뒤 docker save 로 tarball
-# 을 만들고, 오프라인 머신에서 docker load 로 복원한다. 이 스크립트는 그 과정을
-# 자동화한다 (개별 pip wheel / npm tarball 캐싱 불필요).
+# 을 만들고, 오프라인 머신에서 docker load 로 복원한다.
+#
+# 빌드 컨텍스트: 이 폴더 자체 (자체 완결).
 #
 # Usage:
 #   bash scripts/offline-prefetch.sh --arch amd64  (WSL2/Linux)
 #   bash scripts/offline-prefetch.sh --arch arm64  (macOS Apple Silicon)
 #
-# 산출물: offline-assets/<arch>/ttc-allinone-<arch>-<tag>.tar.gz
+# 선행:
+#   bash scripts/download-plugins.sh   # 플러그인 바이너리 준비 (온라인)
 #
-# 오프라인 머신 복원:
-#   docker load -i offline-assets/<arch>/ttc-allinone-*.tar.gz
+# 산출물: offline-assets/<arch>/ttc-allinone-<arch>-<tag>.tar.gz
 # ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-DOCKERFILE_REL="e2e-pipeline/offline/code-AI-quality-allinone/Dockerfile"
-cd "$REPO_ROOT"
+ALLINONE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ALLINONE_DIR"
 
 ARCH="amd64"
 TAG="${TAG:-dev}"
@@ -40,30 +40,33 @@ case "$ARCH" in
 esac
 
 IMAGE="ttc-allinone:${ARCH}-${TAG}"
-OUT_DIR="e2e-pipeline/offline/code-AI-quality-allinone/offline-assets/${ARCH}"
+OUT_DIR="$ALLINONE_DIR/offline-assets/${ARCH}"
 OUT_FILE="${OUT_DIR}/ttc-allinone-${ARCH}-${TAG}.tar.gz"
 
 mkdir -p "$OUT_DIR"
 
 echo "[prefetch] arch=$ARCH tag=$TAG platform=$PLATFORM image=$IMAGE"
+echo "[prefetch] context=$ALLINONE_DIR"
 
-# 1. buildx 빌드 (멀티스테이지라 의존 이미지도 자동 pull)
+if [ ! -d "$ALLINONE_DIR/jenkins-plugins" ] || [ -z "$(ls -A "$ALLINONE_DIR/jenkins-plugins" 2>/dev/null)" ]; then
+    echo "[prefetch] 플러그인이 비어 있습니다. 먼저 bash scripts/download-plugins.sh 실행" >&2
+    exit 1
+fi
+
 docker buildx inspect ttc-allinone-builder >/dev/null 2>&1 || \
     docker buildx create --name ttc-allinone-builder --use
 
 docker buildx build \
     --builder ttc-allinone-builder \
     --platform "$PLATFORM" \
-    -f "$DOCKERFILE_REL" \
+    -f "$ALLINONE_DIR/Dockerfile" \
     -t "$IMAGE" \
     --load \
-    .
+    "$ALLINONE_DIR"
 
-# 2. docker save → gzip
 echo "[prefetch] saving to $OUT_FILE"
 docker save "$IMAGE" | gzip > "$OUT_FILE"
 
-# 3. 메타데이터 작성
 SIZE=$(du -h "$OUT_FILE" | cut -f1)
 SHA=$(sha256sum "$OUT_FILE" | cut -d' ' -f1)
 cat > "${OUT_DIR}/ttc-allinone-${ARCH}-${TAG}.meta" <<META

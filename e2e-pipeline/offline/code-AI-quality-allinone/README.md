@@ -63,28 +63,32 @@ docker compose -f docker-compose.{wsl2|mac}.yaml up -d
 
 ### WSL2 (Windows)
 ```bash
-# 레포 루트에서 (또는 allinone 폴더 내부에서)
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-wsl2.sh
-# → 이미지: ttc-allinone:wsl2-dev
+cd e2e-pipeline/offline/code-AI-quality-allinone
+bash scripts/download-plugins.sh      # 최초 1회 (온라인)
+bash scripts/build-wsl2.sh            # → 이미지: ttc-allinone:wsl2-dev
 ```
 
 ### macOS (Apple Silicon)
 ```bash
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-mac.sh
+cd e2e-pipeline/offline/code-AI-quality-allinone
+bash scripts/download-plugins.sh
+bash scripts/build-mac.sh
 # Intel Mac 또는 amd64 강제:
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-mac.sh --amd64
+bash scripts/build-mac.sh --amd64
 ```
 
 ### 오프라인 반출 (tarball)
-온라인 머신에서:
+온라인 머신에서 (**이 폴더 내부**에서 실행):
 ```bash
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/offline-prefetch.sh --arch amd64
-# → e2e-pipeline/offline/code-AI-quality-allinone/offline-assets/<arch>/ttc-allinone-*.tar.gz
+cd e2e-pipeline/offline/code-AI-quality-allinone
+bash scripts/download-plugins.sh               # 플러그인 바이너리 준비 (온라인)
+bash scripts/offline-prefetch.sh --arch amd64  # 빌드 + tarball 산출
+# → offline-assets/<arch>/ttc-allinone-*.tar.gz
 ```
 오프라인 머신:
 ```bash
-docker load -i e2e-pipeline/offline/code-AI-quality-allinone/offline-assets/amd64/ttc-allinone-amd64-dev.tar.gz
-docker pull gitlab/gitlab-ce:17.4.2-ce.0   # 미리 save/load 하거나 폐쇄망 레지스트리
+docker load -i offline-assets/amd64/ttc-allinone-amd64-dev.tar.gz
+docker pull gitlab/gitlab-ce:17.4.2-ce.0   # 별도로 save/load 하거나 폐쇄망 레지스트리
 ```
 
 ---
@@ -179,54 +183,79 @@ docker compose \
 ## 9. 파일 구성
 
 ```
-e2e-pipeline/offline/code-AI-quality-allinone/
-├── Dockerfile                              # 통합 이미지 정의 (빌드 컨텍스트=레포 루트)
+e2e-pipeline/offline/code-AI-quality-allinone/      ← 빌드 컨텍스트
+├── Dockerfile                              # 통합 이미지 정의
 ├── docker-compose.wsl2.yaml                # WSL2 + gitlab
 ├── docker-compose.mac.yaml                 # Mac + gitlab
 ├── docker-compose.e2e-bridge.yaml          # e2e-pipeline 네트워크 브리지 (override)
 ├── README.md                               # 본 문서
+├── requirements.txt                        # Python 기반 deps (playwright/deepeval 등)
+├── pipeline-scripts/                       # 파이프라인 1·3 Python 스크립트 스냅샷
+│   ├── repo_context_builder.py
+│   ├── doc_processor.py
+│   ├── sonar_issue_exporter.py
+│   ├── dify_sonar_issue_analyzer.py
+│   └── gitlab_issue_creator.py
+├── eval_runner/                            # 파이프라인 4 엔진 (스냅샷)
+├── jenkinsfiles/                           # 4개 Jenkins Pipeline 정의 (스냅샷)
+│   ├── DSCORE-TTC 코드 사전학습.jenkinsPipeline
+│   ├── DSCORE-TTC 코드 정적분석.jenkinsPipeline
+│   ├── DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록.jenkinsPipeline
+│   └── DSCORE-TTC AI평가.jenkinsPipeline
+├── jenkins-init/basic-security.groovy      # Jenkins 관리자 초기화
 └── scripts/
+    ├── download-plugins.sh                 # 빌드 전 플러그인 다운로드 (온라인)
     ├── supervisord.conf                    # 11개 프로세스 관리 (sonarqube 포함)
     ├── nginx.conf                          # Dify gateway (28081)
     ├── pg-init.sh                          # Postgres initdb (dify/dify_plugin/sonar)
     ├── entrypoint.sh                       # 컨테이너 진입점
     ├── provision.sh                        # 완전 자동 프로비저닝
-    ├── requirements-pipelines.txt          # 파이프라인 4 Python deps
-    ├── offline-prefetch.sh                 # 온라인→오프라인 이미지 tarball
+    ├── requirements-pipelines.txt          # 파이프라인 4 추가 deps
+    ├── offline-prefetch.sh                 # tarball 산출 (docker save)
     ├── build-wsl2.sh / build-mac.sh        # 빌드 헬퍼
     ├── run-wsl2.sh / run-mac.sh            # 기동 헬퍼
     ├── dify-assets/
     │   ├── sonar-analyzer-workflow.yaml    # 파이프라인 3 Workflow DSL
     │   └── code-context-dataset.json       # 파이프라인 1 Dataset 스펙
     └── jenkins-seed/                       # (future) JCasC seed
+
+# 빌드 시 생성 (gitignored)
+├── jenkins-plugin-manager.jar
+├── jenkins-plugins/
+├── dify-plugins/
+├── .plugins.txt
+└── offline-assets/
 ```
 
-## 10. 기존 자산 재사용 관계
+## 10. 자체 완결 구조
 
-통합 이미지는 상위 디렉터리의 자산을 COPY 만 하며 수정하지 않습니다:
-
-- `../playwright-allinone/requirements.txt` — Python 기본 deps (playwright/deepeval 등)
-- `../playwright-allinone/jenkins-plugins/` — Jenkins .hpi seed (**빌드 전 Playwright 이미지의 build.sh [1/4] 가 선행되어야 채워짐**)
-- `../playwright-allinone/dify-plugins/` — Dify .difypkg seed (**build.sh [2/4] 선행**)
-- `../../jenkins-init/basic-security.groovy` — admin 계정 초기화
-- 레포 루트의 각 `*.jenkinsPipeline`, `repo_context_builder.py` 등 — 원본 직접 참조
-
-### 임시 커플링 주의
-
-현재 이 이미지는 `playwright-allinone/` 의 플러그인 바이너리를 공유합니다. 따라서 빌드 순서:
+이 폴더는 **자체 완결**입니다. 폴더만 압축해서 다른 워크스테이션으로 옮겨도 두 명령으로 빌드 및 기동이 가능합니다:
 
 ```bash
-# 1. Playwright 이미지 [1/4]-[2/4] 단계로 jenkins-plugins/, dify-plugins/ 채움
-bash e2e-pipeline/offline/playwright-allinone/build.sh --redeploy --no-agent
-# (또는 빌드만 수행: 플러그인 다운로드 단계만 완료되면 충분)
-
-# 2. Code & AI Quality 이미지 빌드
-bash e2e-pipeline/offline/code-AI-quality-allinone/scripts/build-wsl2.sh
+bash scripts/download-plugins.sh   # 온라인 필요 (Jenkins + Dify 플러그인 다운로드)
+bash scripts/build-wsl2.sh         # (또는 build-mac.sh) — 오프라인 빌드 가능
 ```
 
-완전 격리(자체 플러그인 다운로드 스크립트 도입)는 후속 작업 예정.
+### 내재화된 상위 의존 자산 (스냅샷)
 
-기존 **`docker-compose.yaml`** (루트 / e2e-pipeline) 은 **수정되지 않습니다**. 세 스택 병렬 공존 가능.
+| 자산 | 출처 (레포 원본) | 폴더 내 위치 | 비고 |
+|------|----------------|--------------|------|
+| 파이프라인 Python 스크립트 5개 | 레포 루트 | `pipeline-scripts/` | 레포 원본 수정 시 수동 동기화 |
+| `eval_runner/` | 레포 루트 | `eval_runner/` | 동일 |
+| Jenkinsfile 4개 | 레포 루트 | `jenkinsfiles/` | 동일 |
+| `jenkins-init/basic-security.groovy` | `e2e-pipeline/jenkins-init/` | `jenkins-init/` | 동일 |
+| `requirements.txt` | `../playwright-allinone/requirements.txt` | `requirements.txt` | 파이프라인 1-4 공통 Python 기반 |
+
+### 빌드 시 생성되는 바이너리 (gitignored)
+
+| 산출물 | 생성 스크립트 | 크기 |
+|--------|--------------|------|
+| `jenkins-plugin-manager.jar` | `scripts/download-plugins.sh` | ~7 MB |
+| `jenkins-plugins/*.jpi` | 위 스크립트 [1/2] | ~40 MB |
+| `dify-plugins/*.difypkg` | 위 스크립트 [2/2] | ~1 MB |
+| `offline-assets/<arch>/*.tar.gz` | `scripts/offline-prefetch.sh` | ~8 GB |
+
+기존 **`docker-compose.yaml`** (루트 / e2e-pipeline) 과 **`playwright-allinone/` 폴더**는 **수정되지 않습니다**. 세 스택 병렬 공존 가능.
 
 ---
 
