@@ -7,7 +7,7 @@
 #   2. 코드 정적분석           — SonarQube + SonarScanner
 #   3. 정적분석 결과분석+이슈등록 — sonar_issue_exporter / dify_sonar_issue_analyzer
 #                              / gitlab_issue_creator
-#   4. AI 평가                — eval_runner + zero_touch_qa (Playwright)
+#   4. AI 평가                — eval_runner (Ollama judge + Playwright local)
 #
 # 기존 e2e-pipeline/offline/Dockerfile.allinone (zero_touch_qa 전용) 을 베이스로
 # SonarQube / SonarScanner / 파이프라인 1~3 Python 스크립트를 추가. 기존 이미지와
@@ -111,8 +111,8 @@ RUN sed -i 's|"plugin_unique_identifier": plugin_unique_identifier|"PluginUnique
     grep -c 'PluginUniqueIdentifier' /opt/dify-api/api/core/plugin/impl/plugin.py
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Python 의존성 — zero_touch_qa / eval_runner / 파이프라인 1~3 공통
-# (requirements-allinone.txt 는 기존 zero_touch_qa 용, 동일하게 재사용)
+# Python 의존성 — eval_runner / 파이프라인 1~3 공통
+# (requirements-allinone.txt 는 기존 자산 재사용: requests, playwright, deepeval 등)
 # ─────────────────────────────────────────────────────────────────────────────
 COPY e2e-pipeline/offline/requirements-allinone.txt /tmp/requirements-allinone.txt
 COPY scripts/requirements-pipelines.txt             /tmp/requirements-pipelines.txt
@@ -126,7 +126,7 @@ RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
 # Playwright Chromium
 RUN python3 -m playwright install --with-deps chromium
 
-# zero_touch_qa 전용 venv (Jenkins Pipeline 기존 계약 유지)
+# eval_runner 용 venv (TARGET_TYPE=ui_chat 일 때 browser_adapter 가 참조 가능)
 RUN /usr/bin/python3 -m venv --system-site-packages /opt/qa-venv && \
     /opt/qa-venv/bin/python -c "import requests, playwright, PIL; print('qa-venv deps OK')"
 
@@ -217,7 +217,9 @@ COPY scripts/supervisord.allinone.conf /etc/supervisor/supervisord.conf
 COPY scripts/nginx.allinone.conf       /etc/nginx/nginx.conf
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 파이프라인 1~3 Python 스크립트 + 파이프라인 4 zero_touch_qa/eval_runner
+# 파이프라인 1~3 Python 스크립트 + 파이프라인 4 eval_runner
+# (zero_touch_qa / e2e-pipeline/dify-chatflow.yaml 은 이 이미지에서 제거됨 —
+#  ZeroTouch-QA 는 기존 e2e-pipeline 스택이 담당)
 # ─────────────────────────────────────────────────────────────────────────────
 RUN mkdir -p /opt/pipeline-scripts
 COPY repo_context_builder.py           /opt/pipeline-scripts/
@@ -225,24 +227,43 @@ COPY doc_processor.py                  /opt/pipeline-scripts/
 COPY sonar_issue_exporter.py           /opt/pipeline-scripts/
 COPY dify_sonar_issue_analyzer.py      /opt/pipeline-scripts/
 COPY gitlab_issue_creator.py           /opt/pipeline-scripts/
-COPY zero_touch_qa                     /opt/zero_touch_qa
 COPY eval_runner                       /opt/eval_runner
-COPY e2e-pipeline/dify-chatflow.yaml   /opt/dify-chatflow.yaml
 
-# SCRIPTS_HOME 심볼릭 (기존 DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline 계약)
+# SCRIPTS_HOME 심볼릭 (eval_runner 전용)
 RUN mkdir -p /opt/scripts-home && \
-    ln -sfn /opt/zero_touch_qa /opt/scripts-home/zero_touch_qa && \
-    ln -sfn /opt/eval_runner   /opt/scripts-home/eval_runner
+    ln -sfn /opt/eval_runner /opt/scripts-home/eval_runner
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4개 Jenkinsfile + Jenkins 관리자 init.groovy seed
+# 4개 Jenkinsfile seed + URL/자격 치환
+# (원본은 기존 스택(compose 서비스명 api/sonarqube/gitlab)을 가정하므로
+#  통합 이미지 내부 주소(127.0.0.1) 로 치환. GitLab 만 별도 compose 서비스
+#  `gitlab` 을 쓰므로 호스트 그대로 유지, 포트는 기본 80 으로 정규화.
+#  하드코딩된 GitLab PAT 은 빈 문자열로 치환 — provision 단계에서 발급된
+#  PAT 을 Jenkins Credentials 'gitlab-pat' 으로 주입하고, withCredentials
+#  래핑은 Phase 6 에서 추가)
 # ─────────────────────────────────────────────────────────────────────────────
 COPY "DSCORE-TTC 코드 사전학습.jenkinsPipeline" \
      "DSCORE-TTC 코드 정적분석.jenkinsPipeline" \
      "DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록.jenkinsPipeline" \
+     "DSCORE-TTC AI평가.jenkinsPipeline" \
      /opt/jenkinsfiles/
-COPY e2e-pipeline/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline /opt/jenkinsfiles/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline
 COPY scripts/jenkins-seed/ /opt/seed/jenkins-home/
+
+RUN set -eux; \
+    cd /opt/jenkinsfiles; \
+    # Dify API 내부 주소 (컨테이너 local PG/Redis 옆에서 돌고 있음)
+    sed -i 's|http://api:5001|http://127.0.0.1:5001|g' *.jenkinsPipeline; \
+    # SonarQube 도 동일 컨테이너 내부
+    sed -i 's|http://sonarqube:9000|http://127.0.0.1:9000|g' *.jenkinsPipeline; \
+    # GitLab 은 별도 compose 서비스. 기본 external_url 80 포트 정규화
+    sed -i 's|http://gitlab:8929|http://gitlab:80|g' *.jenkinsPipeline; \
+    # 하드코딩된 PAT 제거 — Jenkins Credentials 로 이관 예정 (Phase 6)
+    sed -i "s|'glpat-M_J3Ze9BeZsbFcHd6GkuO286MQp1OjEH.01.0w013cs97'|''|g" *.jenkinsPipeline; \
+    sed -i 's|"glpat-M_J3Ze9BeZsbFcHd6GkuO286MQp1OjEH.01.0w013cs97"|""|g' *.jenkinsPipeline; \
+    if grep -l 'glpat-' *.jenkinsPipeline 2>/dev/null; then \
+        echo "[ERROR] GitLab PAT 잔존 — 빌드 중단" >&2; exit 1; \
+    fi; \
+    echo "Jenkinsfile URL/PAT 치환 완료"
 
 # jenkins-init groovy 스크립트 (관리자 계정 등)도 기존 자산 재사용
 COPY e2e-pipeline/jenkins-init /opt/jenkins-init

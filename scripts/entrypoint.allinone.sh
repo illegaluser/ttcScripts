@@ -146,7 +146,6 @@ if [ ! -f "$DATA/.app_provisioned" ]; then
     export SONAR_URL="http://127.0.0.1:9000"
     export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
     export OFFLINE_DIFY_PLUGIN_DIR="$SEED/dify-plugins"
-    export OFFLINE_DIFY_CHATFLOW_YAML="/opt/dify-chatflow.yaml"
     export OFFLINE_JENKINSFILE_DIR="/opt/jenkinsfiles"
 
     if bash /opt/provision.allinone.sh; then

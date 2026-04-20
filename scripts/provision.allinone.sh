@@ -7,7 +7,7 @@
 #
 # 현재 자동화 범위 (Phase 1 — MVP):
 #   - Jenkins 4개 Job 등록 (DSCORE-TTC 코드 사전학습, 정적분석, 결과분석/이슈등록,
-#     ZeroTouch-QA-Docker)
+#     AI평가)
 #
 # 수동으로 수행할 것 (별도 README 섹션에 명시):
 #   - Dify 첫 관리자 계정 생성 (http://localhost:28081/install)
@@ -119,7 +119,7 @@ log "4개 Pipeline Job 등록 시도..."
 create_pipeline_job "DSCORE-TTC-코드-사전학습"                          "$JENKINSFILE_DIR/DSCORE-TTC 코드 사전학습.jenkinsPipeline" || true
 create_pipeline_job "DSCORE-TTC-코드-정적분석"                          "$JENKINSFILE_DIR/DSCORE-TTC 코드 정적분석.jenkinsPipeline" || true
 create_pipeline_job "DSCORE-TTC-정적분석-결과분석-이슈등록"             "$JENKINSFILE_DIR/DSCORE-TTC 코드 정적분석 결과분석 및 이슈등록.jenkinsPipeline" || true
-create_pipeline_job "DSCORE-ZeroTouch-QA-Docker"                        "$JENKINSFILE_DIR/DSCORE-ZeroTouch-QA-Docker.jenkinsPipeline" || true
+create_pipeline_job "DSCORE-TTC-AI평가"                                 "$JENKINSFILE_DIR/DSCORE-TTC AI평가.jenkinsPipeline" || true
 
 log "Job 등록 시도 완료. 다음 수동 단계 안내:"
 log "  1) http://localhost:28081/install 에서 Dify 초기 관리자 생성 + Chatflow import"
