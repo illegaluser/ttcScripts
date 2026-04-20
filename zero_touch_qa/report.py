@@ -59,7 +59,11 @@ def save_scenario(
 
 
 def build_html_report(
-    results: list[StepResult], output_dir: str, version: str = "4.0"
+    results: list[StepResult],
+    output_dir: str,
+    version: str = "4.0",
+    uploaded_file: str | None = None,
+    run_mode: str = "chat",
 ) -> str:
     """Jenkins HTML Publisher 플러그인용 시각적 리포트(index.html)를 생성한다.
 
@@ -67,6 +71,10 @@ def build_html_report(
         results: StepResult 리스트.
         output_dir: 저장 디렉터리.
         version: 리포트에 표시할 버전 문자열.
+        uploaded_file: 사용자가 업로드해 artifacts 에 함께 저장된 원본 파일의
+            basename (예: ``upload.pdf``). ``None`` 이면 "첨부 문서" 섹션 생략.
+        run_mode: 실행 모드 (``chat`` / ``doc`` / ``convert`` / ``execute``).
+            "첨부 문서" 라벨을 모드별로 달리 표시하기 위해 사용.
 
     Returns:
         생성된 ``index.html`` 의 절대 경로.
@@ -78,6 +86,7 @@ def build_html_report(
     pass_rate = round((passed + healed) / total * 100, 1) if total else 0
 
     rows = _build_table_rows(results)
+    upload_section = _build_upload_section(uploaded_file, run_mode, output_dir)
 
     # 최종 상태 스크린샷 섹션 — 새 탭 전환 등으로 마지막 step_N_*.png 가
     # click 직전 페이지만 보여주는 경우 실제 도달 페이지를 별도 표시.
@@ -103,6 +112,7 @@ def build_html_report(
         failed=failed,
         pass_rate=pass_rate,
         rows=rows,
+        upload_section=upload_section,
         final_section=final_section,
     )
 
@@ -111,6 +121,69 @@ def build_html_report(
         f.write(html)
     log.info("[Report] HTML 리포트 생성 완료: %s", path)
     return path
+
+
+def _build_upload_section(
+    uploaded_file: str | None, run_mode: str, output_dir: str
+) -> str:
+    """업로드된 원본 파일을 리포트에서 다운로드 + 미리보기 할 수 있는 HTML 섹션.
+
+    - PDF: ``<object>`` 로 inline preview (브라우저 내장 PDF 뷰어)
+    - 코드/JSON/텍스트: 파일 내용을 읽어 **인라인 ``<pre>`` 로 임베드** — Jenkins
+      HTML Publisher 등 정적 서버가 ``.py`` 를 어떤 Content-Type 으로 serving
+      하든 무관하게 동일하게 보인다. 파일이 200KB 를 넘으면 앞부분만 표시 +
+      전체 다운로드 링크.
+    - 그 외 확장자: 다운로드 링크만.
+    """
+    if not uploaded_file:
+        return ""
+
+    label_map = {
+        "doc": "업로드 기획서 (PDF)",
+        "convert": "업로드 Playwright 녹화 스크립트",
+        "execute": "업로드 시나리오 JSON",
+    }
+    label = html_escape(label_map.get(run_mode, "업로드 파일"))
+    safe_name = html_escape(uploaded_file)
+    ext = uploaded_file.lower().rsplit(".", 1)[-1] if "." in uploaded_file else ""
+
+    preview = ""
+    if ext == "pdf":
+        preview = (
+            f'<object data="{safe_name}#view=FitH" type="application/pdf" '
+            f'class="upload-preview">'
+            f'PDF 미리보기를 지원하지 않는 브라우저입니다 — '
+            f'<a href="{safe_name}">{safe_name}</a> 을(를) 직접 열어보세요.'
+            f'</object>'
+        )
+    elif ext in ("py", "json", "txt", "yaml", "yml", "md"):
+        file_path = os.path.join(output_dir, uploaded_file)
+        content = ""
+        truncated = False
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if len(content) > 200_000:
+                content = content[:200_000]
+                truncated = True
+        except OSError as e:
+            log.warning("[Upload] %s 읽기 실패: %s", uploaded_file, e)
+        if content:
+            preview = f'<pre class="upload-code"><code>{html_escape(content)}</code></pre>'
+            if truncated:
+                preview += (
+                    '<p class="note">(파일이 200KB 를 넘어 앞부분만 표시됩니다. '
+                    '전체 내용은 위 다운로드 링크로 받아보세요.)</p>'
+                )
+
+    return (
+        '<h2 style="margin-top:24px;">첨부 문서</h2>'
+        '<div class="upload-section">'
+        f'<p><strong>{label}:</strong> '
+        f'<a href="{safe_name}" download>{safe_name}</a></p>'
+        f'{preview}'
+        '</div>'
+    )
 
 
 def _build_table_rows(results: list[StepResult]) -> str:
@@ -186,6 +259,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     padding: 12px; }}
     .final-state img {{ max-width: 100%; border: 1px solid #cbd5e1; border-radius: 4px; }}
     .final-state .caption {{ margin-top: 8px; font-size: 13px; color: #475569; }}
+    .upload-section {{ background: #fff; border: 1px solid #dbe2ea; border-radius: 12px;
+                       padding: 12px; }}
+    .upload-section p {{ margin: 0 0 8px; }}
+    .upload-section .note {{ color: #94a3b8; font-size: 12px; margin: 8px 0 0; }}
+    .upload-preview {{ width: 100%; height: 520px; border: 1px solid #cbd5e1;
+                       border-radius: 4px; }}
+    .upload-code {{ background: #0f172a; color: #e2e8f0; padding: 12px 14px;
+                    border-radius: 6px; overflow: auto; max-height: 480px;
+                    font-family: Menlo, Consolas, "Liberation Mono", monospace;
+                    font-size: 12px; line-height: 1.5; margin: 0;
+                    white-space: pre; }}
+    .upload-code code {{ background: transparent; color: inherit; padding: 0; }}
   </style>
 </head>
 <body>
@@ -211,6 +296,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="label">성공률</div><div class="value">{pass_rate}%</div>
     </div>
   </div>
+  {upload_section}
+  <h2 style="margin-top:24px;">스텝별 실행 결과</h2>
   <table>
     <thead>
       <tr>

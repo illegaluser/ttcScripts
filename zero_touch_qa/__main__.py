@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 
 from . import __version__
@@ -76,6 +77,12 @@ def main():
     # 원본 시나리오 저장
     save_scenario(scenario, config.artifacts_dir)
 
+    # 업로드 원본 파일 (기획서 / Playwright 녹화 / scenario.json) 을 artifacts 로
+    # 복사해 HTML 리포트에서 참조 가능하게 한다. 리포트를 공유받은 사람이
+    # "어떤 입력으로 이 결과가 나왔는지" 를 리포트 한 폴더로 전부 추적할 수 있다.
+    upload_source = args.scenario if args.mode == "execute" else args.file
+    uploaded_name = _copy_upload_to_artifacts(upload_source, config.artifacts_dir)
+
     # 실행
     log.info("시나리오 실행 시작 (%d스텝, headed=%s)", len(scenario), headed)
     executor = QAExecutor(config)
@@ -84,7 +91,13 @@ def main():
     # 산출물 생성
     save_run_log(results, config.artifacts_dir)
     save_scenario(scenario, config.artifacts_dir, suffix=".healed")
-    build_html_report(results, config.artifacts_dir, version=__version__)
+    build_html_report(
+        results,
+        config.artifacts_dir,
+        version=__version__,
+        uploaded_file=uploaded_name,
+        run_mode=args.mode,
+    )
     generate_regression_test(scenario, results, config.artifacts_dir)
 
     # 결과 요약
@@ -131,6 +144,36 @@ def _prepare_scenario(
     )
     log.info("[Dify] 시나리오 수신 (%d스텝)", len(scenario))
     return scenario
+
+
+def _copy_upload_to_artifacts(source_path: str | None, artifacts_dir: str) -> str | None:
+    """사용자가 업로드한 원본 파일 (기획서 / Playwright 녹화 / scenario.json) 을
+    artifacts 디렉토리로 복사해 HTML 리포트의 "첨부 문서" 섹션에서 참조 가능하게 한다.
+
+    doc / convert / execute 세 모드 공통 적용. chat 모드는 업로드 없음 → None 반환.
+
+    Args:
+        source_path: Pipeline 이 저장한 업로드 파일 경로. None 이거나 실제 파일이
+            없으면 아무 것도 하지 않고 None 반환.
+        artifacts_dir: 저장 디렉토리. 없으면 생성.
+
+    Returns:
+        artifacts 에 복사된 파일의 basename (예: ``upload.pdf``).
+        원본이 없으면 None.
+    """
+    if not source_path or not os.path.isfile(source_path):
+        return None
+    os.makedirs(artifacts_dir, exist_ok=True)
+    basename = os.path.basename(source_path)
+    dest = os.path.join(artifacts_dir, basename)
+    try:
+        if os.path.abspath(source_path) == os.path.abspath(dest):
+            return basename
+    except OSError:
+        pass
+    shutil.copy2(source_path, dest)
+    log.info("[Upload] 원본 파일 artifacts 에 복사: %s", basename)
+    return basename
 
 
 def _generate_error_report(artifacts_dir: str, error_msg: str):
